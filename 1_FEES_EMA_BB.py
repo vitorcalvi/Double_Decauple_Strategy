@@ -177,49 +177,22 @@ class DOGEScalpingBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        if await self.check_pending_orders() or self.position:
-            return
-        
-        qty = self.config['position_size'] / signal['price']
-        
-        # ETHUSDT on testnet often requires minimum 0.1 ETH
-        if qty < self.config['min_qty']:
-            qty = self.config['min_qty']
-        
-        # Format with proper decimals
-        formatted_qty = f"{qty:.3f}"
-        
-        # Verify quantity is valid
-        if float(formatted_qty) < self.config['min_qty']:
-            print(f"⚠️ Quantity too small: {formatted_qty} < {self.config['min_qty']}")
-            return
-        
-        offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 2)
-        
-        try:
-            print(f"📝 Placing order: {signal['action']} {formatted_qty} ETH @ ${limit_price:.2f}")
+            if await self.check_pending_orders() or self.position:
+                return
             
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
-            )
+            qty = self.config['position_size'] / signal['price']
             
-            if order.get('retCode') == 0:
-                self.trade_id += 1
-                self.last_signal = signal
-                self.pending_order = order['result']
-                print(f"✅ {signal['action']} Order Placed: {formatted_qty} ETH @ ${limit_price:.2f} | BB: {signal['bb_pos']:.2f}")
-                self.log_trade(signal['action'], limit_price, f"BB:{signal['bb_pos']:.2f}")
-            else:
-                print(f"❌ Order failed: {order.get('retMsg', 'Unknown error')}")
-        except Exception as e:
-            print(f"❌ Trade failed: {e}")
+            # ETHUSDT on testnet often requires minimum 0.1 ETH
+            if qty < self.config['min_qty']:
+                qty = self.config['min_qty']
+            
+            # Format with 2 decimals for ETHUSDT (step size is 0.01)
+            formatted_qty = f"{qty:.2f}"
+            
+            # Verify quantity is valid
+            if float(formatted_qty) < self.config['min_qty']:
+                print(f"⚠️ Quantity too small: {formatted_qty} < {self.config['min_qty']}")
+                return
     
     async def close_position(self, reason):
         if not self.position:
