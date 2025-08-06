@@ -1,5 +1,3 @@
-# File 4: Liquidity Sweep Bot - Fixed Version (Removed volume_threshold requirement)
-
 import os
 import asyncio
 import pandas as pd
@@ -13,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class LiquiditySweepBot:
-    """Strategy 3: Smart-Money Liquidity Sweep (70% Win Rate)"""
+    """Strategy 3: Smart-Money Liquidity Sweep - FIXED VERSION"""
     
     def __init__(self):
         self.symbol = 'DOGEUSDT'
@@ -29,24 +27,31 @@ class LiquiditySweepBot:
         self.position = None
         self.price_data = pd.DataFrame()
         self.trade_id = 0
+        self.last_sweep_time = None
+        self.sweep_cooldown = 60  # Minimum seconds between trades
         
-        # Strategy parameters
+        # OPTIMIZED PARAMETERS
         self.config = {
             'timeframe': '5',
-            'liquidity_lookback': 50,
-            'order_block_lookback': 20,
-            'sweep_threshold': 0.15,
-            'retracement_ratio': 0.5,
-            'take_profit_pct': 1.5,
-            'stop_loss_pct': 0.5,
+            'liquidity_lookback': 30,  # Reduced from 50
+            'order_block_lookback': 15,  # Reduced from 20
+            'sweep_threshold': 0.3,  # Increased from 0.15% to reduce false signals
+            'sweep_penetration': 0.05,  # How deep price must go beyond level
+            'retracement_ratio': 0.618,  # Fibonacci retracement
+            'take_profit_pct': 2.0,  # Increased from 1.5%
+            'stop_loss_pct': 0.8,  # Increased from 0.5%
             'position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,
+            'min_distance_pct': 0.4,  # Minimum distance from current price to liquidity
+            'volume_spike_threshold': 1.5,  # Volume must be 1.5x average
+            'confirmation_candles': 2,  # Wait for confirmation after sweep
         }
         
         # Liquidity tracking
-        self.liquidity_pools = {'highs': deque(maxlen=10), 'lows': deque(maxlen=10)}
+        self.liquidity_pools = {'highs': deque(maxlen=5), 'lows': deque(maxlen=5)}
         self.order_blocks = []
+        self.recent_sweeps = deque(maxlen=3)  # Track recent sweeps to avoid repetition
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/liquidity_sweep_trades.log"
@@ -65,135 +70,202 @@ class LiquiditySweepBot:
         return str(int(round(qty))) if qty >= 1.0 else "0"
     
     def identify_liquidity_pools(self, df):
-        """Identify liquidity pools."""
+        """Identify significant liquidity pools with better filtering."""
         if len(df) < self.config['liquidity_lookback']:
             return
         
-        window = 5
-        highs = df['high'].rolling(window=window, center=True).max()
-        lows = df['low'].rolling(window=window, center=True).min()
+        window = 10  # Increased from 5 for better significance
+        current_price = df['close'].iloc[-1]
         
+        # Clear old pools
         self.liquidity_pools['highs'].clear()
         self.liquidity_pools['lows'].clear()
         
-        # Find significant highs and lows
-        for i in range(len(df) - 10, max(0, len(df) - self.config['liquidity_lookback']), -1):
-            # Check significant high
-            if df['high'].iloc[i] == highs.iloc[i]:
-                is_significant = (
-                    all(df['high'].iloc[max(0, i-3):i] < df['high'].iloc[i]) and
-                    all(df['high'].iloc[i+1:min(len(df), i+4)] < df['high'].iloc[i])
-                )
-                if is_significant:
-                    self.liquidity_pools['highs'].append({
-                        'price': df['high'].iloc[i],
-                        'index': i,
-                        'volume': df['volume'].iloc[i]
-                    })
+        # Find significant highs
+        for i in range(len(df) - 5, max(0, len(df) - self.config['liquidity_lookback']), -1):
+            high_price = df['high'].iloc[i]
             
-            # Check significant low
-            if df['low'].iloc[i] == lows.iloc[i]:
-                is_significant = (
-                    all(df['low'].iloc[max(0, i-3):i] > df['low'].iloc[i]) and
-                    all(df['low'].iloc[i+1:min(len(df), i+4)] > df['low'].iloc[i])
+            # Check if it's a significant high
+            is_significant = (
+                all(df['high'].iloc[max(0, i-5):i] <= high_price) and
+                all(df['high'].iloc[i+1:min(len(df), i+6)] <= high_price)
+            )
+            
+            # Check minimum distance from current price
+            distance_pct = abs((high_price - current_price) / current_price * 100)
+            
+            if is_significant and distance_pct > self.config['min_distance_pct']:
+                # Check if not duplicate
+                is_duplicate = any(
+                    abs(pool['price'] - high_price) / high_price < 0.001 
+                    for pool in self.liquidity_pools['highs']
                 )
-                if is_significant:
-                    self.liquidity_pools['lows'].append({
-                        'price': df['low'].iloc[i],
+                
+                if not is_duplicate:
+                    self.liquidity_pools['highs'].append({
+                        'price': high_price,
                         'index': i,
-                        'volume': df['volume'].iloc[i]
+                        'volume': df['volume'].iloc[i],
+                        'strength': sum(df['volume'].iloc[max(0, i-2):min(len(df), i+3)])
+                    })
+        
+        # Find significant lows
+        for i in range(len(df) - 5, max(0, len(df) - self.config['liquidity_lookback']), -1):
+            low_price = df['low'].iloc[i]
+            
+            # Check if it's a significant low
+            is_significant = (
+                all(df['low'].iloc[max(0, i-5):i] >= low_price) and
+                all(df['low'].iloc[i+1:min(len(df), i+6)] >= low_price)
+            )
+            
+            # Check minimum distance from current price
+            distance_pct = abs((current_price - low_price) / low_price * 100)
+            
+            if is_significant and distance_pct > self.config['min_distance_pct']:
+                # Check if not duplicate
+                is_duplicate = any(
+                    abs(pool['price'] - low_price) / low_price < 0.001 
+                    for pool in self.liquidity_pools['lows']
+                )
+                
+                if not is_duplicate:
+                    self.liquidity_pools['lows'].append({
+                        'price': low_price,
+                        'index': i,
+                        'volume': df['volume'].iloc[i],
+                        'strength': sum(df['volume'].iloc[max(0, i-2):min(len(df), i+3)])
                     })
     
     def identify_order_blocks(self, df):
-        """Identify order blocks."""
+        """Identify order blocks with improved logic."""
         if len(df) < self.config['order_block_lookback']:
             return []
         
         blocks = []
         
-        for i in range(len(df) - 3, max(0, len(df) - self.config['order_block_lookback']), -1):
-            # Bullish order block
-            if (df['close'].iloc[i] < df['open'].iloc[i] and
-                df['close'].iloc[i+1] > df['open'].iloc[i+1] and
-                (df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * abs(df['close'].iloc[i] - df['open'].iloc[i])):
+        for i in range(len(df) - 4, max(0, len(df) - self.config['order_block_lookback']), -1):
+            # Bullish order block (down candle followed by strong up move)
+            if (df['close'].iloc[i] < df['open'].iloc[i] and  # Red candle
+                df['close'].iloc[i+1] > df['open'].iloc[i+1] and  # Green candle
+                (df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 1.5 * abs(df['close'].iloc[i] - df['open'].iloc[i])):
                 
                 blocks.append({
                     'type': 'bullish',
                     'high': df['high'].iloc[i],
                     'low': df['low'].iloc[i],
-                    'index': i
+                    'index': i,
+                    'strength': df['volume'].iloc[i]
                 })
             
-            # Bearish order block
-            elif (df['close'].iloc[i] > df['open'].iloc[i] and
-                  df['close'].iloc[i+1] < df['open'].iloc[i+1] and
-                  abs(df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * (df['close'].iloc[i] - df['open'].iloc[i])):
+            # Bearish order block (up candle followed by strong down move)
+            elif (df['close'].iloc[i] > df['open'].iloc[i] and  # Green candle
+                  df['close'].iloc[i+1] < df['open'].iloc[i+1] and  # Red candle
+                  abs(df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 1.5 * (df['close'].iloc[i] - df['open'].iloc[i])):
                 
                 blocks.append({
                     'type': 'bearish',
                     'high': df['high'].iloc[i],
                     'low': df['low'].iloc[i],
-                    'index': i
+                    'index': i,
+                    'strength': df['volume'].iloc[i]
                 })
         
-        self.order_blocks = blocks[-5:] if blocks else []
+        self.order_blocks = blocks[-3:] if blocks else []
     
     def detect_liquidity_sweep(self, df):
-        """Detect liquidity sweep."""
-        if len(df) < 3:
+        """Detect liquidity sweep with confirmation."""
+        if len(df) < 5:
             return None
         
         current_high = df['high'].iloc[-1]
         current_low = df['low'].iloc[-1]
         current_close = df['close'].iloc[-1]
         current_volume = df['volume'].iloc[-1]
+        prev_close = df['close'].iloc[-2]
         avg_volume = df['volume'].iloc[-20:].mean()
         
-        # Check sweep above liquidity - REMOVED volume threshold requirement
-        for pool in self.liquidity_pools['highs']:
-            sweep_level = pool['price'] * (1 + self.config['sweep_threshold'] / 100)
-            
-            if (current_high > sweep_level and 
-                current_close < pool['price']):
-                
-                return {
-                    'type': 'bearish_sweep',
-                    'swept_level': pool['price'],
-                    'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
-                }
+        # Check volume spike
+        if current_volume < avg_volume * self.config['volume_spike_threshold']:
+            return None
         
-        # Check sweep below liquidity - REMOVED volume threshold requirement
-        for pool in self.liquidity_pools['lows']:
-            sweep_level = pool['price'] * (1 - self.config['sweep_threshold'] / 100)
+        # Check sweep above liquidity (bearish sweep)
+        for pool in self.liquidity_pools['highs']:
+            sweep_level = pool['price'] * (1 + self.config['sweep_penetration'] / 100)
             
-            if (current_low < sweep_level and 
-                current_close > pool['price']):
+            # Price must sweep above and close back below
+            if (current_high > sweep_level and 
+                current_close < pool['price'] and
+                prev_close < pool['price']):  # Confirmation
                 
-                return {
-                    'type': 'bullish_sweep',
-                    'swept_level': pool['price'],
-                    'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
-                }
+                # Check if not recently swept
+                is_recent = any(
+                    abs(sweep['level'] - pool['price']) / pool['price'] < 0.002 
+                    for sweep in self.recent_sweeps
+                )
+                
+                if not is_recent:
+                    self.recent_sweeps.append({'level': pool['price'], 'time': datetime.now()})
+                    return {
+                        'type': 'bearish_sweep',
+                        'swept_level': pool['price'],
+                        'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1,
+                        'strength': pool.get('strength', 0)
+                    }
+        
+        # Check sweep below liquidity (bullish sweep)
+        for pool in self.liquidity_pools['lows']:
+            sweep_level = pool['price'] * (1 - self.config['sweep_penetration'] / 100)
+            
+            # Price must sweep below and close back above
+            if (current_low < sweep_level and 
+                current_close > pool['price'] and
+                prev_close > pool['price']):  # Confirmation
+                
+                # Check if not recently swept
+                is_recent = any(
+                    abs(sweep['level'] - pool['price']) / pool['price'] < 0.002 
+                    for sweep in self.recent_sweeps
+                )
+                
+                if not is_recent:
+                    self.recent_sweeps.append({'level': pool['price'], 'time': datetime.now()})
+                    return {
+                        'type': 'bullish_sweep',
+                        'swept_level': pool['price'],
+                        'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1,
+                        'strength': pool.get('strength', 0)
+                    }
         
         return None
     
     def check_order_block_confluence(self, sweep_type, current_price):
-        """Check order block confluence."""
+        """Check order block confluence with improved logic."""
         if not self.order_blocks:
             return False
         
         for block in self.order_blocks:
+            # Match sweep type with order block type
             if ((sweep_type == 'bullish_sweep' and block['type'] == 'bullish') or
                 (sweep_type == 'bearish_sweep' and block['type'] == 'bearish')):
-                if block['low'] <= current_price <= block['high']:
+                
+                # Check if price is within order block zone
+                buffer = 0.001  # 0.1% buffer
+                if (block['low'] * (1 - buffer) <= current_price <= block['high'] * (1 + buffer)):
                     return True
         
         return False
     
     def generate_signal(self, df):
-        """Generate trading signal."""
+        """Generate trading signal with cooldown."""
         if len(df) < self.config['lookback']:
             return None
+        
+        # Check cooldown
+        if self.last_sweep_time:
+            time_diff = (datetime.now() - self.last_sweep_time).total_seconds()
+            if time_diff < self.sweep_cooldown:
+                return None
         
         self.identify_liquidity_pools(df)
         self.identify_order_blocks(df)
@@ -204,6 +276,12 @@ class LiquiditySweepBot:
         
         current_price = df['close'].iloc[-1]
         has_confluence = self.check_order_block_confluence(sweep['type'], current_price)
+        
+        # Require confluence for better win rate
+        if not has_confluence and sweep['volume_ratio'] < 2.0:
+            return None
+        
+        self.last_sweep_time = datetime.now()
         
         if sweep['type'] == 'bullish_sweep':
             return {
@@ -280,19 +358,26 @@ class LiquiditySweepBot:
         pnl_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
         
         if pnl_pct >= self.config['take_profit_pct']:
-            return True, "take_profit_1.5RR"
+            return True, "take_profit_2RR"
         if pnl_pct <= -self.config['stop_loss_pct']:
             return True, "stop_loss"
         
-        # Check for next liquidity pool
+        # Don't close at next liquidity pool too quickly
+        position_age = (datetime.now() - self.last_sweep_time).total_seconds() if self.last_sweep_time else 0
+        if position_age < 30:  # Hold position for at least 30 seconds
+            return False, ""
+        
+        # Check for next liquidity pool (with better distance check)
         if side == "Buy":
             for pool in self.liquidity_pools['highs']:
-                if current_price >= pool['price'] * 0.995:
-                    return True, "next_liquidity_pool"
+                distance_pct = (pool['price'] - current_price) / current_price * 100
+                if 0 < distance_pct < 0.1:  # Very close to resistance
+                    return True, "approaching_resistance"
         else:
             for pool in self.liquidity_pools['lows']:
-                if current_price <= pool['price'] * 1.005:
-                    return True, "next_liquidity_pool"
+                distance_pct = (current_price - pool['price']) / pool['price'] * 100
+                if 0 < distance_pct < 0.1:  # Very close to support
+                    return True, "approaching_support"
         
         return False, ""
     
@@ -323,13 +408,13 @@ class LiquiditySweepBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                confluence_str = "WITH_OB" if signal['confluence'] else "NO_OB"
+                confluence_str = "WITH_OB" if signal['confluence'] else "HIGH_VOL"
                 self.log_trade(signal['action'], limit_price, 
                              f"swept:{signal['swept_level']:.4f}_vol:{signal['volume_ratio']:.1f}_{confluence_str}")
                 
                 print(f"🎯 MAKER {signal['action']}: {formatted_qty} DOGE @ ${limit_price:.4f}")
                 print(f"   Liquidity Swept: ${signal['swept_level']:.4f} | Volume: {signal['volume_ratio']:.1f}x")
-                print(f"   Order Block Confluence: {'✅' if signal['confluence'] else '❌'}")
+                print(f"   Order Block Confluence: {'✅' if signal['confluence'] else '❌ (High Volume Override)'}")
                 
         except Exception as e:
             print(f"Trade failed: {e}")
@@ -393,12 +478,12 @@ class LiquiditySweepBot:
         print(f"💰 Price: ${current_price:.4f}")
         
         if self.liquidity_pools['highs']:
-            top_resistance = max(self.liquidity_pools['highs'], key=lambda x: x['price'])
-            print(f"🔴 Next Resistance: ${top_resistance['price']:.4f}")
+            top_resistance = min(self.liquidity_pools['highs'], key=lambda x: x['price'])
+            print(f"🔴 Next Resistance: ${top_resistance['price']:.4f} ({abs(top_resistance['price'] - current_price) / current_price * 100:.2f}% away)")
         
         if self.liquidity_pools['lows']:
-            bottom_support = min(self.liquidity_pools['lows'], key=lambda x: x['price'])
-            print(f"🟢 Next Support: ${bottom_support['price']:.4f}")
+            bottom_support = max(self.liquidity_pools['lows'], key=lambda x: x['price'])
+            print(f"🟢 Next Support: ${bottom_support['price']:.4f} ({abs(current_price - bottom_support['price']) / bottom_support['price'] * 100:.2f}% away)")
         
         if self.order_blocks:
             bullish = sum(1 for b in self.order_blocks if b['type'] == 'bullish')
@@ -414,7 +499,14 @@ class LiquiditySweepBot:
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} DOGE @ ${entry:.4f} | PnL: ${pnl:.2f}")
         else:
-            print("🔍 Scanning for liquidity sweeps...")
+            if self.last_sweep_time:
+                cooldown_left = max(0, self.sweep_cooldown - (datetime.now() - self.last_sweep_time).total_seconds())
+                if cooldown_left > 0:
+                    print(f"⏳ Cooldown: {int(cooldown_left)}s remaining")
+                else:
+                    print("🔍 Scanning for liquidity sweeps...")
+            else:
+                print("🔍 Scanning for liquidity sweeps...")
         
         print("-" * 60)
     
@@ -440,9 +532,10 @@ class LiquiditySweepBot:
             print("Failed to connect")
             return
         
-        print(f"💎 Strategy 3: Smart-Money Liquidity Sweep Bot")
-        print(f"⏰ Timeframe: 5+ minutes | Win Rate: 70%")
-        print(f"🎯 TP: 1.5 RR ({self.config['take_profit_pct']}%) | SL: {self.config['stop_loss_pct']}%")
+        print(f"💎 Strategy 3: Smart-Money Liquidity Sweep Bot - FIXED")
+        print(f"⏰ Timeframe: 5+ minutes | Target Win Rate: 70%")
+        print(f"🎯 TP: 2.0 RR ({self.config['take_profit_pct']}%) | SL: {self.config['stop_loss_pct']}%")
+        print(f"⏳ Trade Cooldown: {self.sweep_cooldown}s between trades")
         print("💎 Using MAKER-ONLY orders for -0.04% fees")
         
         while True:
