@@ -1,0 +1,7 @@
+{"timestamp": "2025-08-06 14:15:14", "id": 1, "action": "BUY", "price": 0.72, "info": "scalp_oversold_RSI:4.7_MFI:0.0"}
+{"timestamp": "2025-08-06 14:19:31", "id": 1, "action": "CLOSE", "price": 0.72, "info": "scalp_tp PnL:$0.60"}
+{"timestamp": "2025-08-06 14:19:32", "id": 1, "action": "CLOSE", "price": 0.72, "info": "scalp_tp PnL:$0.63"}
+{"timestamp": "2025-08-06 14:19:34", "id": 1, "action": "CLOSE", "price": 0.72, "info": "scalp_tp PnL:$0.63"}
+{"timestamp": "2025-08-06 14:19:36", "id": 1, "action": "CLOSE", "price": 0.72, "info": "scalp_tp PnL:$0.63"}
+{"timestamp": "2025-08-06 14:19:38", "id": 1, "action": "CLOSE", "price": 0.72, "info": "scalp_tp PnL:$0.63"}
+{"timestamp": "2025-08-06 14:19:40", "id": 1, "action": "CLOSE", "price": 0.72, "info": "position_closed"}

@@ -1,7 +1,6 @@
 import os
 import asyncio
 import pandas as pd
-import numpy as np
 import json
 from datetime import datetime
 from pybit.unified_trading import HTTP
@@ -25,7 +24,7 @@ class PivotReversalBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        # Optimized config for positive edge
+        # Optimized config with Fee Calculations
         self.config = {
             'pivot_period': 5,
             'rsi_period': 7,
@@ -35,12 +34,19 @@ class PivotReversalBot:
             'mfi_oversold': 25,
             'mfi_overbought': 75,
             'position_size': 100,
-            'tp_percent': 0.6,      # Looser TP
-            'sl_percent': 0.15,     # Tighter SL
             'pivot_tolerance': 0.002,
             'range_threshold': 0.02,
-            'min_volume_threshold': 50000,  # High volume filter
+            'min_volume_threshold': 50000,
             'entry_threshold': 0.4,  # Min profit threshold
+            'maker_offset_pct': 0.01,
+            # Fee structure
+            'maker_fee_pct': -0.04,  # Negative = rebate
+            # Gross TP/SL
+            'gross_take_profit': 0.6,
+            'gross_stop_loss': 0.15,
+            # Net TP/SL (adjusted for 2x maker rebate)
+            'net_take_profit': 0.68,  # 0.6 + 0.08 rebate
+            'net_stop_loss': 0.07,    # 0.15 - 0.08 rebate
         }
         
         # Pivot tracking
@@ -51,7 +57,6 @@ class PivotReversalBot:
         self.qty_step = '0.01'
         self.min_qty = 0.01
         
-        # Logs
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/pivot_bnb_trades.log"
     
@@ -60,8 +65,7 @@ class PivotReversalBot:
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
-        except Exception as e:
-            print(f"Connection error: {e}")
+        except:
             return False
     
     def format_qty(self, qty):
@@ -74,6 +78,27 @@ class PivotReversalBot:
         rounded_qty = round(qty / qty_step_float) * qty_step_float
         
         return f"{rounded_qty:.{decimals}f}" if decimals > 0 else str(int(rounded_qty))
+    
+    def calculate_break_even(self, entry_price, side):
+        """Calculate break-even price including fees."""
+        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
+        
+        # With rebate, break-even is better than entry
+        if side == "Buy":
+            return entry_price * (1 - fee_impact)
+        else:
+            return entry_price * (1 + fee_impact)
+    
+    def calculate_net_targets(self, entry_price, side):
+        """Calculate net TP/SL accounting for round-trip fees."""
+        if side == "Buy":
+            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
+            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
+        else:
+            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
+            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
+        
+        return net_tp, net_sl
     
     def calculate_indicators(self, df):
         """Calculate RSI and MFI indicators."""
@@ -152,13 +177,13 @@ class PivotReversalBot:
         self.support_levels = sorted(self.support_levels)[-10:]
     
     def find_next_pivot_target(self, current_price, direction):
-        """Find next pivot level for TP."""
+        """Find next pivot level for dynamic TP."""
         if direction == 'BUY':
             targets = [r for r in self.resistance_levels if r > current_price]
-            return min(targets) if targets else current_price * (1 + self.config['tp_percent']/100)
+            return min(targets) if targets else current_price * (1 + self.config['net_take_profit']/100)
         else:
             targets = [s for s in self.support_levels if s < current_price]
-            return max(targets) if targets else current_price * (1 - self.config['tp_percent']/100)
+            return max(targets) if targets else current_price * (1 - self.config['net_take_profit']/100)
     
     def is_near_level(self, price, levels):
         """Check if price is near any level."""
@@ -187,12 +212,12 @@ class PivotReversalBot:
         
         # BUY Signal
         if mfi <= self.config['mfi_oversold'] or (rsi <= self.config['rsi_oversold'] and rsi > rsi_prev):
+            # Calculate expected NET profit
             target = self.find_next_pivot_target(current_price, 'BUY')
-            target = min(target, current_price * (1 + self.config['tp_percent']/100))
-            
-            # Entry threshold check
             expected_profit = ((target - current_price) / current_price) * 100
-            if expected_profit < self.config['entry_threshold']:
+            
+            # Include fee benefit in entry threshold check
+            if expected_profit < (self.config['entry_threshold'] - 0.08):  # Adjust for rebate
                 return None
             
             return {
@@ -207,12 +232,12 @@ class PivotReversalBot:
         
         # SELL Signal
         if mfi >= self.config['mfi_overbought'] or (rsi >= self.config['rsi_overbought'] and rsi < rsi_prev):
+            # Calculate expected NET profit
             target = self.find_next_pivot_target(current_price, 'SELL')
-            target = max(target, current_price * (1 - self.config['tp_percent']/100))
-            
-            # Entry threshold check
             expected_profit = ((current_price - target) / current_price) * 100
-            if expected_profit < self.config['entry_threshold']:
+            
+            # Include fee benefit in entry threshold check
+            if expected_profit < (self.config['entry_threshold'] - 0.08):  # Adjust for rebate
                 return None
             
             return {
@@ -250,32 +275,27 @@ class PivotReversalBot:
             
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
-            
-        except Exception as e:
-            print(f"Data error: {e}")
+        except:
             return False
     
     async def check_position(self):
         """Check current position."""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') != 0:
-                return
-            
-            pos_list = positions['result']['list']
-            
-            if not pos_list or float(pos_list[0]['size']) == 0:
-                if self.position:
-                    self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), "position_closed")
-                self.position = None
-            else:
-                self.position = pos_list[0]
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
                 
-        except Exception as e:
-            print(f"Position check error: {e}")
+                if not pos_list or float(pos_list[0]['size']) == 0:
+                    if self.position:
+                        self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), "position_closed")
+                    self.position = None
+                else:
+                    self.position = pos_list[0]
+        except:
+            pass
     
     def should_close_position(self, signal=None):
-        """Check if position should be closed."""
+        """Check if position should be closed with NET targets."""
         if not self.position:
             return False, ""
         
@@ -286,17 +306,20 @@ class PivotReversalBot:
         if entry_price == 0:
             return False, ""
         
-        # Calculate PnL %
-        pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        if side == "Sell":
-            pnl_pct = -pnl_pct
+        # Calculate NET targets
+        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
         
-        # Check TP/SL
-        if pnl_pct >= self.config['tp_percent']:
-            return True, "scalp_tp"
-        
-        if pnl_pct <= -self.config['sl_percent']:
-            return True, "scalp_sl"
+        # Check against NET targets
+        if side == "Buy":
+            if current_price >= net_tp:
+                return True, f"scalp_tp_net_{self.config['net_take_profit']}%"
+            if current_price <= net_sl:
+                return True, f"scalp_sl_net_{self.config['net_stop_loss']}%"
+        else:
+            if current_price <= net_tp:
+                return True, f"scalp_tp_net_{self.config['net_take_profit']}%"
+            if current_price >= net_sl:
+                return True, f"scalp_sl_net_{self.config['net_stop_loss']}%"
         
         # Exit on opposite signal
         if signal and ((side == "Buy" and signal['action'] == 'SELL') or 
@@ -314,6 +337,9 @@ class PivotReversalBot:
         if formatted_qty == "0":
             return
         
+        # Calculate limit price with offset
+        limit_price = round(current_price * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 2)
+        
         try:
             order = self.exchange.place_order(
                 category="linear",
@@ -321,29 +347,39 @@ class PivotReversalBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(current_price),
+                price=str(limit_price),
                 timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                info = f"{signal['reason']}_RSI:{signal['rsi']:.1f}_MFI:{signal['mfi']:.1f}"
-                self.log_trade(signal['action'], current_price, info)
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${current_price:.2f}")
-                print(f"   📊 RSI:{signal['rsi']:.1f} MFI:{signal['mfi']:.1f} | Target:${signal['target']:.2f}")
                 
+                # Calculate and log break-even
+                break_even = self.calculate_break_even(limit_price, signal['action'])
+                net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
+                
+                info = f"{signal['reason']}_RSI:{signal['rsi']:.1f}_MFI:{signal['mfi']:.1f}_BE:{break_even:.2f}_NetTP:{net_tp:.2f}"
+                self.log_trade(signal['action'], limit_price, info)
+                
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
+                print(f"   📊 Break-Even: ${break_even:.2f} | Net TP: ${net_tp:.2f} | Net SL: ${net_sl:.2f}")
+                print(f"   📈 RSI:{signal['rsi']:.1f} MFI:{signal['mfi']:.1f} | Target:${signal['target']:.2f}")
+                print(f"   💎 Confidence: {signal['confidence']:.1f}x")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order."""
+        """Close position with maker order and NET PnL."""
         if not self.position:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
-        pnl = float(self.position.get('unrealisedPnl', 0))
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
+        entry_price = float(self.position.get('avgPrice', 0))
+        
+        # Calculate limit price with offset
+        limit_price = round(current_price * (1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100), 2)
         
         try:
             order = self.exchange.place_order(
@@ -352,33 +388,34 @@ class PivotReversalBot:
                 side=side,
                 orderType="Limit",
                 qty=self.format_qty(qty),
-                price=str(current_price),
+                price=str(limit_price),
                 timeInForce="PostOnly",
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                self.log_trade("CLOSE", current_price, f"{reason} PnL:${pnl:.2f}")
-                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
+                # Calculate NET PnL including fees
+                gross_pnl = float(self.position.get('unrealisedPnl', 0))
+                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
+                net_pnl = gross_pnl + fee_earned
                 
+                self.log_trade("CLOSE", limit_price, f"{reason}_GrossPnL:${gross_pnl:.2f}_NetPnL:${net_pnl:.2f}")
+                print(f"✅ Closed: {reason}")
+                print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
+                print(f"   📊 Fee Rebate Earned: ${fee_earned:.2f}")
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
     def log_trade(self, action, price, info):
         """Log trade."""
-        log_data = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'id': self.trade_id,
-            'action': action,
-            'price': round(price, 2),
-            'info': info
-        }
-        
-        try:
-            with open(self.log_file, "a") as f:
-                f.write(json.dumps(log_data) + "\n")
-        except:
-            pass
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps({
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'id': self.trade_id,
+                'action': action,
+                'price': round(price, 2),
+                'info': info
+            }) + "\n")
     
     def show_status(self):
         """Show current status."""
@@ -408,13 +445,23 @@ class PivotReversalBot:
                 print(f"🔴 Near Resistance: ${near_resistance:.2f}")
         
         if self.position:
-            pnl = float(self.position.get('unrealisedPnl', 0))
-            entry = float(self.position.get('avgPrice', 0))
+            entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = self.position.get('size', '0')
             
+            # Calculate current NET PnL
+            gross_pnl = float(self.position.get('unrealisedPnl', 0))
+            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
+            net_pnl = gross_pnl + fee_earned
+            
+            # Calculate break-even and targets
+            break_even = self.calculate_break_even(entry_price, side)
+            net_tp, net_sl = self.calculate_net_targets(entry_price, side)
+            
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} @ ${entry:.2f} | PnL: ${pnl:.2f}")
+            print(f"{emoji} {side}: {size} @ ${entry_price:.2f}")
+            print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
+            print(f"   🎯 BE: ${break_even:.2f} | TP: ${net_tp:.2f} | SL: ${net_sl:.2f}")
         else:
             print("⚡ Scanning for scalping signals...")
         
@@ -453,20 +500,20 @@ class PivotReversalBot:
             return
         
         print(f"✅ Connected! Starting Scalping bot for {self.symbol}")
-        print(f"📊 Strategy: Maker orders | TP:{self.config['tp_percent']}% SL:{self.config['sl_percent']}%")
+        print(f"📊 Strategy: Pivot Reversal with RSI + MFI")
+        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
+        print(f"💎 Using MAKER-ONLY orders for {self.config['maker_fee_pct']}% fee rebate")
         print(f"📈 Entry threshold: {self.config['entry_threshold']}% | Min volume: {self.config['min_volume_threshold']}")
         
         while True:
             try:
                 await self.run_cycle()
                 await asyncio.sleep(1)
-                
             except KeyboardInterrupt:
                 print("\n🛑 Bot stopped")
                 if self.position:
                     await self.close_position("manual_stop")
                 break
-                
             except Exception as e:
                 print(f"❌ Error: {e}")
                 await asyncio.sleep(5)
