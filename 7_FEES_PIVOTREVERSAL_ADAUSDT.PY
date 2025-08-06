@@ -8,100 +8,72 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class PivotReversalBot:
+class MACDVWAPBot:
     def __init__(self):
-        self.symbol = 'ADAUSDT'
+        self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API connection
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
-        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        # Optimized config with Fee Calculations
         self.config = {
-            'pivot_period': 5,
-            'rsi_period': 7,
-            'mfi_period': 7,
+            'macd_fast': 8,
+            'macd_slow': 21,
+            'macd_signal': 5,
+            'rsi_period': 9,
+            'ema_period': 13,
             'rsi_oversold': 35,
             'rsi_overbought': 65,
-            'mfi_oversold': 25,
-            'mfi_overbought': 75,
             'position_size': 100,
-            'pivot_tolerance': 0.002,
-            'range_threshold': 0.02,
-            'min_volume_threshold': 50000,
-            'entry_threshold': 0.4,  # Min profit threshold
             'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,  # Negative = rebate
-            'gross_take_profit': 0.6,
-            'gross_stop_loss': 0.15,
-            'net_take_profit': 0.68,  # 0.6 + 0.08 rebate
-            'net_stop_loss': 0.07,    # 0.15 - 0.08 rebate
+            'net_take_profit': 0.43,
+            'net_stop_loss': 0.17,
         }
         
-        # Pivot tracking
-        self.support_levels = []
-        self.resistance_levels = []
-        
-        # ADA rules
-        self.qty_step = '0.01'
-        self.min_qty = 0.01
-        
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/pivot_ada_trades.log"
+        self.log_file = "logs/macd_vwap_trades.log"
     
     def connect(self):
-        """Connect to exchange."""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except:
             return False
     
-    def format_qty(self, qty):
-        """Format quantity for exchange."""
-        if qty < self.min_qty:
-            return "0"
+    def calculate_vwap(self, df):
+        if len(df) < 20:
+            return None
         
-        decimals = len(self.qty_step.split('.')[1]) if '.' in self.qty_step else 0
-        qty_step_float = float(self.qty_step)
-        rounded_qty = round(qty / qty_step_float) * qty_step_float
+        recent_data = df.tail(min(1440, len(df)))
+        typical_price = (recent_data['high'] + recent_data['low'] + recent_data['close']) / 3
+        volume = recent_data['volume']
         
-        return f"{rounded_qty:.{decimals}f}" if decimals > 0 else str(int(rounded_qty))
-    
-    def calculate_break_even(self, entry_price, side):
-        """Calculate break-even price including fees."""
-        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        multiplier = 1 - fee_impact if side == "Buy" else 1 + fee_impact
-        return entry_price * multiplier
-    
-    def calculate_net_targets(self, entry_price, side):
-        """Calculate net TP/SL accounting for round-trip fees."""
-        if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-        else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        return net_tp, net_sl
+        vwap = (typical_price * volume).cumsum() / volume.cumsum()
+        return vwap.iloc[-1] if not vwap.empty else None
     
     def calculate_indicators(self, df):
-        """Calculate RSI and MFI indicators."""
-        min_len = max(self.config['rsi_period'], self.config['mfi_period']) + 1
-        if len(df) < min_len:
+        if len(df) < 50:
             return None
         
         close = df['close']
-        high = df['high']
-        low = df['low']
-        volume = df['volume']
+        
+        # MACD
+        ema_fast = close.ewm(span=self.config['macd_fast']).mean()
+        ema_slow = close.ewm(span=self.config['macd_slow']).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
+        histogram = macd_line - signal_line
+        
+        # VWAP
+        vwap = self.calculate_vwap(df)
+        if not vwap:
+            return None
         
         # RSI
         delta = close.diff()
@@ -110,142 +82,57 @@ class PivotReversalBot:
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # MFI
-        typical_price = (high + low + close) / 3
-        money_flow = typical_price * volume
-        
-        positive_mf = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
-        negative_mf = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
-        
-        mfi = 100 - (100 / (1 + positive_mf / negative_mf))
+        # EMA
+        ema = close.ewm(span=self.config['ema_period']).mean()
         
         return {
-            'rsi': rsi.iloc[-1] if not rsi.empty else 50,
-            'mfi': mfi.iloc[-1] if not mfi.empty else 50,
-            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else 50,
-            'mfi_prev': mfi.iloc[-2] if len(mfi) > 1 else 50
+            'histogram': histogram.iloc[-1],
+            'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else histogram.iloc[-1],
+            'vwap': vwap,
+            'rsi': rsi.iloc[-1],
+            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else rsi.iloc[-1],
+            'ema': ema.iloc[-1],
+            'price': close.iloc[-1]
         }
     
-    def detect_pivots(self, df):
-        """Detect pivot points."""
-        min_len = self.config['pivot_period'] * 2 + 1
-        if len(df) < min_len:
-            return [], []
-        
-        period = self.config['pivot_period']
-        pivots_high = []
-        pivots_low = []
-        
-        for i in range(period, len(df) - period):
-            high_val = df['high'].iloc[i]
-            low_val = df['low'].iloc[i]
-            
-            # Check pivot high
-            if all(df['high'].iloc[j] < high_val for j in range(i - period, i + period + 1) if j != i):
-                pivots_high.append((high_val, i))
-            
-            # Check pivot low
-            if all(df['low'].iloc[j] > low_val for j in range(i - period, i + period + 1) if j != i):
-                pivots_low.append((low_val, i))
-        
-        return pivots_high, pivots_low
-    
-    def update_pivot_levels(self, pivot_highs, pivot_lows):
-        """Update support and resistance levels."""
-        tolerance = 0.003
-        
-        # Add new resistance levels
-        for high, _ in pivot_highs:
-            if not any(abs(high - level) < high * tolerance for level in self.resistance_levels):
-                self.resistance_levels.append(high)
-        
-        # Add new support levels
-        for low, _ in pivot_lows:
-            if not any(abs(low - level) < low * tolerance for level in self.support_levels):
-                self.support_levels.append(low)
-        
-        # Keep only recent levels
-        self.resistance_levels = sorted(self.resistance_levels)[-10:]
-        self.support_levels = sorted(self.support_levels)[-10:]
-    
-    def find_next_pivot_target(self, current_price, direction):
-        """Find next pivot level for dynamic TP."""
-        if direction == 'BUY':
-            targets = [r for r in self.resistance_levels if r > current_price]
-            return min(targets) if targets else current_price * (1 + self.config['net_take_profit']/100)
-        else:
-            targets = [s for s in self.support_levels if s < current_price]
-            return max(targets) if targets else current_price * (1 - self.config['net_take_profit']/100)
-    
-    def is_near_level(self, price, levels):
-        """Check if price is near any level."""
-        tolerance = self.config['pivot_tolerance']
-        return any(abs(price - level) / level <= tolerance for level in levels)
-    
-    def generate_pivot_signal(self, df):
-        """Generate signals based on pivot reversal strategy."""
-        if len(df) < 30:
-            return None
-        
-        current_price = float(df['close'].iloc[-1])
-        current_volume = float(df['volume'].iloc[-1])
-        
-        # Volume filter
-        if current_volume < self.config['min_volume_threshold']:
-            return None
-        
+    def generate_signal(self, df):
         indicators = self.calculate_indicators(df)
         if not indicators:
             return None
         
-        rsi = indicators['rsi']
-        mfi = indicators['mfi']
-        rsi_prev = indicators['rsi_prev']
+        # Detect signals
+        hist_bullish = indicators['histogram_prev'] <= 0 and indicators['histogram'] > 0
+        hist_bearish = indicators['histogram_prev'] >= 0 and indicators['histogram'] < 0
         
-        # BUY Signal
-        if mfi <= self.config['mfi_oversold'] or (rsi <= self.config['rsi_oversold'] and rsi > rsi_prev):
-            # Calculate expected NET profit
-            target = self.find_next_pivot_target(current_price, 'BUY')
-            expected_profit = ((target - current_price) / current_price) * 100
-            
-            # Include fee benefit in entry threshold check
-            if expected_profit < (self.config['entry_threshold'] - 0.08):
-                return None
-            
+        rsi_bullish = indicators['rsi_prev'] <= self.config['rsi_oversold'] and indicators['rsi'] > self.config['rsi_oversold']
+        rsi_bearish = indicators['rsi_prev'] >= self.config['rsi_overbought'] and indicators['rsi'] < self.config['rsi_overbought']
+        
+        vwap_bullish = indicators['price'] > indicators['vwap'] and indicators['ema'] > indicators['vwap']
+        vwap_bearish = indicators['price'] < indicators['vwap'] and indicators['ema'] < indicators['vwap']
+        
+        # Bullish signal: All three align
+        if hist_bullish and rsi_bullish and vwap_bullish:
             return {
                 'action': 'BUY',
-                'price': current_price,
-                'reason': 'scalp_oversold',
-                'rsi': rsi,
-                'mfi': mfi,
-                'target': target,
-                'confidence': 1.2 if self.is_near_level(current_price, self.support_levels) else 1.0
+                'price': indicators['price'],
+                'macd_hist': indicators['histogram'],
+                'rsi': indicators['rsi'],
+                'vwap': indicators['vwap']
             }
         
-        # SELL Signal
-        if mfi >= self.config['mfi_overbought'] or (rsi >= self.config['rsi_overbought'] and rsi < rsi_prev):
-            # Calculate expected NET profit
-            target = self.find_next_pivot_target(current_price, 'SELL')
-            expected_profit = ((current_price - target) / current_price) * 100
-            
-            # Include fee benefit in entry threshold check
-            if expected_profit < (self.config['entry_threshold'] - 0.08):
-                return None
-            
+        # Bearish signal: All three align
+        if hist_bearish and rsi_bearish and vwap_bearish:
             return {
                 'action': 'SELL',
-                'price': current_price,
-                'reason': 'scalp_overbought',
-                'rsi': rsi,
-                'mfi': mfi,
-                'target': target,
-                'confidence': 1.2 if self.is_near_level(current_price, self.resistance_levels) else 1.0
+                'price': indicators['price'],
+                'macd_hist': indicators['histogram'],
+                'rsi': indicators['rsi'],
+                'vwap': indicators['vwap']
             }
         
         return None
     
     async def get_market_data(self):
-        """Get market data."""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -271,23 +158,15 @@ class PivotReversalBot:
             return False
     
     async def check_position(self):
-        """Check current position."""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
-                
-                if not pos_list or float(pos_list[0]['size']) == 0:
-                    if self.position:
-                        self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), "position_closed")
-                        self.position = None
-                else:
-                    self.position = pos_list[0]
+                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except:
             pass
     
-    def should_close_position(self, signal=None):
-        """Check if position should be closed with NET targets."""
+    def should_close(self):
         if not self.position:
             return False, ""
         
@@ -298,40 +177,28 @@ class PivotReversalBot:
         if entry_price == 0:
             return False, ""
         
-        # Calculate NET targets
-        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-        
-        # Check against NET targets
         if side == "Buy":
-            if current_price >= net_tp:
-                return True, f"scalp_tp_net_{self.config['net_take_profit']}%"
-            if current_price <= net_sl:
-                return True, f"scalp_sl_net_{self.config['net_stop_loss']}%"
+            if current_price >= entry_price * (1 + self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price <= entry_price * (1 - self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
         else:
-            if current_price <= net_tp:
-                return True, f"scalp_tp_net_{self.config['net_take_profit']}%"
-            if current_price >= net_sl:
-                return True, f"scalp_sl_net_{self.config['net_stop_loss']}%"
-        
-        # Exit on opposite signal
-        if signal and ((side == "Buy" and signal['action'] == 'SELL') or 
-                      (side == "Sell" and signal['action'] == 'BUY')):
-            return True, "signal_reversal"
+            if current_price <= entry_price * (1 - self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        """Execute trade with maker orders."""
-        current_price = signal['price']
-        qty = self.config['position_size'] / current_price
-        formatted_qty = self.format_qty(qty)
+        qty = self.config['position_size'] / signal['price']
+        formatted_qty = str(int(round(qty))) if qty >= 1 else "0"
         
         if formatted_qty == "0":
             return
         
-        # Calculate limit price with offset
-        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(current_price * offset_mult, 2)
+        # LIMIT order for entry
+        limit_price = round(signal['price'] * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 4)
         
         try:
             order = self.exchange.place_order(
@@ -346,162 +213,67 @@ class PivotReversalBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                
-                # Calculate and log break-even
-                break_even = self.calculate_break_even(limit_price, signal['action'])
-                net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
-                
-                info = f"{signal['reason']}_RSI:{signal['rsi']:.1f}_MFI:{signal['mfi']:.1f}_BE:{break_even:.2f}_NetTP:{net_tp:.2f}"
-                self.log_trade(signal['action'], limit_price, info)
-                
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
-                print(f"   📊 Break-Even: ${break_even:.2f} | Net TP: ${net_tp:.2f} | Net SL: ${net_sl:.2f}")
-                print(f"   📈 RSI:{signal['rsi']:.1f} MFI:{signal['mfi']:.1f} | Target:${signal['target']:.2f}")
-                print(f"   💎 Confidence: {signal['confidence']:.1f}x")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
+                print(f"   📈 MACD Hist:{signal['macd_hist']:.6f} | RSI:{signal['rsi']:.1f} | VWAP:${signal['vwap']:.4f}")
+                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order - FIXED VERSION."""
         if not self.position:
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        entry_price = float(self.position.get('avgPrice', 0))
         
-        # Calculate limit price with offset
-        offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
-        limit_price = round(current_price * offset_mult, 2)
-        
+        # MARKET order for exit
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
+                orderType="Market",
+                qty=str(int(round(qty))),
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                # Calculate NET PnL including fees
-                gross_pnl = float(self.position.get('unrealisedPnl', 0))
-                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
-                net_pnl = gross_pnl + fee_earned
-                
-                self.log_trade("CLOSE", limit_price, f"{reason}_GrossPnL:${gross_pnl:.2f}_NetPnL:${net_pnl:.2f}")
-                print(f"✅ Closed: {reason}")
-                print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-                print(f"   📊 Fee Rebate Earned: ${fee_earned:.2f}")
-                
-                # CRITICAL FIX: Clear position after successful close
-                self.position = None
-                
+                pnl = float(self.position.get('unrealisedPnl', 0))
+                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
+                self.log_trade("CLOSE", 0, f"{reason}_PnL:${pnl:.2f}")
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
     def log_trade(self, action, price, info):
-        """Log trade."""
         with open(self.log_file, "a") as f:
             f.write(json.dumps({
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'id': self.trade_id,
                 'action': action,
-                'price': round(price, 2),
+                'price': round(price, 6),
                 'info': info
             }) + "\n")
     
-    def show_status(self):
-        """Show current status."""
-        if len(self.price_data) == 0:
-            return
-        
-        price = float(self.price_data['close'].iloc[-1])
-        indicators = self.calculate_indicators(self.price_data)
-        
-        print(f"\n⚡ SCALPING BOT - {self.symbol}")
-        print(f"💰 Price: ${price:,.2f}")
-        
-        if indicators:
-            print(f"📊 RSI: {indicators['rsi']:.1f} | MFI: {indicators['mfi']:.1f}")
-        
-        # Show nearest levels
-        if self.support_levels:
-            near_support = min((s for s in self.support_levels if abs(price - s) / price <= 0.01), 
-                             default=None)
-            if near_support:
-                print(f"🟢 Near Support: ${near_support:.2f}")
-        
-        if self.resistance_levels:
-            near_resistance = min((r for r in self.resistance_levels if abs(price - r) / price <= 0.01), 
-                                default=None)
-            if near_resistance:
-                print(f"🔴 Near Resistance: ${near_resistance:.2f}")
-        
-        if self.position:
-            entry_price = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            size = self.position.get('size', '0')
-            
-            # Calculate current NET PnL
-            gross_pnl = float(self.position.get('unrealisedPnl', 0))
-            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
-            net_pnl = gross_pnl + fee_earned
-            
-            # Calculate break-even and targets
-            break_even = self.calculate_break_even(entry_price, side)
-            net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-            
-            emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} @ ${entry_price:.2f}")
-            print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-            print(f"   🎯 BE: ${break_even:.2f} | TP: ${net_tp:.2f} | SL: ${net_sl:.2f}")
-        else:
-            print("⚡ Scanning for scalping signals...")
-        
-        print("-" * 50)
-    
     async def run_cycle(self):
-        """Main trading cycle."""
-        # Get market data
         if not await self.get_market_data():
             return
         
-        # Detect and update pivot levels
-        pivot_highs, pivot_lows = self.detect_pivots(self.price_data)
-        self.update_pivot_levels(pivot_highs, pivot_lows)
-        
-        # Check position
         await self.check_position()
         
-        # Generate signal
-        signal = self.generate_pivot_signal(self.price_data)
-        
-        # Position management
         if self.position:
-            should_close, reason = self.should_close_position(signal)
+            should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal:
+        elif signal := self.generate_signal(self.price_data):
             await self.execute_trade(signal)
-        
-        self.show_status()
     
     async def run(self):
-        """Main bot loop."""
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"✅ Connected! Starting Scalping bot for {self.symbol}")
-        print(f"📊 Strategy: Pivot Reversal with RSI + MFI")
-        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
-        print(f"💎 Using MAKER-ONLY orders for {self.config['maker_fee_pct']}% fee rebate")
-        print(f"📈 Entry threshold: {self.config['entry_threshold']}% | Min volume: {self.config['min_volume_threshold']}")
+        print(f"✅ Starting MACD + VWAP bot for {self.symbol}")
+        print("📊 Strategy: MACD histogram flip + RSI cross + VWAP alignment")
+        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
         
         while True:
             try:
@@ -517,5 +289,5 @@ class PivotReversalBot:
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = PivotReversalBot()
+    bot = MACDVWAPBot()
     asyncio.run(bot.run())

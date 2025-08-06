@@ -2,251 +2,197 @@ import os
 import asyncio
 import pandas as pd
 import json
-from datetime import datetime, timezone
+from datetime import datetime
+from collections import deque
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class ZigZagTradingBot:
+class LiquiditySweepBot:
     def __init__(self):
-        self.symbol = 'XRPUSDT'
+        self.symbol = 'DOGEUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API connection
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
-        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
         self.trade_id = 0
-        self.consecutive_losses = 0
-        self.daily_trades = 0
-        self.daily_profit = 0
-        self.last_trade_bar = 0
-        self.last_reset_date = None
         
-        # ZIG-ZAG CONFIG with Fee Calculations
         self.config = {
-            'timeframe': '3',
+            'timeframe': '5',
+            'liquidity_lookback': 50,
+            'order_block_lookback': 20,
+            'sweep_threshold': 0.15,
+            'position_size': 100,
             'lookback': 100,
-            'zigzag_pct': 0.5,
-            'min_swing_bars': 3,
-            'risk_per_trade': 0.05,
-            'max_position_pct': 0.30,
-            'cooldown_bars': 3,
-            'max_daily_trades': 30,
-            'max_consecutive_losses': 5,
-            'daily_profit_target': 0.02,
-            'daily_loss_limit': -0.01,
             'maker_offset_pct': 0.01,
-            # Fee structure
-            'maker_fee_pct': -0.04,  # Negative = rebate
-            # Gross TP/SL
-            'gross_take_profit': 1.0,
-            'gross_stop_loss': 0.5,
-            # Net TP/SL (adjusted for 2x maker rebate)
-            'net_take_profit': 1.08,  # 1.0 + 0.08 rebate
-            'net_stop_loss': 0.42,    # 0.5 - 0.08 rebate
-            # Trailing stop
-            'trailing_activation': 0.4,  # Activate at 0.4% profit
-            'trailing_distance': 0.32,   # Trail at 0.32% (0.4 - 0.08 rebate)
+            'net_take_profit': 1.58,
+            'net_stop_loss': 0.42,
         }
         
-        # Symbol rules
-        self.qty_step = 0.1
-        self.min_qty = 0.1
-        
-        # Capital management
-        self.initial_capital = 1000
-        self.current_capital = 1000
-        
-        # Performance tracking
-        self.trades_history = []
-        self.position_metadata = {}
+        self.liquidity_pools = {'highs': deque(maxlen=10), 'lows': deque(maxlen=10)}
+        self.order_blocks = []
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/zigzag_{datetime.now().strftime('%Y%m%d')}.log"
+        self.log_file = "logs/liquidity_sweep_trades.log"
     
     def connect(self):
-        """Connect to exchange."""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except:
             return False
     
-    def calculate_break_even(self, entry_price, side):
-        """Calculate break-even price including fees."""
-        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
+    def identify_liquidity_pools(self, df):
+        if len(df) < self.config['liquidity_lookback']:
+            return
         
-        # With rebate, break-even is better than entry
-        if side == "Buy":
-            return entry_price * (1 - fee_impact)
-        else:
-            return entry_price * (1 + fee_impact)
-    
-    def calculate_net_targets(self, entry_price, side):
-        """Calculate net TP/SL accounting for round-trip fees."""
-        if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-        else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
+        window = 5
+        highs = df['high'].rolling(window=window, center=True).max()
+        lows = df['low'].rolling(window=window, center=True).min()
         
-        return net_tp, net_sl
-    
-    def calculate_position_size(self, price):
-        """Calculate position size with risk management."""
-        risk_amount = self.current_capital * self.config['risk_per_trade']
-        max_position = self.current_capital * self.config['max_position_pct']
+        self.liquidity_pools['highs'].clear()
+        self.liquidity_pools['lows'].clear()
         
-        # Account for NET stop loss (tighter due to rebate)
-        effective_stop = self.config['net_stop_loss']
-        position_value = min(risk_amount / (effective_stop / 100), max_position)
-        
-        qty = position_value / price
-        return self.format_qty(qty)
+        for i in range(len(df) - 10, max(0, len(df) - self.config['liquidity_lookback']), -1):
+            # Check significant high
+            if df['high'].iloc[i] == highs.iloc[i]:
+                is_significant = (
+                    all(df['high'].iloc[max(0, i-3):i] < df['high'].iloc[i]) and
+                    all(df['high'].iloc[i+1:min(len(df), i+4)] < df['high'].iloc[i])
+                )
+                if is_significant:
+                    self.liquidity_pools['highs'].append({
+                        'price': df['high'].iloc[i],
+                        'index': i,
+                        'volume': df['volume'].iloc[i]
+                    })
+            
+            # Check significant low
+            if df['low'].iloc[i] == lows.iloc[i]:
+                is_significant = (
+                    all(df['low'].iloc[max(0, i-3):i] > df['low'].iloc[i]) and
+                    all(df['low'].iloc[i+1:min(len(df), i+4)] > df['low'].iloc[i])
+                )
+                if is_significant:
+                    self.liquidity_pools['lows'].append({
+                        'price': df['low'].iloc[i],
+                        'index': i,
+                        'volume': df['volume'].iloc[i]
+                    })
     
-    def format_qty(self, qty):
-        """Format quantity."""
-        if qty < self.min_qty:
-            return str(self.min_qty)
-        return f"{round(qty / self.qty_step) * self.qty_step:.1f}"
-    
-    def identify_swings(self):
-        """Identify zig-zag swings."""
-        if len(self.price_data) < 10:
+    def identify_order_blocks(self, df):
+        if len(df) < self.config['order_block_lookback']:
             return []
         
-        df = self.price_data
-        swings = []
+        blocks = []
         
-        # Find local highs and lows
-        for i in range(2, len(df) - 2):
-            # Check for swing high
-            is_high = (
-                df['high'].iloc[i] > df['high'].iloc[i-1] and 
-                df['high'].iloc[i] > df['high'].iloc[i-2] and
-                df['high'].iloc[i] > df['high'].iloc[i+1] and 
-                df['high'].iloc[i] > df['high'].iloc[i+2]
-            )
-            
-            # Check for swing low
-            is_low = (
-                df['low'].iloc[i] < df['low'].iloc[i-1] and 
-                df['low'].iloc[i] < df['low'].iloc[i-2] and
-                df['low'].iloc[i] < df['low'].iloc[i+1] and 
-                df['low'].iloc[i] < df['low'].iloc[i+2]
-            )
-            
-            if is_high:
-                swings.append({
-                    'index': i,
-                    'type': 'HIGH',
-                    'price': df['high'].iloc[i],
-                    'time': df['timestamp'].iloc[i]
+        for i in range(len(df) - 3, max(0, len(df) - self.config['order_block_lookback']), -1):
+            # Bullish order block
+            if (df['close'].iloc[i] < df['open'].iloc[i] and
+                df['close'].iloc[i+1] > df['open'].iloc[i+1] and
+                (df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * abs(df['close'].iloc[i] - df['open'].iloc[i])):
+                
+                blocks.append({
+                    'type': 'bullish',
+                    'high': df['high'].iloc[i],
+                    'low': df['low'].iloc[i],
+                    'index': i
                 })
-            elif is_low:
-                swings.append({
-                    'index': i,
-                    'type': 'LOW',
-                    'price': df['low'].iloc[i],
-                    'time': df['timestamp'].iloc[i]
+            
+            # Bearish order block
+            elif (df['close'].iloc[i] > df['open'].iloc[i] and
+                  df['close'].iloc[i+1] < df['open'].iloc[i+1] and
+                  abs(df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * (df['close'].iloc[i] - df['open'].iloc[i])):
+                
+                blocks.append({
+                    'type': 'bearish',
+                    'high': df['high'].iloc[i],
+                    'low': df['low'].iloc[i],
+                    'index': i
                 })
         
-        # Filter by minimum percentage
-        filtered_swings = []
-        for swing in swings:
-            if not filtered_swings:
-                filtered_swings.append(swing)
-            else:
-                price_change = abs(swing['price'] - filtered_swings[-1]['price']) / filtered_swings[-1]['price'] * 100
-                if price_change >= self.config['zigzag_pct'] and swing['type'] != filtered_swings[-1]['type']:
-                    filtered_swings.append(swing)
-        
-        return filtered_swings
+        self.order_blocks = blocks[-5:] if blocks else []
     
-    def generate_signal(self):
-        """Generate trading signal."""
-        if len(self.price_data) < 20:
+    def detect_liquidity_sweep(self, df):
+        if len(df) < 3:
             return None
         
-        # Check trade filters
-        if (self.daily_trades >= self.config['max_daily_trades'] or
-            self.consecutive_losses >= self.config['max_consecutive_losses'] or
-            self.daily_profit <= self.config['daily_loss_limit']):
-            return None
+        current_high = df['high'].iloc[-1]
+        current_low = df['low'].iloc[-1]
+        current_close = df['close'].iloc[-1]
+        current_volume = df['volume'].iloc[-1]
+        avg_volume = df['volume'].iloc[-20:].mean()
         
-        # Check cooldown
-        current_bar = len(self.price_data) - 1
-        if current_bar - self.last_trade_bar < self.config['cooldown_bars']:
-            return None
-        
-        swings = self.identify_swings()
-        if len(swings) < 3:
-            return None
-        
-        current_price = float(self.price_data['close'].iloc[-1])
-        last_swing = swings[-1]
-        bars_since_swing = current_bar - last_swing['index']
-        
-        # Volume confirmation
-        recent_vol = self.price_data['volume'].iloc[-3:].mean()
-        avg_vol = self.price_data['volume'].iloc[-20:].mean()
-        
-        if recent_vol <= avg_vol * 0.8:
-            return None
-        
-        # BUY signal at swing low reversal
-        if (last_swing['type'] == 'LOW' and 
-            bars_since_swing <= self.config['min_swing_bars'] and
-            current_price > last_swing['price'] * 1.001):
+        # Check sweep above liquidity
+        for pool in self.liquidity_pools['highs']:
+            sweep_level = pool['price'] * (1 + self.config['sweep_threshold'] / 100)
             
-            return {
-                'action': 'BUY',
-                'price': current_price,
-                'reason': 'swing_low_reversal',
-                'swing_price': last_swing['price']
-            }
+            if current_high > sweep_level and current_close < pool['price']:
+                return {
+                    'type': 'bearish_sweep',
+                    'swept_level': pool['price'],
+                    'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
+                }
         
-        # SELL signal at swing high reversal
-        elif (last_swing['type'] == 'HIGH' and 
-              bars_since_swing <= self.config['min_swing_bars'] and
-              current_price < last_swing['price'] * 0.999):
+        # Check sweep below liquidity
+        for pool in self.liquidity_pools['lows']:
+            sweep_level = pool['price'] * (1 - self.config['sweep_threshold'] / 100)
             
-            return {
-                'action': 'SELL',
-                'price': current_price,
-                'reason': 'swing_high_reversal',
-                'swing_price': last_swing['price']
-            }
+            if current_low < sweep_level and current_close > pool['price']:
+                return {
+                    'type': 'bullish_sweep',
+                    'swept_level': pool['price'],
+                    'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
+                }
         
-        # Breakout signals
-        if last_swing['type'] == 'HIGH' and current_price > last_swing['price'] * 1.002:
-            return {
-                'action': 'BUY',
-                'price': current_price,
-                'reason': 'breakout_high',
-                'swing_price': last_swing['price']
-            }
+        return None
+    
+    def check_order_block_confluence(self, sweep_type, current_price):
+        if not self.order_blocks:
+            return False
         
-        elif last_swing['type'] == 'LOW' and current_price < last_swing['price'] * 0.998:
+        for block in self.order_blocks:
+            if ((sweep_type == 'bullish_sweep' and block['type'] == 'bullish') or
+                (sweep_type == 'bearish_sweep' and block['type'] == 'bearish')):
+                if block['low'] <= current_price <= block['high']:
+                    return True
+        
+        return False
+    
+    def generate_signal(self, df):
+        if len(df) < self.config['lookback']:
+            return None
+        
+        self.identify_liquidity_pools(df)
+        self.identify_order_blocks(df)
+        
+        sweep = self.detect_liquidity_sweep(df)
+        if not sweep:
+            return None
+        
+        current_price = df['close'].iloc[-1]
+        has_confluence = self.check_order_block_confluence(sweep['type'], current_price)
+        
+        action = 'BUY' if sweep['type'] == 'bullish_sweep' else 'SELL' if sweep['type'] == 'bearish_sweep' else None
+        
+        if action:
             return {
-                'action': 'SELL',
+                'action': action,
                 'price': current_price,
-                'reason': 'breakout_low',
-                'swing_price': last_swing['price']
+                'swept_level': sweep['swept_level'],
+                'volume_ratio': sweep['volume_ratio'],
+                'confluence': has_confluence
             }
         
         return None
     
     async def get_market_data(self):
-        """Get market data."""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -272,37 +218,15 @@ class ZigZagTradingBot:
             return False
     
     async def check_position(self):
-        """Check current position."""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            
-            if positions.get('retCode') != 0:
-                return
-            
-            pos_list = positions['result']['list']
-            
-            if not pos_list or float(pos_list[0]['size']) == 0:
-                if self.position:
-                    # Update capital on position close with NET PnL
-                    gross_pnl = float(self.position.get('realisedPnl', 0))
-                    entry_price = float(self.position.get('avgPrice', 0))
-                    size = float(self.position.get('size', 0))
-                    current_price = float(self.price_data['close'].iloc[-1])
-                    
-                    # Calculate fee rebate earned
-                    fee_earned = (entry_price * size + current_price * size) * abs(self.config['maker_fee_pct']) / 100
-                    net_pnl = gross_pnl + fee_earned
-                    
-                    self.current_capital += net_pnl
-                    self.daily_profit += net_pnl / self.initial_capital
-                self.position = None
-            else:
-                self.position = pos_list[0]
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
+                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except:
             pass
     
     def should_close(self):
-        """Check if should close position with NET targets."""
         if not self.position:
             return False, ""
         
@@ -313,62 +237,41 @@ class ZigZagTradingBot:
         if entry_price == 0:
             return False, ""
         
-        # Check for new opposite swing
-        swings = self.identify_swings()
-        if swings:
-            last_swing = swings[-1]
-            if ((side == "Buy" and last_swing['type'] == 'HIGH' and current_price >= entry_price * 1.002) or
-                (side == "Sell" and last_swing['type'] == 'LOW' and current_price <= entry_price * 0.998)):
-                return True, "swing_exit"
-        
-        # Calculate NET targets
-        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-        
-        # Check against NET targets
         if side == "Buy":
-            if current_price >= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price <= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
+            if current_price >= entry_price * (1 + self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price <= entry_price * (1 - self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
             
-            # Trailing stop with NET adjustment
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-            if pnl_pct > self.config['trailing_activation']:
-                trailing_stop = entry_price * (1 + (pnl_pct - self.config['trailing_distance']) / 100)
-                if current_price < trailing_stop:
-                    return True, "trailing_stop_net"
+            # Check for next liquidity pool
+            for pool in self.liquidity_pools['highs']:
+                if current_price >= pool['price'] * 0.995:
+                    return True, "liquidity_pool"
         else:
-            if current_price <= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price >= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
+            if current_price <= entry_price * (1 - self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
             
-            # Trailing stop with NET adjustment
-            pnl_pct = ((entry_price - current_price) / entry_price) * 100
-            if pnl_pct > self.config['trailing_activation']:
-                trailing_stop = entry_price * (1 - (pnl_pct - self.config['trailing_distance']) / 100)
-                if current_price > trailing_stop:
-                    return True, "trailing_stop_net"
+            # Check for next liquidity pool
+            for pool in self.liquidity_pools['lows']:
+                if current_price <= pool['price'] * 1.005:
+                    return True, "liquidity_pool"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        """Execute maker-only trade with NET targets."""
-        current_price = signal['price']
-        formatted_qty = self.calculate_position_size(current_price)
+        qty = self.config['position_size'] / signal['price']
+        formatted_qty = str(int(round(qty))) if qty >= 1 else "0"
         
-        if float(formatted_qty) < self.min_qty:
+        if formatted_qty == "0":
             return
         
-        # Calculate limit price
-        limit_price = round(current_price * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 2)
-        
-        # Calculate NET targets
-        break_even = self.calculate_break_even(limit_price, signal['action'])
-        net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
+        # LIMIT order for entry
+        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(signal['price'] * offset_mult, 4)
         
         try:
-            # Place main order without built-in TP/SL (will manage manually for NET targets)
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
@@ -381,156 +284,50 @@ class ZigZagTradingBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                self.daily_trades += 1
-                self.last_trade_bar = len(self.price_data) - 1
+                print(f"🎯 {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
+                print(f"   💎 Liquidity Swept: ${signal['swept_level']:.4f} | Volume: {signal['volume_ratio']:.1f}x")
+                print(f"   📦 Order Block Confluence: {'✅' if signal['confluence'] else '❌'}")
                 
-                # Store NET targets in metadata
-                self.position_metadata = {
-                    'breakEven': break_even,
-                    'netTP': net_tp,
-                    'netSL': net_sl,
-                    'entryPrice': limit_price,
-                    'side': signal['action']
-                }
-                
-                print(f"✅ MAKER {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | {signal['reason']}")
-                print(f"   📊 Break-Even: ${break_even:.2f}")
-                print(f"   🎯 Net TP: ${net_tp:.2f} ({self.config['net_take_profit']}%)")
-                print(f"   🛡️ Net SL: ${net_sl:.2f} ({self.config['net_stop_loss']}%)")
-                print(f"   💎 Swing: ${signal['swing_price']:.2f}")
-                
-                self.log_trade(signal['action'], limit_price, f"{signal['reason']}_BE:{break_even:.2f}_NetTP:{net_tp:.2f}")
-            else:
-                print(f"❌ Trade failed: {order.get('retMsg')}")
+                self.log_trade(signal['action'], limit_price, f"swept:{signal['swept_level']:.4f}")
         except Exception as e:
-            print(f"❌ Trade error: {e}")
+            print(f"Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order and NET PnL."""
         if not self.position:
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        entry_price = float(self.position.get('avgPrice', 0))
         
-        # Calculate limit price
-        limit_price = round(current_price * (1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100), 2)
-        
+        # MARKET order for exit (immediate execution)
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
+                orderType="Market",
+                qty=str(int(round(qty))),
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                # Calculate NET PnL including fees
-                gross_pnl = float(self.position.get('unrealisedPnl', 0))
-                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
-                net_pnl = gross_pnl + fee_earned
-                
-                # Update tracking
-                self.consecutive_losses = self.consecutive_losses + 1 if net_pnl < 0 else 0
-                
-                self.trades_history.append({
-                    'gross_pnl': gross_pnl,
-                    'net_pnl': net_pnl,
-                    'fee_earned': fee_earned,
-                    'reason': reason,
-                    'timestamp': datetime.now()
-                })
-                
-                print(f"✅ Closed: {reason}")
-                print(f"   💵 Gross P&L: ${gross_pnl:.2f}")
-                print(f"   💎 Fee Rebate: ${fee_earned:.2f}")
-                print(f"   📊 Net P&L: ${net_pnl:.2f}")
-                
+                pnl = float(self.position.get('unrealisedPnl', 0))
+                print(f"💰 Closed: {reason} | PnL: ${pnl:.2f}")
+                self.log_trade("CLOSE", 0, f"{reason}_PnL:${pnl:.2f}")
                 self.position = None
-                self.position_metadata = {}
-                
-                self.log_trade("CLOSE", limit_price, f"{reason}_GrossPnL:${gross_pnl:.2f}_NetPnL:${net_pnl:.2f}")
         except Exception as e:
-            print(f"❌ Close failed: {e}")
-    
-    def reset_daily_stats(self):
-        """Reset daily statistics."""
-        current_date = datetime.now(timezone.utc).date()
-        if self.last_reset_date and current_date > self.last_reset_date:
-            self.daily_trades = 0
-            self.daily_profit = 0
-            self.consecutive_losses = 0
-        self.last_reset_date = current_date
+            print(f"Close failed: {e}")
     
     def log_trade(self, action, price, info):
-        """Log trade."""
         with open(self.log_file, "a") as f:
             f.write(json.dumps({
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'id': self.trade_id,
                 'action': action,
-                'price': round(price, 2),
-                'info': info,
-                'capital': round(self.current_capital, 2)
+                'price': round(price, 6),
+                'info': info
             }) + "\n")
     
-    def show_status(self):
-        """Display status with NET calculations."""
-        if not len(self.price_data):
-            return
-        
-        price = float(self.price_data['close'].iloc[-1])
-        swings = self.identify_swings()
-        
-        print(f"\n{'='*60}")
-        print(f"📈 ZIG-ZAG TRADING BOT - {self.symbol}")
-        print(f"{'='*60}")
-        print(f"💰 Price: ${price:.2f}")
-        print(f"📊 Capital: ${self.current_capital:.2f} ({(self.current_capital/self.initial_capital-1)*100:+.1f}%)")
-        
-        if swings:
-            last_swing = swings[-1]
-            print(f"🔄 Last Swing: {last_swing['type']} @ ${last_swing['price']:.2f}")
-        
-        if self.position:
-            entry_price = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            size = self.position.get('size', '0')
-            
-            # Calculate current NET PnL
-            gross_pnl = float(self.position.get('unrealisedPnl', 0))
-            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
-            current_fee = price * float(size) * abs(self.config['maker_fee_pct']) / 100
-            net_pnl = gross_pnl + fee_earned + current_fee  # Include both entry and potential exit fee
-            
-            # Get stored targets
-            break_even = self.position_metadata.get('breakEven', entry_price)
-            net_tp = self.position_metadata.get('netTP', 0)
-            net_sl = self.position_metadata.get('netSL', 0)
-            
-            emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"\n{emoji} POSITION: {side} {size} @ ${entry_price:.2f}")
-            print(f"   💵 Gross P&L: ${gross_pnl:.2f}")
-            print(f"   💎 Fee Rebate: ${fee_earned + current_fee:.2f}")
-            print(f"   📊 Net P&L: ${net_pnl:.2f}")
-            print(f"   🎯 BE: ${break_even:.2f} | TP: ${net_tp:.2f} | SL: ${net_sl:.2f}")
-        else:
-            print(f"\n🔍 Scanning for zig-zag patterns...")
-            print(f"   Daily Trades: {self.daily_trades}/{self.config['max_daily_trades']}")
-            print(f"   Consecutive Losses: {self.consecutive_losses}")
-        
-        print(f"{'='*60}")
-    
     async def run_cycle(self):
-        """Main cycle."""
-        self.reset_daily_stats()
-        
         if not await self.get_market_data():
             return
         
@@ -540,46 +337,33 @@ class ZigZagTradingBot:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal():
-            await self.execute_trade(signal)
-        
-        self.show_status()
+        else:
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
     
     async def run(self):
-        """Main loop."""
         if not self.connect():
-            print("❌ Failed to connect")
+            print("Failed to connect")
             return
         
-        print(f"\n{'='*60}")
-        print(f"🚀 ZIG-ZAG TRADING BOT with NET Profit Tracking")
-        print(f"{'='*60}")
-        print(f"📊 Symbol: {self.symbol}")
-        print(f"💰 Capital: ${self.initial_capital}")
-        print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
-        print(f"📈 Min Swing: {self.config['zigzag_pct']}%")
-        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
-        print(f"💎 Using MAKER-ONLY orders for {self.config['maker_fee_pct']}% fee rebate")
-        print(f"{'='*60}\n")
+        print(f"💎 Liquidity Sweep Bot")
+        print(f"⏰ Timeframe: 5+ minutes")
+        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
         
-        try:
-            while True:
+        while True:
+            try:
                 await self.run_cycle()
                 await asyncio.sleep(10)
-        except KeyboardInterrupt:
-            print("\n🛑 Bot stopped")
-            if self.position:
-                await self.close_position("manual_stop")
-            
-            # Show final statistics
-            if self.trades_history:
-                total_net_pnl = sum(t['net_pnl'] for t in self.trades_history)
-                total_fees_earned = sum(t['fee_earned'] for t in self.trades_history)
-                print(f"\n📊 Final Statistics:")
-                print(f"   Total Net P&L: ${total_net_pnl:.2f}")
-                print(f"   Total Fees Earned: ${total_fees_earned:.2f}")
-                print(f"   Final Capital: ${self.current_capital:.2f}")
+            except KeyboardInterrupt:
+                print("\nBot stopped")
+                if self.position:
+                    await self.close_position("manual_stop")
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+                await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = ZigZagTradingBot()
+    bot = LiquiditySweepBot()
     asyncio.run(bot.run())

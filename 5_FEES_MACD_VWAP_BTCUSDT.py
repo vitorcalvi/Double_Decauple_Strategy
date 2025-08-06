@@ -8,51 +8,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class MACDVWAPBot:
+class PivotReversalBot:
     def __init__(self):
-        self.symbol = 'BNBUSDT'
+        self.symbol = 'ADAUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API connection
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
-        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        # MACD + VWAP Strategy Config with Fee Calculations
         self.config = {
-            'macd_fast': 8,
-            'macd_slow': 21,
-            'macd_signal': 5,
-            'rsi_period': 9,
-            'ema_period': 13,
+            'pivot_period': 5,
+            'rsi_period': 7,
+            'mfi_period': 7,
             'rsi_oversold': 35,
             'rsi_overbought': 65,
+            'mfi_oversold': 25,
+            'mfi_overbought': 75,
             'position_size': 100,
             'maker_offset_pct': 0.01,
-            # Fee structure
-            'maker_fee_pct': -0.04,  # Negative = rebate
-            # Gross TP/SL
-            'gross_take_profit': 0.35,
-            'gross_stop_loss': 0.25,
-            # Net TP/SL (adjusted for 2x maker rebate)
-            'net_take_profit': 0.43,  # 0.35 + 0.08 rebate
-            'net_stop_loss': 0.17,    # 0.25 - 0.08 rebate
+            'net_take_profit': 0.68,
+            'net_stop_loss': 0.07,
         }
         
-        # DOGE quantity rules
-        self.qty_step, self.min_qty = '1', 1.0
+        self.support_levels = []
+        self.resistance_levels = []
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/macd_vwap_doge_trades.log"
+        self.log_file = "logs/pivot_trades.log"
     
     def connect(self):
-        """Connect to exchange."""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
@@ -60,60 +50,19 @@ class MACDVWAPBot:
             return False
     
     def format_qty(self, qty):
-        """Format quantity for DOGE."""
-        return str(int(round(qty))) if qty >= self.min_qty else "0"
-    
-    def calculate_break_even(self, entry_price, side):
-        """Calculate break-even price including fees."""
-        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        
-        # With rebate, break-even is better than entry
-        if side == "Buy":
-            return entry_price * (1 - fee_impact)
-        else:
-            return entry_price * (1 + fee_impact)
-    
-    def calculate_net_targets(self, entry_price, side):
-        """Calculate net TP/SL accounting for round-trip fees."""
-        if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-        else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        
-        return net_tp, net_sl
-    
-    def calculate_vwap(self, df):
-        """Calculate VWAP."""
-        if len(df) < 20:
-            return None
-        
-        recent_data = df.tail(min(1440, len(df)))  # Last 24 hours
-        typical_price = (recent_data['high'] + recent_data['low'] + recent_data['close']) / 3
-        volume = recent_data['volume']
-        
-        vwap = (typical_price * volume).cumsum() / volume.cumsum()
-        return vwap.iloc[-1] if not vwap.empty else None
+        if qty < 0.01:
+            return "0"
+        return f"{round(qty / 0.01) * 0.01:.2f}"
     
     def calculate_indicators(self, df):
-        """Calculate all indicators."""
-        if len(df) < 50:
+        min_len = max(self.config['rsi_period'], self.config['mfi_period']) + 1
+        if len(df) < min_len:
             return None
         
         close = df['close']
-        
-        # MACD
-        ema_fast = close.ewm(span=self.config['macd_fast']).mean()
-        ema_slow = close.ewm(span=self.config['macd_slow']).mean()
-        macd_line = ema_fast - ema_slow
-        signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
-        histogram = macd_line - signal_line
-        
-        # VWAP
-        vwap = self.calculate_vwap(df)
-        if not vwap:
-            return None
+        high = df['high']
+        low = df['low']
+        volume = df['volume']
         
         # RSI
         delta = close.diff()
@@ -122,74 +71,46 @@ class MACDVWAPBot:
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # EMA trend filter
-        ema = close.ewm(span=self.config['ema_period']).mean()
+        # MFI
+        typical_price = (high + low + close) / 3
+        money_flow = typical_price * volume
+        
+        positive_mf = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
+        negative_mf = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
+        
+        mfi = 100 - (100 / (1 + positive_mf / negative_mf))
         
         return {
-            'histogram': histogram.iloc[-1],
-            'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else histogram.iloc[-1],
-            'vwap': vwap,
-            'rsi': rsi.iloc[-1],
-            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else rsi.iloc[-1],
-            'ema': ema.iloc[-1],
-            'price': close.iloc[-1]
-        }
-    
-    def detect_signals(self, indicators):
-        """Detect histogram flip, RSI cross, and VWAP alignment."""
-        # Histogram flip
-        hist_bullish = indicators['histogram_prev'] <= 0 and indicators['histogram'] > 0
-        hist_bearish = indicators['histogram_prev'] >= 0 and indicators['histogram'] < 0
-        
-        # RSI cross
-        rsi_bullish = indicators['rsi_prev'] <= self.config['rsi_oversold'] and indicators['rsi'] > self.config['rsi_oversold']
-        rsi_bearish = indicators['rsi_prev'] >= self.config['rsi_overbought'] and indicators['rsi'] < self.config['rsi_overbought']
-        
-        # VWAP alignment
-        vwap_bullish = indicators['price'] > indicators['vwap'] and indicators['ema'] > indicators['vwap']
-        vwap_bearish = indicators['price'] < indicators['vwap'] and indicators['ema'] < indicators['vwap']
-        
-        return {
-            'hist_bullish': hist_bullish,
-            'hist_bearish': hist_bearish,
-            'rsi_bullish': rsi_bullish,
-            'rsi_bearish': rsi_bearish,
-            'vwap_bullish': vwap_bullish,
-            'vwap_bearish': vwap_bearish
+            'rsi': rsi.iloc[-1] if not rsi.empty else 50,
+            'mfi': mfi.iloc[-1] if not mfi.empty else 50,
+            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else 50
         }
     
     def generate_signal(self, df):
-        """Generate MACD + VWAP signals."""
+        if len(df) < 30:
+            return None
+        
+        current_price = float(df['close'].iloc[-1])
+        
         indicators = self.calculate_indicators(df)
         if not indicators:
             return None
         
-        signals = self.detect_signals(indicators)
+        rsi = indicators['rsi']
+        mfi = indicators['mfi']
+        rsi_prev = indicators['rsi_prev']
         
-        # Bullish signal: All three align
-        if signals['hist_bullish'] and signals['rsi_bullish'] and signals['vwap_bullish']:
-            return {
-                'action': 'BUY',
-                'price': indicators['price'],
-                'macd_hist': indicators['histogram'],
-                'rsi': indicators['rsi'],
-                'vwap': indicators['vwap']
-            }
+        # BUY Signal
+        if mfi <= self.config['mfi_oversold'] or (rsi <= self.config['rsi_oversold'] and rsi > rsi_prev):
+            return {'action': 'BUY', 'price': current_price, 'rsi': rsi, 'mfi': mfi}
         
-        # Bearish signal: All three align
-        if signals['hist_bearish'] and signals['rsi_bearish'] and signals['vwap_bearish']:
-            return {
-                'action': 'SELL',
-                'price': indicators['price'],
-                'macd_hist': indicators['histogram'],
-                'rsi': indicators['rsi'],
-                'vwap': indicators['vwap']
-            }
+        # SELL Signal
+        if mfi >= self.config['mfi_overbought'] or (rsi >= self.config['rsi_overbought'] and rsi < rsi_prev):
+            return {'action': 'SELL', 'price': current_price, 'rsi': rsi, 'mfi': mfi}
         
         return None
     
     async def get_market_data(self):
-        """Get market data."""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -215,7 +136,6 @@ class MACDVWAPBot:
             return False
     
     async def check_position(self):
-        """Check current position."""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
@@ -224,8 +144,7 @@ class MACDVWAPBot:
         except:
             pass
     
-    def should_close(self):
-        """Check if should close position with NET profit targets."""
+    def should_close(self, signal=None):
         if not self.position:
             return False, ""
         
@@ -236,34 +155,34 @@ class MACDVWAPBot:
         if entry_price == 0:
             return False, ""
         
-        # Calculate NET targets
-        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-        
-        # Check against NET targets
         if side == "Buy":
-            if current_price >= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price <= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
+            if current_price >= entry_price * (1 + self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price <= entry_price * (1 - self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
         else:
-            if current_price <= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price >= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
+            if current_price <= entry_price * (1 - self.config['net_take_profit'] / 100):
+                return True, "take_profit"
+            if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
+                return True, "stop_loss"
+        
+        # Exit on opposite signal
+        if signal and ((side == "Buy" and signal['action'] == 'SELL') or 
+                      (side == "Sell" and signal['action'] == 'BUY')):
+            return True, "signal_reversal"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        """Execute maker-only trade."""
-        current_price = signal['price']
-        qty = self.config['position_size'] / current_price
+        qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
         if formatted_qty == "0":
             return
         
-        # Calculate limit price
-        limit_price = round(current_price * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 4)
+        # LIMIT order for entry
+        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(signal['price'] * offset_mult, 2)
         
         try:
             order = self.exchange.place_order(
@@ -278,131 +197,69 @@ class MACDVWAPBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                
-                # Calculate and log break-even
-                break_even = self.calculate_break_even(limit_price, signal['action'])
-                net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
-                
-                info = f"HIST:{signal['macd_hist']:.6f}_RSI:{signal['rsi']:.1f}_BE:{break_even:.4f}_NetTP:{net_tp:.4f}"
-                self.log_trade(signal['action'], limit_price, info)
-                
-                print(f"✅ MAKER {signal['action']}: {formatted_qty} DOGE @ ${limit_price:.4f}")
-                print(f"   📊 Break-Even: ${break_even:.4f} | Net TP: ${net_tp:.4f} | Net SL: ${net_sl:.4f}")
-                print(f"   📈 MACD Hist:{signal['macd_hist']:.6f} | RSI:{signal['rsi']:.1f} | VWAP:${signal['vwap']:.4f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
+                print(f"   📈 RSI:{signal['rsi']:.1f} MFI:{signal['mfi']:.1f}")
+                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_MFI:{signal['mfi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order."""
         if not self.position:
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        entry_price = float(self.position.get('avgPrice', 0))
         
-        # Calculate limit price
-        limit_price = round(current_price * (1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100), 4)
-        
+        # MARKET order for exit
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
+                orderType="Market",
                 qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                # Calculate NET PnL including fees
-                gross_pnl = float(self.position.get('unrealisedPnl', 0))
-                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
-                net_pnl = gross_pnl + fee_earned
-                
-                self.log_trade("CLOSE", limit_price, f"{reason}_GrossPnL:${gross_pnl:.2f}_NetPnL:${net_pnl:.2f}")
-                print(f"✅ Closed: {reason} | Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
+                pnl = float(self.position.get('unrealisedPnl', 0))
+                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
+                self.log_trade("CLOSE", 0, f"{reason}_PnL:${pnl:.2f}")
+                self.position = None
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
     def log_trade(self, action, price, info):
-        """Log trade."""
         with open(self.log_file, "a") as f:
             f.write(json.dumps({
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'id': self.trade_id,
                 'action': action,
-                'price': round(price, 6),
+                'price': round(price, 2),
                 'info': info
             }) + "\n")
     
-    def show_status(self):
-        """Show current status."""
-        if len(self.price_data) == 0:
-            return
-        
-        price = float(self.price_data['close'].iloc[-1])
-        indicators = self.calculate_indicators(self.price_data)
-        
-        print(f"\n⚡ MACD + VWAP BOT - {self.symbol}")
-        print(f"💰 Price: ${price:.4f}")
-        
-        if indicators:
-            print(f"📊 MACD Hist: {indicators['histogram']:.6f} | RSI: {indicators['rsi']:.1f}")
-            print(f"📈 VWAP: ${indicators['vwap']:.4f} | EMA: ${indicators['ema']:.4f}")
-        
-        if self.position:
-            entry_price = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            size = self.position.get('size', '0')
-            
-            # Calculate current NET PnL
-            gross_pnl = float(self.position.get('unrealisedPnl', 0))
-            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
-            net_pnl = gross_pnl + fee_earned
-            
-            # Calculate break-even and targets
-            break_even = self.calculate_break_even(entry_price, side)
-            net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-            
-            emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} DOGE @ ${entry_price:.4f}")
-            print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-            print(f"   🎯 BE: ${break_even:.4f} | TP: ${net_tp:.4f} | SL: ${net_sl:.4f}")
-        else:
-            print("⚡ Scanning for MACD + VWAP signals...")
-        
-        print("-" * 60)
-    
     async def run_cycle(self):
-        """Main trading cycle."""
         if not await self.get_market_data():
             return
         
         await self.check_position()
         
+        signal = self.generate_signal(self.price_data)
+        
         if self.position:
-            should_close, reason = self.should_close()
+            should_close, reason = self.should_close(signal)
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal(self.price_data):
+        elif signal:
             await self.execute_trade(signal)
-        
-        self.show_status()
     
     async def run(self):
-        """Main bot loop."""
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"✅ Connected! Starting MACD + VWAP bot for {self.symbol}")
-        print("📊 Strategy: MACD histogram flip + RSI cross + VWAP alignment")
-        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
-        print(f"💎 Using MAKER-ONLY orders for {self.config['maker_fee_pct']}% fee rebate")
+        print(f"✅ Starting Pivot Reversal bot for {self.symbol}")
+        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
         
         while True:
             try:
@@ -418,5 +275,5 @@ class MACDVWAPBot:
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = MACDVWAPBot()
+    bot = PivotReversalBot()
     asyncio.run(bot.run())
