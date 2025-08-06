@@ -26,6 +26,10 @@ class EnhancedMLScalpingBot:
         self.path_signatures = deque(maxlen=100)
         self.recent_trades = deque(maxlen=50)
         
+        # Order management
+        self.pending_order = None
+        self.last_order_time = None
+        
         self.config = {
             'timeframe': '3',
             'rsi_period': 14,
@@ -65,6 +69,40 @@ class EnhancedMLScalpingBot:
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
+        except:
+            return False
+    
+    async def check_pending_orders(self):
+        """Check and manage pending orders"""
+        try:
+            orders = self.exchange.get_open_orders(
+                category="linear",
+                symbol=self.symbol
+            )
+            
+            if orders.get('retCode') == 0:
+                order_list = orders['result']['list']
+                
+                if order_list:
+                    for order in order_list:
+                        order_time = int(order['createdTime']) / 1000
+                        age = datetime.now().timestamp() - order_time
+                        
+                        if age > 60:  # Cancel if older than 60 seconds
+                            self.exchange.cancel_order(
+                                category="linear",
+                                symbol=self.symbol,
+                                orderId=order['orderId']
+                            )
+                            print(f"❌ Cancelled old order: {order['orderId']}")
+                            self.pending_order = None
+                        else:
+                            self.pending_order = order
+                            return True  # Has pending order
+                else:
+                    self.pending_order = None
+                    return False
+            return False
         except:
             return False
     
@@ -441,6 +479,17 @@ class EnhancedMLScalpingBot:
             self.position = None
     
     async def execute_trade(self, signal):
+        # Check cooldown
+        
+        # Check for pending orders
+        if await self.check_pending_orders():
+            print(f"⏳ Already have pending order, skipping new signal")
+            return
+        
+        # Check if already in position
+        if self.position:
+            return
+        
         qty = self.config['base_position_size'] / signal['price']
         
         # ARBUSDT uses integer quantities
@@ -464,6 +513,8 @@ class EnhancedMLScalpingBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
+                self.last_order_time = datetime.now()
+                self.pending_order = order['result']
                 
                 # Store dynamic targets in metadata
                 self.position_metadata = {
@@ -532,13 +583,16 @@ class EnhancedMLScalpingBot:
             return
         
         await self.check_position()
+        await self.check_pending_orders()  # Check and clean up orders
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal(self.price_data):
-            await self.execute_trade(signal)
+        elif not self.pending_order:  # Only generate signal if no pending order
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
     
     async def run(self):
         if not self.connect():
@@ -555,6 +609,11 @@ class EnhancedMLScalpingBot:
                 await asyncio.sleep(5)
             except KeyboardInterrupt:
                 print("\n✋ Bot stopped")
+                # Cancel all pending orders on shutdown
+                try:
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+                except:
+                    pass
                 if self.position:
                     await self.close_position("manual_stop")
                 print(f"📊 Final Daily PnL: ${self.daily_pnl:.2f}")

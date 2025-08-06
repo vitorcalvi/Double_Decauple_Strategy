@@ -22,6 +22,12 @@ class PivotReversalBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
+        # Order management - IMPROVED (NO COOLDOWN)
+        self.pending_order = None
+        self.last_order_time = None
+        self.order_timeout = 180  # Cancel orders older than 180 seconds
+        self.last_signal = None  # Track last signal to avoid duplicates
+        
         # SIMPLIFIED config
         self.config = {
             'rsi_period': 7,
@@ -33,6 +39,10 @@ class PivotReversalBot:
             'net_stop_loss': 0.07,
         }
         
+        # Status tracking
+        self.last_status_time = None
+        self.status_interval = 5  # Show status every 5 seconds
+        
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/5_FEES_MACD_VWAP_BTCUSDT.log"
     
@@ -43,8 +53,46 @@ class PivotReversalBot:
         except:
             return False
     
+    async def check_pending_orders(self):
+        """Check and manage pending orders - IMPROVED"""
+        try:
+            orders = self.exchange.get_open_orders(
+                category="linear",
+                symbol=self.symbol
+            )
+            
+            if orders.get('retCode') == 0:
+                order_list = orders['result']['list']
+                
+                if order_list:
+                    for order in order_list:
+                        order_time = int(order['createdTime']) / 1000
+                        age = datetime.now().timestamp() - order_time
+                        
+                        # Only cancel if REALLY old
+                        if age > self.order_timeout:
+                            self.exchange.cancel_order(
+                                category="linear",
+                                symbol=self.symbol,
+                                orderId=order['orderId']
+                            )
+                            print(f"❌ Cancelled stale order (aged {age:.0f}s): {order['orderId']}")
+                            self.pending_order = None
+                            self.last_signal = None  # Reset signal tracking
+                        else:
+                            self.pending_order = order
+                            # Don't spam the console with pending order status
+                            return True
+                else:
+                    self.pending_order = None
+                    return False
+            return False
+        except Exception as e:
+            print(f"⚠️ Order check error: {e}")
+            return False
+    
     def format_qty(self, qty):
-        # BTCUSDT uses 0.001 minimum
+        # BTCUSDT uses 0.001 minimum - FIXED formatting
         return f"{round(qty / 0.001) * 0.001:.3f}"
     
     def calculate_indicators(self, df):
@@ -80,14 +128,22 @@ class PivotReversalBot:
         rsi = indicators['rsi']
         rsi_prev = indicators['rsi_prev']
         
+        # Check if signal is duplicate of last one
+        if self.last_signal:
+            price_change = abs(current_price - self.last_signal['price']) / self.last_signal['price']
+            if price_change < 0.001:  # Less than 0.1% price change
+                return None  # Skip duplicate signal
+        
         # SIMPLIFIED: Just RSI levels with momentum
         # BUY Signal
         if rsi <= self.config['rsi_oversold'] and rsi > rsi_prev:
-            return {'action': 'BUY', 'price': current_price, 'rsi': rsi}
+            signal = {'action': 'BUY', 'price': current_price, 'rsi': rsi}
+            return signal
         
         # SELL Signal
         if rsi >= self.config['rsi_overbought'] and rsi < rsi_prev:
-            return {'action': 'SELL', 'price': current_price, 'rsi': rsi}
+            signal = {'action': 'SELL', 'price': current_price, 'rsi': rsi}
+            return signal
         
         return None
     
@@ -137,19 +193,32 @@ class PivotReversalBot:
             return False, ""
         
         if side == "Buy":
-            if current_price >= entry_price * (1 + self.config['net_take_profit'] / 100):
+            profit_pct = ((current_price - entry_price) / entry_price) * 100
+            if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
-            if current_price <= entry_price * (1 - self.config['net_stop_loss'] / 100):
+            if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
         else:
-            if current_price <= entry_price * (1 - self.config['net_take_profit'] / 100):
+            profit_pct = ((entry_price - current_price) / entry_price) * 100
+            if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
-            if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
+            if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
         
         return False, ""
     
     async def execute_trade(self, signal):
+        # NO COOLDOWN - Removed
+        
+        # Check for pending orders
+        if await self.check_pending_orders():
+            # Silent return - don't spam console about pending orders
+            return
+        
+        # Check if already in position
+        if self.position:
+            return
+        
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
@@ -172,8 +241,13 @@ class PivotReversalBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
-                print(f"   📈 RSI:{signal['rsi']:.1f}")
+                self.last_order_time = datetime.now()
+                self.last_signal = signal  # Track the signal
+                self.pending_order = order['result']
+                print(f"\n✅ {signal['action']} Order Placed:")
+                print(f"   📊 Quantity: {formatted_qty} BTC @ ${limit_price:,.2f}")
+                print(f"   📈 RSI: {signal['rsi']:.1f}")
+                print(f"   ⏱️ Order timeout: {self.order_timeout}s")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -197,9 +271,15 @@ class PivotReversalBot:
             
             if order.get('retCode') == 0:
                 pnl = float(self.position.get('unrealisedPnl', 0))
-                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
-                self.log_trade("CLOSE", 0, f"{reason}_PnL:${pnl:.2f}")
+                entry_price = float(self.position.get('avgPrice', 0))
+                current_price = float(self.price_data['close'].iloc[-1])
+                
+                print(f"\n💰 Position Closed: {reason}")
+                print(f"   Entry: ${entry_price:,.2f} → Exit: ${current_price:,.2f}")
+                print(f"   PnL: ${pnl:.2f}")
+                self.log_trade("CLOSE", current_price, f"{reason}_PnL:${pnl:.2f}")
                 self.position = None
+                self.last_signal = None  # Reset signal tracking
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
@@ -212,38 +292,103 @@ class PivotReversalBot:
                 'info': info
             }) + "\n")
     
+    def show_status(self):
+        """Show status periodically, not every cycle"""
+        now = datetime.now()
+        
+        # Only show status every N seconds
+        if self.last_status_time:
+            if (now - self.last_status_time).total_seconds() < self.status_interval:
+                return
+        
+        self.last_status_time = now
+        
+        if len(self.price_data) == 0:
+            return
+        
+        current_price = float(self.price_data['close'].iloc[-1])
+        
+        # Build status line
+        status_parts = [f"📊 BTC: ${current_price:,.2f}"]
+        
+        if self.position:
+            entry = float(self.position.get('avgPrice', 0))
+            pnl = float(self.position.get('unrealisedPnl', 0))
+            side = self.position.get('side', '')
+            status_parts.append(f"| 📍 {side} from ${entry:,.2f} | PnL: ${pnl:+.2f}")
+        elif self.pending_order:
+            order_price = float(self.pending_order.get('price', 0))
+            order_side = self.pending_order.get('side', '')
+            order_time = int(self.pending_order.get('createdTime', 0)) / 1000
+            age = int(datetime.now().timestamp() - order_time)
+            status_parts.append(f"| ⏳ Pending {order_side} @ ${order_price:,.2f} ({age}s)")
+        else:
+            indicators = self.calculate_indicators(self.price_data)
+            if indicators:
+                status_parts.append(f"| RSI: {indicators['rsi']:.1f}")
+                if indicators['rsi'] <= self.config['rsi_oversold']:
+                    status_parts.append(f"| 🟢 Oversold")
+                elif indicators['rsi'] >= self.config['rsi_overbought']:
+                    status_parts.append(f"| 🔴 Overbought")
+        
+        # Print single line status
+        print(" ".join(status_parts), end='\r')
+    
     async def run_cycle(self):
         if not await self.get_market_data():
             return
         
         await self.check_position()
+        await self.check_pending_orders()  # Check and clean up orders
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal(self.price_data):
-            await self.execute_trade(signal)
+        elif not self.pending_order:  # Only generate signal if no pending order
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
+        
+        # Show status periodically
+        self.show_status()
     
     async def run(self):
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"✅ Starting Pivot Reversal bot for {self.symbol}")
-        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
+        print(f"🚀 Starting Pivot Reversal Bot for {self.symbol}")
+        print(f"📊 Strategy: RSI-based reversal trading")
+        print(f"🎯 Take Profit: {self.config['net_take_profit']}% | Stop Loss: {self.config['net_stop_loss']}%")
+        print(f"⏱️ No cooldown | Order timeout: {self.order_timeout}s")
+        print(f"{'='*50}")
         
         while True:
             try:
                 await self.run_cycle()
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)  # 2 second cycle for less spam
             except KeyboardInterrupt:
-                print("\n🛑 Bot stopped")
+                print(f"\n{'='*50}")
+                print("🛑 Shutting down bot...")
+                # Cancel all pending orders on shutdown
+                try:
+                    cancelled = self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+                    if cancelled.get('retCode') == 0:
+                        result = cancelled.get('result', {})
+                        if result.get('list'):
+                            print(f"✅ Cancelled {len(result['list'])} pending orders")
+                except:
+                    pass
+                
                 if self.position:
+                    print("📍 Closing open position...")
                     await self.close_position("manual_stop")
+                
+                print("✅ Bot stopped successfully")
                 break
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"\n⚠️ Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":

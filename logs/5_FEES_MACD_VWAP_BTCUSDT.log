@@ -1,12 +1,3 @@
-{"timestamp": "2025-08-06 20:07:03", "action": "SELL", "price": 115608.86, "info": "RSI:66.6"}
-{"timestamp": "2025-08-06 20:07:04", "action": "SELL", "price": 115608.86, "info": "RSI:66.6"}
-{"timestamp": "2025-08-06 20:07:06", "action": "SELL", "price": 115608.76, "info": "RSI:66.5"}
-{"timestamp": "2025-08-06 20:07:08", "action": "SELL", "price": 115617.16, "info": "RSI:68.1"}
-{"timestamp": "2025-08-06 20:07:09", "action": "SELL", "price": 115617.16, "info": "RSI:68.1"}
-{"timestamp": "2025-08-06 20:07:11", "action": "SELL", "price": 115609.36, "info": "RSI:66.6"}
-{"timestamp": "2025-08-06 20:07:13", "action": "SELL", "price": 115615.16, "info": "RSI:67.7"}
-{"timestamp": "2025-08-06 20:07:15", "action": "SELL", "price": 115615.06, "info": "RSI:67.7"}
-{"timestamp": "2025-08-06 20:07:17", "action": "SELL", "price": 115615.16, "info": "RSI:67.7"}
-{"timestamp": "2025-08-06 20:07:18", "action": "SELL", "price": 115615.06, "info": "RSI:67.7"}
-{"timestamp": "2025-08-06 20:07:20", "action": "SELL", "price": 115615.06, "info": "RSI:67.7"}
-{"timestamp": "2025-08-06 20:07:21", "action": "SELL", "price": 115615.06, "info": "RSI:67.7"}
+{"timestamp": "2025-08-06 20:26:02", "action": "BUY", "price": 115396.36, "info": "RSI:7.6"}
+{"timestamp": "2025-08-06 20:28:02", "action": "BUY", "price": 115385.46, "info": "RSI:31.2"}
+{"timestamp": "2025-08-06 20:41:04", "action": "CLOSE", "price": 115300.0, "info": "stop_loss_PnL:$-0.07"}

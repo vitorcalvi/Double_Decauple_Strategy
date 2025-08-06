@@ -22,6 +22,11 @@ class EMARSIBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
+        # Order management
+        self.pending_order = None
+        self.last_order_time = None
+        self.order_cooldown = 30  # seconds between orders
+        
         # SIMPLIFIED: Removed volume and RSI diff requirements
         self.config = {
             'ema_fast': 5,
@@ -42,6 +47,40 @@ class EMARSIBot:
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
+        except:
+            return False
+    
+    async def check_pending_orders(self):
+        """Check and manage pending orders"""
+        try:
+            orders = self.exchange.get_open_orders(
+                category="linear",
+                symbol=self.symbol
+            )
+            
+            if orders.get('retCode') == 0:
+                order_list = orders['result']['list']
+                
+                if order_list:
+                    for order in order_list:
+                        order_time = int(order['createdTime']) / 1000
+                        age = datetime.now().timestamp() - order_time
+                        
+                        if age > 60:  # Cancel if older than 60 seconds
+                            self.exchange.cancel_order(
+                                category="linear",
+                                symbol=self.symbol,
+                                orderId=order['orderId']
+                            )
+                            print(f"❌ Cancelled old order: {order['orderId']}")
+                            self.pending_order = None
+                        else:
+                            self.pending_order = order
+                            return True  # Has pending order
+                else:
+                    self.pending_order = None
+                    return False
+            return False
         except:
             return False
     
@@ -147,9 +186,23 @@ class EMARSIBot:
         return False, ""
     
     async def execute_trade(self, signal):
+        # Check cooldown
+        if self.last_order_time:
+            if (datetime.now() - self.last_order_time).total_seconds() < self.order_cooldown:
+                return
+        
+        # Check for pending orders
+        if await self.check_pending_orders():
+            print(f"⏳ Already have pending order, skipping new signal")
+            return
+        
+        # Check if already in position
+        if self.position:
+            return
+        
         qty = self.config['position_size'] / signal['price']
         
-        # BNBUSDT uses 0.01 minimum
+        # BNBUSDT uses 0.01 minimum - FIXED formatting
         formatted_qty = f"{round(qty / 0.01) * 0.01:.2f}"
         if float(formatted_qty) < 0.01:
             return
@@ -170,6 +223,8 @@ class EMARSIBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
+                self.last_order_time = datetime.now()
+                self.pending_order = order['result']
                 print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
@@ -216,13 +271,16 @@ class EMARSIBot:
             return
         
         await self.check_position()
+        await self.check_pending_orders()  # Check and clean up orders
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal(self.price_data):
-            await self.execute_trade(signal)
+        elif not self.pending_order:  # Only generate signal if no pending order
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
     
     async def run(self):
         if not self.connect():
@@ -231,6 +289,7 @@ class EMARSIBot:
         
         print(f"✅ Starting EMA + RSI bot for {self.symbol}")
         print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
+        print(f"⏱️ Order cooldown: {self.order_cooldown}s")
         
         while True:
             try:
@@ -238,6 +297,11 @@ class EMARSIBot:
                 await asyncio.sleep(1)
             except KeyboardInterrupt:
                 print("\n🛑 Bot stopped")
+                # Cancel all pending orders on shutdown
+                try:
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+                except:
+                    pass
                 if self.position:
                     await self.close_position("manual_stop")
                 break
