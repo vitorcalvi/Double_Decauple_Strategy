@@ -22,21 +22,17 @@ class DOGEScalpingBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        
+        # FIXED: Removed restrictive conditions
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'bb_period': 20,
             'bb_std': 2.0,
-            'min_spread': 0.01,  # CHANGED from 0.05 (0.05% spread in 1min is rare)
-            'volume_spike': 0.5,
             'position_size': 100,
             'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,
             'net_take_profit': 0.28,
             'net_stop_loss': 0.07,
         }
-
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT.log"
@@ -53,7 +49,6 @@ class DOGEScalpingBot:
             return None
         
         close = df['close']
-        volume = df['volume']
         
         ema_fast = close.ewm(span=self.config['ema_fast']).mean()
         ema_slow = close.ewm(span=self.config['ema_slow']).mean()
@@ -63,20 +58,16 @@ class DOGEScalpingBot:
         upper_band = sma + (std * self.config['bb_std'])
         lower_band = sma - (std * self.config['bb_std'])
         
-        vol_ma = volume.rolling(window=10).mean()
-        volume_ratio = volume.iloc[-1] / vol_ma.iloc[-1] if vol_ma.iloc[-1] > 0 else 0
-        
         current_price = close.iloc[-1]
-        price_momentum = (ema_fast.iloc[-1] - ema_slow.iloc[-1]) / ema_slow.iloc[-1] * 100
         bb_position = (current_price - lower_band.iloc[-1]) / (upper_band.iloc[-1] - lower_band.iloc[-1]) if upper_band.iloc[-1] != lower_band.iloc[-1] else 0.5
-        spread = (df['high'].iloc[-1] - df['low'].iloc[-1]) / df['low'].iloc[-1] * 100
         
         return {
             'price': current_price,
-            'price_momentum': price_momentum,
-            'volume_ratio': volume_ratio,
+            'ema_fast': ema_fast.iloc[-1],
+            'ema_slow': ema_slow.iloc[-1],
             'bb_position': bb_position,
-            'spread': spread
+            'upper_band': upper_band.iloc[-1],
+            'lower_band': lower_band.iloc[-1]
         }
     
     def generate_signal(self, df):
@@ -84,19 +75,16 @@ class DOGEScalpingBot:
         if not indicators:
             return None
         
+        # SIMPLIFIED: Just EMA cross + BB position
         # Long signal
-        if (indicators['price_momentum'] > 0.1 and
-            indicators['volume_ratio'] > self.config['volume_spike'] and
-            indicators['bb_position'] < 0.3 and
-            indicators['spread'] > self.config['min_spread']):
-            return {'action': 'BUY', 'price': indicators['price'], 'momentum': indicators['price_momentum']}
+        if (indicators['ema_fast'] > indicators['ema_slow'] and
+            indicators['bb_position'] < 0.4):
+            return {'action': 'BUY', 'price': indicators['price']}
         
         # Short signal
-        if (indicators['price_momentum'] < -0.1 and
-            indicators['volume_ratio'] > self.config['volume_spike'] and
-            indicators['bb_position'] > 0.7 and
-            indicators['spread'] > self.config['min_spread']):
-            return {'action': 'SELL', 'price': indicators['price'], 'momentum': indicators['price_momentum']}
+        if (indicators['ema_fast'] < indicators['ema_slow'] and
+            indicators['bb_position'] > 0.6):
+            return {'action': 'SELL', 'price': indicators['price']}
         
         return None
     
@@ -146,18 +134,14 @@ class DOGEScalpingBot:
             return False, ""
         
         if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-            if current_price >= net_tp:
+            if current_price >= entry_price * (1 + self.config['net_take_profit'] / 100):
                 return True, "take_profit"
-            if current_price <= net_sl:
+            if current_price <= entry_price * (1 - self.config['net_stop_loss'] / 100):
                 return True, "stop_loss"
         else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-            if current_price <= net_tp:
+            if current_price <= entry_price * (1 - self.config['net_take_profit'] / 100):
                 return True, "take_profit"
-            if current_price >= net_sl:
+            if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
                 return True, "stop_loss"
         
         return False, ""
@@ -166,16 +150,10 @@ class DOGEScalpingBot:
         qty = self.config['position_size'] / signal['price']
         
         # ETHUSDT uses 0.001 minimum
-        if 'ETH' in self.symbol:
-            formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}"
-            if float(formatted_qty) < 0.001:
-                return
-        else:
-            formatted_qty = str(int(round(qty)))
-            if int(formatted_qty) == 0:
-                return
+        formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}"
+        if float(formatted_qty) < 0.001:
+            return
         
-        # LIMIT order for entry (maker)
         limit_price = round(signal['price'] * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 4)
         
         try:
@@ -192,7 +170,7 @@ class DOGEScalpingBot:
             if order.get('retCode') == 0:
                 self.trade_id += 1
                 print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
-                self.log_trade(signal['action'], limit_price, f"momentum:{signal['momentum']:.2f}")
+                self.log_trade(signal['action'], limit_price, "signal")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -203,14 +181,18 @@ class DOGEScalpingBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # MARKET order for exit (immediate execution)
+        if 'ETH' in self.symbol:
+            formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}"
+        else:
+            formatted_qty = str(int(round(qty)))
+        
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
                 orderType="Market",
-                qty=str(int(round(qty))),
+                qty=formatted_qty,
                 reduceOnly=True
             )
             

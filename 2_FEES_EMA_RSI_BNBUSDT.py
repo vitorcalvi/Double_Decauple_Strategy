@@ -22,16 +22,14 @@ class EMARSIBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        
+        # SIMPLIFIED: Removed volume and RSI diff requirements
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'rsi_period': 5,
-            'rsi_oversold': 25,
-            'rsi_overbought': 75,
-            'volume_threshold': 1.2,  # CHANGED from 1.5 (50% volume spike is rare)
+            'rsi_oversold': 30,  # More relaxed
+            'rsi_overbought': 70, # More relaxed
             'position_size': 100,
-            'min_rsi_diff': 1.0,  # CHANGED from 2.0 (2 point RSI change in 1min is rare)
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.43,
             'net_stop_loss': 0.12,
@@ -53,7 +51,6 @@ class EMARSIBot:
             return None
         
         close = df['close']
-        volume = df['volume']
         
         ema_fast = close.ewm(span=self.config['ema_fast']).mean()
         ema_slow = close.ewm(span=self.config['ema_slow']).mean()
@@ -64,15 +61,10 @@ class EMARSIBot:
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        vol_avg = volume.rolling(window=20).mean()
-        volume_ratio = volume.iloc[-1] / vol_avg.iloc[-1] if vol_avg.iloc[-1] > 0 else 0
-        
         return {
             'ema_fast': ema_fast.iloc[-1],
             'ema_slow': ema_slow.iloc[-1],
             'rsi': rsi.iloc[-1],
-            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else rsi.iloc[-1],
-            'volume_ratio': volume_ratio,
             'trend': 'UP' if ema_fast.iloc[-1] > ema_slow.iloc[-1] else 'DOWN'
         }
     
@@ -81,27 +73,17 @@ class EMARSIBot:
         if not indicators:
             return None
         
-        if indicators['volume_ratio'] < self.config['volume_threshold']:
-            return None
-        
-        rsi_diff = abs(indicators['rsi'] - indicators['rsi_prev'])
-        if rsi_diff < self.config['min_rsi_diff']:
-            return None
-        
         current_price = float(df['close'].iloc[-1])
         
+        # SIMPLIFIED: Just trend + RSI level
         # Bullish signal
         if (indicators['trend'] == 'UP' and
-            indicators['rsi_prev'] <= self.config['rsi_oversold'] and
-            indicators['rsi'] > indicators['rsi_prev'] and
-            current_price > indicators['ema_fast']):
+            indicators['rsi'] < 50):  # Just below neutral
             return {'action': 'BUY', 'price': current_price, 'rsi': indicators['rsi']}
         
         # Bearish signal
         if (indicators['trend'] == 'DOWN' and
-            indicators['rsi_prev'] >= self.config['rsi_overbought'] and
-            indicators['rsi'] < indicators['rsi_prev'] and
-            current_price < indicators['ema_fast']):
+            indicators['rsi'] > 50):  # Just above neutral
             return {'action': 'SELL', 'price': current_price, 'rsi': indicators['rsi']}
         
         return None
@@ -167,12 +149,11 @@ class EMARSIBot:
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
         
-        # BNBUSDT uses integer quantities
-        formatted_qty = str(int(round(qty)))
-        if int(formatted_qty) == 0:
+        # BNBUSDT uses 0.01 minimum
+        formatted_qty = f"{round(qty / 0.01) * 0.01:.2f}"
+        if float(formatted_qty) < 0.01:
             return
         
-        # LIMIT order for entry
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 2)
         
@@ -189,7 +170,7 @@ class EMARSIBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:,.0f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -201,10 +182,9 @@ class EMARSIBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # BNBUSDT uses integer quantities
-        formatted_qty = str(int(round(qty)))
+        # BNBUSDT uses 0.01 minimum
+        formatted_qty = f"{round(qty / 0.01) * 0.01:.2f}"
         
-        # MARKET order for exit
         try:
             order = self.exchange.place_order(
                 category="linear",

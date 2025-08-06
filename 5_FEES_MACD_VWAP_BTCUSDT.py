@@ -22,23 +22,16 @@ class PivotReversalBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
+        # SIMPLIFIED config
         self.config = {
-            'pivot_period': 5,
             'rsi_period': 7,
-            'mfi_period': 7,
-            'rsi_oversold': 30,  # CHANGED from 35 (give more room)
-            'rsi_overbought': 70,  # CHANGED from 65 (give more room)
-            'mfi_oversold': 20,  # CHANGED from 25 (give more room)
-            'mfi_overbought': 80,  # CHANGED from 75 (give more room)
+            'rsi_oversold': 40,  # Relaxed from 30
+            'rsi_overbought': 60, # Relaxed from 70
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.68,
             'net_stop_loss': 0.07,
         }
-
-        
-        self.support_levels = []
-        self.resistance_levels = []
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/5_FEES_MACD_VWAP_BTCUSDT.log"
@@ -51,45 +44,31 @@ class PivotReversalBot:
             return False
     
     def format_qty(self, qty):
-        # ADAUSDT uses integer quantities (no decimals)
-        return str(int(round(qty)))
+        # BTCUSDT uses 0.001 minimum
+        return f"{round(qty / 0.001) * 0.001:.3f}"
     
     def calculate_indicators(self, df):
-        min_len = max(self.config['rsi_period'], self.config['mfi_period']) + 1
-        if len(df) < min_len:
+        if len(df) < self.config['rsi_period'] + 1:
             return None
         
         close = df['close']
-        high = df['high']
-        low = df['low']
-        volume = df['volume']
         
-        # RSI
+        # RSI only (simplified)
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        # MFI
-        typical_price = (high + low + close) / 3
-        money_flow = typical_price * volume
-        
-        positive_mf = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
-        negative_mf = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
-
         
         epsilon = 1e-10
-        mfi = 100 - (100 / (1 + positive_mf / (negative_mf + epsilon)))
+        rs = gain / (loss + epsilon)
+        rsi = 100 - (100 / (1 + rs))
         
         return {
             'rsi': rsi.iloc[-1] if not rsi.empty else 50,
-            'mfi': mfi.iloc[-1] if not mfi.empty else 50,
             'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 else 50
         }
     
     def generate_signal(self, df):
-        if len(df) < 30:
+        if len(df) < 20:
             return None
         
         current_price = float(df['close'].iloc[-1])
@@ -99,16 +78,16 @@ class PivotReversalBot:
             return None
         
         rsi = indicators['rsi']
-        mfi = indicators['mfi']
         rsi_prev = indicators['rsi_prev']
         
+        # SIMPLIFIED: Just RSI levels with momentum
         # BUY Signal
-        if mfi <= self.config['mfi_oversold'] or (rsi <= self.config['rsi_oversold'] and rsi > rsi_prev):
-            return {'action': 'BUY', 'price': current_price, 'rsi': rsi, 'mfi': mfi}
+        if rsi <= self.config['rsi_oversold'] and rsi > rsi_prev:
+            return {'action': 'BUY', 'price': current_price, 'rsi': rsi}
         
         # SELL Signal
-        if mfi >= self.config['mfi_overbought'] or (rsi >= self.config['rsi_overbought'] and rsi < rsi_prev):
-            return {'action': 'SELL', 'price': current_price, 'rsi': rsi, 'mfi': mfi}
+        if rsi >= self.config['rsi_overbought'] and rsi < rsi_prev:
+            return {'action': 'SELL', 'price': current_price, 'rsi': rsi}
         
         return None
     
@@ -118,7 +97,7 @@ class PivotReversalBot:
                 category="linear",
                 symbol=self.symbol,
                 interval="1",
-                limit=100
+                limit=50
             )
             
             if klines.get('retCode') != 0:
@@ -146,7 +125,7 @@ class PivotReversalBot:
         except:
             pass
     
-    def should_close(self, signal=None):
+    def should_close(self):
         if not self.position:
             return False, ""
         
@@ -168,21 +147,15 @@ class PivotReversalBot:
             if current_price >= entry_price * (1 + self.config['net_stop_loss'] / 100):
                 return True, "stop_loss"
         
-        # Exit on opposite signal
-        if signal and ((side == "Buy" and signal['action'] == 'SELL') or 
-                      (side == "Sell" and signal['action'] == 'BUY')):
-            return True, "signal_reversal"
-        
         return False, ""
     
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
-        if formatted_qty == "0":
+        if float(formatted_qty) < 0.001:
             return
         
-        # LIMIT order for entry
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 2)
         
@@ -200,8 +173,8 @@ class PivotReversalBot:
             if order.get('retCode') == 0:
                 self.trade_id += 1
                 print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
-                print(f"   📈 RSI:{signal['rsi']:.1f} MFI:{signal['mfi']:.1f}")
-                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_MFI:{signal['mfi']:.1f}")
+                print(f"   📈 RSI:{signal['rsi']:.1f}")
+                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -212,7 +185,6 @@ class PivotReversalBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # MARKET order for exit
         try:
             order = self.exchange.place_order(
                 category="linear",
@@ -246,13 +218,11 @@ class PivotReversalBot:
         
         await self.check_position()
         
-        signal = self.generate_signal(self.price_data)
-        
         if self.position:
-            should_close, reason = self.should_close(signal)
+            should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal:
+        elif signal := self.generate_signal(self.price_data):
             await self.execute_trade(signal)
     
     async def run(self):
