@@ -43,7 +43,7 @@ class ZigZagTradingBot:
         self.swing_lows = []
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/zigzag_{datetime.now().strftime('%Y%m%d')}.log"
+        self.log_file = f"logs/4_FEES_LIQUIDITYSWEEPBOT_DOGEUSDT.log"
     
     def connect(self):
         try:
@@ -53,7 +53,8 @@ class ZigZagTradingBot:
             return False
     
     def format_qty(self, qty):
-        return f"{round(qty / 0.1) * 0.1:.1f}" if qty >= 0.1 else str(0.1)
+        # XRPUSDT uses integer quantities  
+        return str(int(round(qty)))
     
     def identify_swings(self):
         if len(self.price_data) < 10:

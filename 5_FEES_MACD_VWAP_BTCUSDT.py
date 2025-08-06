@@ -10,7 +10,7 @@ load_dotenv()
 
 class PivotReversalBot:
     def __init__(self):
-        self.symbol = 'ADAUSDT'
+        self.symbol = 'BTCUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -40,7 +40,7 @@ class PivotReversalBot:
         self.resistance_levels = []
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/pivot_trades.log"
+        self.log_file = "logs/5_FEES_MACD_VWAP_BTCUSDT.log"
     
     def connect(self):
         try:
@@ -50,9 +50,8 @@ class PivotReversalBot:
             return False
     
     def format_qty(self, qty):
-        if qty < 0.01:
-            return "0"
-        return f"{round(qty / 0.01) * 0.01:.2f}"
+        # ADAUSDT uses integer quantities (no decimals)
+        return str(int(round(qty)))
     
     def calculate_indicators(self, df):
         min_len = max(self.config['rsi_period'], self.config['mfi_period']) + 1

@@ -38,7 +38,7 @@ class EMAMACDRSIBot:
         }
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/ema_macd_rsi_trades.log"
+        self.log_file = "logs/3_FEES_EMAMACDRSI_SOLUSDT.log"
     
     def connect(self):
         try:
@@ -150,9 +150,10 @@ class EMAMACDRSIBot:
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
         
-        if qty < 1.0:
+        # SOLUSDT uses integer quantities
+        formatted_qty = str(int(round(qty)))
+        if int(formatted_qty) == 0:
             return
-        
         # LIMIT order for entry
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 4)
@@ -163,14 +164,14 @@ class EMAMACDRSIBot:
                 symbol=self.symbol,
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
-                qty=str(int(round(qty))),
+                qty=formatted_qty,
                 price=str(limit_price),
                 timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                print(f"✅ {signal['action']}: {int(qty)} @ ${limit_price:.4f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except:
             pass

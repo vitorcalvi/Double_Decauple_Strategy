@@ -59,7 +59,7 @@ class EnhancedMLScalpingBot:
         self.position_metadata = {}
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/ml_scalping_{datetime.now().strftime('%Y%m%d')}.log"
+        self.log_file = f"logs/6_FEES_MLFiltered_ARBUSDT.log"
     
     def connect(self):
         try:
@@ -442,9 +442,10 @@ class EnhancedMLScalpingBot:
     
     async def execute_trade(self, signal):
         qty = self.config['base_position_size'] / signal['price']
-        formatted_qty = str(int(round(qty))) if qty >= 1 else "0"
         
-        if formatted_qty == "0":
+        # ARBUSDT uses integer quantities
+        formatted_qty = str(int(round(qty)))
+        if int(formatted_qty) == 0:
             return
         
         # LIMIT order for entry

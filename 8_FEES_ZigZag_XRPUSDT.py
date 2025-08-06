@@ -39,7 +39,7 @@ class LiquiditySweepBot:
         self.order_blocks = []
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/liquidity_sweep_trades.log"
+        self.log_file = "logs/8_FEES_ZigZag_XRPUSDT.log"
     
     def connect(self):
         try:
@@ -262,9 +262,10 @@ class LiquiditySweepBot:
     
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
-        formatted_qty = str(int(round(qty))) if qty >= 1 else "0"
         
-        if formatted_qty == "0":
+        # DOGEUSDT uses integer quantities
+        formatted_qty = str(int(round(qty)))
+        if int(formatted_qty) == 0:
             return
         
         # LIMIT order for entry

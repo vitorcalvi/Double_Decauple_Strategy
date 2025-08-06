@@ -37,7 +37,7 @@ class DOGEScalpingBot:
         }
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/scalping_trades.log"
+        self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT.log"
     
     def connect(self):
         try:
@@ -162,10 +162,16 @@ class DOGEScalpingBot:
     
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
-        formatted_qty = str(int(round(qty))) if qty >= 1 else "0"
         
-        if formatted_qty == "0":
-            return
+        # ETHUSDT uses 0.001 minimum
+        if 'ETH' in self.symbol:
+            formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}"
+            if float(formatted_qty) < 0.001:
+                return
+        else:
+            formatted_qty = str(int(round(qty)))
+            if int(formatted_qty) == 0:
+                return
         
         # LIMIT order for entry (maker)
         limit_price = round(signal['price'] * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 4)

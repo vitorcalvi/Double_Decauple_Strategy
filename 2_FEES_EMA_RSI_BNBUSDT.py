@@ -37,7 +37,7 @@ class EMARSIBot:
         }
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/ema_rsi_trades.log"
+        self.log_file = "logs/2_FEES_EMA_RSI_BNBUSDT.log"
     
     def connect(self):
         try:
@@ -165,9 +165,10 @@ class EMARSIBot:
     
     async def execute_trade(self, signal):
         qty = self.config['position_size'] / signal['price']
-        formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}" if qty >= 0.001 else "0"
         
-        if formatted_qty == "0":
+        # BNBUSDT uses integer quantities
+        formatted_qty = str(int(round(qty)))
+        if int(formatted_qty) == 0:
             return
         
         # LIMIT order for entry
@@ -198,7 +199,9 @@ class EMARSIBot:
         
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        formatted_qty = f"{round(qty / 0.001) * 0.001:.3f}"
+        
+        # BNBUSDT uses integer quantities
+        formatted_qty = str(int(round(qty)))
         
         # MARKET order for exit
         try:
