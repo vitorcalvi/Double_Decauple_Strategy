@@ -10,7 +10,7 @@ load_dotenv()
 
 class ZigZagTradingBot:
     def __init__(self):
-        self.symbol = 'XRPUSDT'
+        self.symbol = 'DOGEUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'

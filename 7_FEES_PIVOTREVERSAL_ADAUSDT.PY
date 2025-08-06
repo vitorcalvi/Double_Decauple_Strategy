@@ -32,8 +32,8 @@ class MACDVWAPBot:
             'macd_signal': 5,
             'rsi_period': 9,
             'ema_period': 13,
-            'rsi_oversold': 35,
-            'rsi_overbought': 65,
+            'rsi_oversold': 30,  # CHANGED from 35 (more room for signals)
+            'rsi_overbought': 70,  # CHANGED from 65 (more room for signals)
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.43,

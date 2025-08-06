@@ -22,15 +22,16 @@ class EMARSIBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
+        
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'rsi_period': 5,
             'rsi_oversold': 25,
             'rsi_overbought': 75,
-            'volume_threshold': 1.5,
+            'volume_threshold': 1.2,  # CHANGED from 1.5 (50% volume spike is rare)
             'position_size': 100,
-            'min_rsi_diff': 2.0,
+            'min_rsi_diff': 1.0,  # CHANGED from 2.0 (2 point RSI change in 1min is rare)
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.43,
             'net_stop_loss': 0.12,

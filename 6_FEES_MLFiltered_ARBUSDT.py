@@ -38,7 +38,7 @@ class EnhancedMLScalpingBot:
             'macd_signal': 9,
             'atr_period': 14,
             'path_lookback': 20,
-            'ml_confidence_threshold': 0.70,
+            'ml_confidence_threshold': 0.65,
             'base_position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,

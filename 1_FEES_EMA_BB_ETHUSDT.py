@@ -22,12 +22,13 @@ class DOGEScalpingBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
+        
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'bb_period': 20,
             'bb_std': 2.0,
-            'min_spread': 0.05,
+            'min_spread': 0.01,  # CHANGED from 0.05 (0.05% spread in 1min is rare)
             'volume_spike': 0.5,
             'position_size': 100,
             'maker_offset_pct': 0.01,
@@ -35,6 +36,7 @@ class DOGEScalpingBot:
             'net_take_profit': 0.28,
             'net_stop_loss': 0.07,
         }
+
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT.log"

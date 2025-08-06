@@ -27,7 +27,7 @@ class LiquiditySweepBot:
             'timeframe': '5',
             'liquidity_lookback': 50,
             'order_block_lookback': 20,
-            'sweep_threshold': 0.15,
+            'sweep_threshold': 0.10,  # CHANGED from 0.15 (15 basis points is too much)
             'position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,

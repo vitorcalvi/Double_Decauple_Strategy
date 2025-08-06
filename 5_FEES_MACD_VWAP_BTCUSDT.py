@@ -26,15 +26,16 @@ class PivotReversalBot:
             'pivot_period': 5,
             'rsi_period': 7,
             'mfi_period': 7,
-            'rsi_oversold': 35,
-            'rsi_overbought': 65,
-            'mfi_oversold': 25,
-            'mfi_overbought': 75,
+            'rsi_oversold': 30,  # CHANGED from 35 (give more room)
+            'rsi_overbought': 70,  # CHANGED from 65 (give more room)
+            'mfi_oversold': 20,  # CHANGED from 25 (give more room)
+            'mfi_overbought': 80,  # CHANGED from 75 (give more room)
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.68,
             'net_stop_loss': 0.07,
         }
+
         
         self.support_levels = []
         self.resistance_levels = []
@@ -76,8 +77,10 @@ class PivotReversalBot:
         
         positive_mf = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
         negative_mf = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=self.config['mfi_period']).sum()
+
         
-        mfi = 100 - (100 / (1 + positive_mf / negative_mf))
+        epsilon = 1e-10
+        mfi = 100 - (100 / (1 + positive_mf / (negative_mf + epsilon)))
         
         return {
             'rsi': rsi.iloc[-1] if not rsi.empty else 50,
