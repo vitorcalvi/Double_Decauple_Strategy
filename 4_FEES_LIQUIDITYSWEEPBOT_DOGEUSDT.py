@@ -37,12 +37,9 @@ class LiquiditySweepBot:
             'position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,
-            # Fee structure
             'maker_fee_pct': -0.04,  # Negative = rebate
-            # Gross TP/SL
             'gross_take_profit': 1.5,
             'gross_stop_loss': 0.5,
-            # Net TP/SL (adjusted for 2x maker rebate)
             'net_take_profit': 1.58,  # 1.5 + 0.08 rebate
             'net_stop_loss': 0.42,    # 0.5 - 0.08 rebate
         }
@@ -69,12 +66,8 @@ class LiquiditySweepBot:
     def calculate_break_even(self, entry_price, side):
         """Calculate break-even price including fees."""
         fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        
-        # With rebate, break-even is better than entry
-        if side == "Buy":
-            return entry_price * (1 - fee_impact)
-        else:
-            return entry_price * (1 + fee_impact)
+        multiplier = 1 - fee_impact if side == "Buy" else 1 + fee_impact
+        return entry_price * multiplier
     
     def calculate_net_targets(self, entry_price, side):
         """Calculate net TP/SL accounting for round-trip fees."""
@@ -84,7 +77,6 @@ class LiquiditySweepBot:
         else:
             net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
             net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        
         return net_tp, net_sl
     
     def identify_liquidity_pools(self, df):
@@ -176,9 +168,7 @@ class LiquiditySweepBot:
         for pool in self.liquidity_pools['highs']:
             sweep_level = pool['price'] * (1 + self.config['sweep_threshold'] / 100)
             
-            if (current_high > sweep_level and 
-                current_close < pool['price']):
-                
+            if current_high > sweep_level and current_close < pool['price']:
                 return {
                     'type': 'bearish_sweep',
                     'swept_level': pool['price'],
@@ -189,9 +179,7 @@ class LiquiditySweepBot:
         for pool in self.liquidity_pools['lows']:
             sweep_level = pool['price'] * (1 - self.config['sweep_threshold'] / 100)
             
-            if (current_low < sweep_level and 
-                current_close > pool['price']):
-                
+            if current_low < sweep_level and current_close > pool['price']:
                 return {
                     'type': 'bullish_sweep',
                     'swept_level': pool['price'],
@@ -228,17 +216,11 @@ class LiquiditySweepBot:
         current_price = df['close'].iloc[-1]
         has_confluence = self.check_order_block_confluence(sweep['type'], current_price)
         
-        if sweep['type'] == 'bullish_sweep':
+        action = 'BUY' if sweep['type'] == 'bullish_sweep' else 'SELL' if sweep['type'] == 'bearish_sweep' else None
+        
+        if action:
             return {
-                'action': 'BUY',
-                'price': current_price,
-                'swept_level': sweep['swept_level'],
-                'volume_ratio': sweep['volume_ratio'],
-                'confluence': has_confluence
-            }
-        elif sweep['type'] == 'bearish_sweep':
-            return {
-                'action': 'SELL',
+                'action': action,
                 'price': current_price,
                 'swept_level': sweep['swept_level'],
                 'volume_ratio': sweep['volume_ratio'],
@@ -331,7 +313,8 @@ class LiquiditySweepBot:
             return
         
         # Calculate limit price
-        limit_price = round(signal['price'] * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 4)
+        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(signal['price'] * offset_mult, 4)
         
         try:
             order = self.exchange.place_order(
@@ -363,7 +346,7 @@ class LiquiditySweepBot:
             print(f"Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order."""
+        """Close position with maker order - FIXED VERSION."""
         if not self.position:
             return
         
@@ -373,7 +356,8 @@ class LiquiditySweepBot:
         entry_price = float(self.position.get('avgPrice', 0))
         
         # Calculate limit price
-        limit_price = round(current_price * (1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100), 4)
+        offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
+        limit_price = round(current_price * offset_mult, 4)
         
         try:
             order = self.exchange.place_order(
@@ -395,6 +379,10 @@ class LiquiditySweepBot:
                 
                 self.log_trade("CLOSE", limit_price, f"{reason}_GrossPnL:${gross_pnl:.2f}_NetPnL:${net_pnl:.2f}")
                 print(f"💰 Closed: {reason} | Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
+                
+                # CRITICAL FIX: Clear position after successful close
+                self.position = None
+                
         except Exception as e:
             print(f"Close failed: {e}")
     
@@ -466,8 +454,10 @@ class LiquiditySweepBot:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif signal := self.generate_signal(self.price_data):
-            await self.execute_trade(signal)
+        else:
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
         
         self.show_status()
     

@@ -39,12 +39,9 @@ class PivotReversalBot:
             'min_volume_threshold': 50000,
             'entry_threshold': 0.4,  # Min profit threshold
             'maker_offset_pct': 0.01,
-            # Fee structure
             'maker_fee_pct': -0.04,  # Negative = rebate
-            # Gross TP/SL
             'gross_take_profit': 0.6,
             'gross_stop_loss': 0.15,
-            # Net TP/SL (adjusted for 2x maker rebate)
             'net_take_profit': 0.68,  # 0.6 + 0.08 rebate
             'net_stop_loss': 0.07,    # 0.15 - 0.08 rebate
         }
@@ -53,12 +50,12 @@ class PivotReversalBot:
         self.support_levels = []
         self.resistance_levels = []
         
-        # BNB rules
+        # ADA rules
         self.qty_step = '0.01'
         self.min_qty = 0.01
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/pivot_bnb_trades.log"
+        self.log_file = "logs/pivot_ada_trades.log"
     
     def connect(self):
         """Connect to exchange."""
@@ -82,12 +79,8 @@ class PivotReversalBot:
     def calculate_break_even(self, entry_price, side):
         """Calculate break-even price including fees."""
         fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        
-        # With rebate, break-even is better than entry
-        if side == "Buy":
-            return entry_price * (1 - fee_impact)
-        else:
-            return entry_price * (1 + fee_impact)
+        multiplier = 1 - fee_impact if side == "Buy" else 1 + fee_impact
+        return entry_price * multiplier
     
     def calculate_net_targets(self, entry_price, side):
         """Calculate net TP/SL accounting for round-trip fees."""
@@ -97,7 +90,6 @@ class PivotReversalBot:
         else:
             net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
             net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        
         return net_tp, net_sl
     
     def calculate_indicators(self, df):
@@ -217,7 +209,7 @@ class PivotReversalBot:
             expected_profit = ((target - current_price) / current_price) * 100
             
             # Include fee benefit in entry threshold check
-            if expected_profit < (self.config['entry_threshold'] - 0.08):  # Adjust for rebate
+            if expected_profit < (self.config['entry_threshold'] - 0.08):
                 return None
             
             return {
@@ -237,7 +229,7 @@ class PivotReversalBot:
             expected_profit = ((current_price - target) / current_price) * 100
             
             # Include fee benefit in entry threshold check
-            if expected_profit < (self.config['entry_threshold'] - 0.08):  # Adjust for rebate
+            if expected_profit < (self.config['entry_threshold'] - 0.08):
                 return None
             
             return {
@@ -288,7 +280,7 @@ class PivotReversalBot:
                 if not pos_list or float(pos_list[0]['size']) == 0:
                     if self.position:
                         self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), "position_closed")
-                    self.position = None
+                        self.position = None
                 else:
                     self.position = pos_list[0]
         except:
@@ -338,7 +330,8 @@ class PivotReversalBot:
             return
         
         # Calculate limit price with offset
-        limit_price = round(current_price * (1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100), 2)
+        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(current_price * offset_mult, 2)
         
         try:
             order = self.exchange.place_order(
@@ -369,7 +362,7 @@ class PivotReversalBot:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order and NET PnL."""
+        """Close position with maker order - FIXED VERSION."""
         if not self.position:
             return
         
@@ -379,7 +372,8 @@ class PivotReversalBot:
         entry_price = float(self.position.get('avgPrice', 0))
         
         # Calculate limit price with offset
-        limit_price = round(current_price * (1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100), 2)
+        offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
+        limit_price = round(current_price * offset_mult, 2)
         
         try:
             order = self.exchange.place_order(
@@ -403,6 +397,10 @@ class PivotReversalBot:
                 print(f"✅ Closed: {reason}")
                 print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
                 print(f"   📊 Fee Rebate Earned: ${fee_earned:.2f}")
+                
+                # CRITICAL FIX: Clear position after successful close
+                self.position = None
+                
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
