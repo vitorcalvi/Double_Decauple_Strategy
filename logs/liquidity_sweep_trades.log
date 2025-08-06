@@ -1,0 +1,11 @@
+{"timestamp": "2025-08-06 15:36:53", "id": 0, "action": "CLOSE", "price": 0.1992, "info": "stop_loss_net_0.42%_GrossPnL:$-0.40_NetPnL:$-0.32"}
+{"timestamp": "2025-08-06 15:37:04", "id": 0, "action": "CLOSE", "price": 0.1992, "info": "stop_loss_net_0.42%_GrossPnL:$-0.47_NetPnL:$-0.39"}
+{"timestamp": "2025-08-06 15:37:15", "id": 0, "action": "CLOSE", "price": 0.1993, "info": "stop_loss_net_0.42%_GrossPnL:$-0.52_NetPnL:$-0.44"}
+{"timestamp": "2025-08-06 16:56:09", "id": 0, "action": "CLOSE", "price": 0.2024, "info": "stop_loss_net_0.42%_GrossPnL:$-0.45_NetPnL:$-0.37"}
+{"timestamp": "2025-08-06 16:56:20", "id": 0, "action": "CLOSE", "price": 0.2026, "info": "stop_loss_net_0.42%_GrossPnL:$-0.51_NetPnL:$-0.43"}
+{"timestamp": "2025-08-06 16:56:31", "id": 0, "action": "CLOSE", "price": 0.2028, "info": "stop_loss_net_0.42%_GrossPnL:$-0.62_NetPnL:$-0.54"}
+{"timestamp": "2025-08-06 17:07:55", "id": 1, "action": "SELL", "price": 0.2023, "info": "swept:0.2023_BE:0.2025_NetTP:0.1991_NO_OB"}
+{"timestamp": "2025-08-06 17:08:05", "id": 2, "action": "SELL", "price": 0.2021, "info": "swept:0.2023_BE:0.2023_NetTP:0.1989_NO_OB"}
+{"timestamp": "2025-08-06 17:18:37", "id": 2, "action": "CLOSE", "price": 0.2031, "info": "stop_loss_net_0.42%_GrossPnL:$-0.85_NetPnL:$-0.69"}
+{"timestamp": "2025-08-06 17:18:47", "id": 2, "action": "CLOSE", "price": 0.203, "info": "stop_loss_net_0.42%_GrossPnL:$-0.84_NetPnL:$-0.68"}
+{"timestamp": "2025-08-06 17:27:11", "id": 3, "action": "SELL", "price": 0.2022, "info": "swept:0.2023_BE:0.2024_NetTP:0.1990_NO_OB"}
