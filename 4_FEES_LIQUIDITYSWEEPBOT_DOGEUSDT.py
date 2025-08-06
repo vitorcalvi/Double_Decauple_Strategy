@@ -22,10 +22,10 @@ class ZigZagTradingBot:
         self.price_data = pd.DataFrame()
         self.trade_id = 0
         
-        # Order management
+        # Order management - NO COOLDOWN
         self.pending_order = None
         self.last_order_time = None
-        self.order_cooldown = 30  # seconds between orders
+        self.order_timeout = 180  # Cancel orders older than 180 seconds
         
         self.config = {
             'timeframe': '1',
@@ -51,7 +51,6 @@ class ZigZagTradingBot:
         return str(int(round(qty)))
     
     async def check_pending_orders(self):
-        """Check and manage pending orders"""
         try:
             orders = self.exchange.get_open_orders(
                 category="linear",
@@ -66,7 +65,7 @@ class ZigZagTradingBot:
                         order_time = int(order['createdTime']) / 1000
                         age = datetime.now().timestamp() - order_time
                         
-                        if age > 60:  # Cancel if older than 60 seconds
+                        if age > self.order_timeout:
                             self.exchange.cancel_order(
                                 category="linear",
                                 symbol=self.symbol,
@@ -76,7 +75,7 @@ class ZigZagTradingBot:
                             self.pending_order = None
                         else:
                             self.pending_order = order
-                            return True  # Has pending order
+                            return True
                 else:
                     self.pending_order = None
                     return False
@@ -112,7 +111,6 @@ class ZigZagTradingBot:
         
         if last_swing['type'] == 'LOW' and current_price > last_swing['price']:
             return {'action': 'BUY', 'price': current_price, 'reason': 'swing_low'}
-        
         elif last_swing['type'] == 'HIGH' and current_price < last_swing['price']:
             return {'action': 'SELL', 'price': current_price, 'reason': 'swing_high'}
         
@@ -177,17 +175,10 @@ class ZigZagTradingBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        # Check cooldown
-        if self.last_order_time:
-            if (datetime.now() - self.last_order_time).total_seconds() < self.order_cooldown:
-                return
-        
-        # Check for pending orders
+        # NO COOLDOWN - Check for pending orders only
         if await self.check_pending_orders():
-            print(f"⏳ Already have pending order, skipping new signal")
             return
         
-        # Check if already in position
         if self.position:
             return
         
@@ -257,13 +248,13 @@ class ZigZagTradingBot:
             return
         
         await self.check_position()
-        await self.check_pending_orders()  # Check and clean up orders
+        await self.check_pending_orders()
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif not self.pending_order:  # Only generate signal if no pending order
+        elif not self.pending_order:
             signal = self.generate_signal()
             if signal:
                 await self.execute_trade(signal)
@@ -276,7 +267,7 @@ class ZigZagTradingBot:
         print(f"✅ ZigZag Trading Bot - {self.symbol}")
         print(f"⏰ Timeframe: {self.config['timeframe']} minute")
         print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
-        print(f"⏱️ Order cooldown: {self.order_cooldown}s")
+        print(f"⏱️ No cooldown | Order timeout: {self.order_timeout}s")
         
         try:
             while True:
@@ -284,7 +275,6 @@ class ZigZagTradingBot:
                 await asyncio.sleep(2)
         except KeyboardInterrupt:
             print("\n🛑 Bot stopped")
-            # Cancel all pending orders on shutdown
             try:
                 self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
             except:

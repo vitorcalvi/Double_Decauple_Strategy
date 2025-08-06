@@ -21,12 +21,9 @@ class EMAMACDRSIBot:
         self.position = None
         self.price_data = pd.DataFrame()
         self.trade_id = 0
-        
-        # Order management - ADDED (NO COOLDOWN)
         self.pending_order = None
-        self.last_order_time = None
-        self.order_timeout = 180  # cancel orders older than this
-        self.last_signal = None  # track last signal to avoid duplicates
+        self.last_signal = None
+        self.order_timeout = 180
         
         self.config = {
             'timeframe': '5',
@@ -34,7 +31,6 @@ class EMAMACDRSIBot:
             'ema_long': 26,
             'macd_signal': 9,
             'rsi_period': 14,
-            'rsi_oversold': 30,
             'rsi_neutral_low': 50,
             'position_size': 100,
             'lookback': 100,
@@ -42,10 +38,6 @@ class EMAMACDRSIBot:
             'net_take_profit': 1.08,
             'net_stop_loss': 0.42,
         }
-        
-        # Status tracking
-        self.last_status_time = None
-        self.status_interval = 5  # Show status every 5 seconds
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/3_FEES_EMAMACDRSI_SOLUSDT.log"
@@ -58,38 +50,29 @@ class EMAMACDRSIBot:
             return False
     
     async def check_pending_orders(self):
-        """Check and manage pending orders - ADDED"""
         try:
-            orders = self.exchange.get_open_orders(
-                category="linear",
-                symbol=self.symbol
-            )
+            orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
+            if orders.get('retCode') != 0:
+                return False
             
-            if orders.get('retCode') == 0:
-                order_list = orders['result']['list']
-                
-                if order_list:
-                    for order in order_list:
-                        order_time = int(order['createdTime']) / 1000
-                        age = datetime.now().timestamp() - order_time
-                        
-                        if age > self.order_timeout:
-                            self.exchange.cancel_order(
-                                category="linear",
-                                symbol=self.symbol,
-                                orderId=order['orderId']
-                            )
-                            print(f"❌ Cancelled stale order (aged {age:.0f}s)")
-                            self.pending_order = None
-                            self.last_signal = None
-                        else:
-                            self.pending_order = order
-                            return True  # Has pending order
-                else:
-                    self.pending_order = None
-                    return False
-            return False
-        except Exception as e:
+            order_list = orders['result']['list']
+            if not order_list:
+                self.pending_order = None
+                return False
+            
+            order = order_list[0]
+            age = datetime.now().timestamp() - int(order['createdTime']) / 1000
+            
+            if age > self.order_timeout:
+                self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
+                print(f"❌ Cancelled stale order (aged {age:.0f}s)")
+                self.pending_order = None
+                self.last_signal = None
+                return False
+            
+            self.pending_order = order
+            return True
+        except:
             return False
     
     def calculate_indicators(self, df):
@@ -107,14 +90,15 @@ class EMAMACDRSIBot:
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(window=self.config['rsi_period']).mean()
         loss = -delta.clip(upper=0).rolling(window=self.config['rsi_period']).mean()
-        rsi = 100 - (100 / (1 + gain / loss))
+        epsilon = 1e-10
+        rsi = 100 - (100 / (1 + gain / (loss + epsilon)))
         
         return {
             'price': close.iloc[-1],
             'ema_aligned': ema_short.iloc[-1] > ema_long.iloc[-1],
-            'histogram_flip': histogram.iloc[-2] < 0 and histogram.iloc[-1] > 0,
-            'histogram_reversal': histogram.iloc[-2] > 0 and histogram.iloc[-1] < 0,
-            'rsi': rsi.iloc[-1],
+            'histogram': histogram.iloc[-1],
+            'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else 0,
+            'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50,
             'rsi_above_50': rsi.iloc[-1] > self.config['rsi_neutral_low']
         }
     
@@ -123,16 +107,23 @@ class EMAMACDRSIBot:
         if not analysis:
             return None
         
-        # Check if signal is duplicate of last one - ADDED
+        # Skip duplicate signals (less strict check)
         if self.last_signal:
             price_change = abs(analysis['price'] - self.last_signal['price']) / self.last_signal['price']
-            if price_change < 0.001:  # Less than 0.1% price change
-                return None  # Skip duplicate signal
+            if price_change < 0.002:  # 0.2% price change threshold
+                return None
         
-        if analysis['histogram_flip'] and analysis['rsi_above_50']:
+        # Simplified conditions for more frequent signals
+        histogram_positive = analysis['histogram'] > 0
+        histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
+        histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
+        
+        # BUY signal - more relaxed
+        if (histogram_positive and analysis['rsi'] < 60) or (histogram_turning_positive and analysis['rsi'] < 70):
             return {'action': 'BUY', 'price': analysis['price'], 'rsi': analysis['rsi']}
         
-        if analysis['histogram_reversal']:
+        # SELL signal - more relaxed
+        if (not histogram_positive and analysis['rsi'] > 40) or (histogram_turning_negative and analysis['rsi'] > 30):
             return {'action': 'SELL', 'price': analysis['price'], 'rsi': analysis['rsi']}
         
         return None
@@ -149,10 +140,7 @@ class EMAMACDRSIBot:
             if klines.get('retCode') != 0:
                 return False
             
-            df = pd.DataFrame(klines['result']['list'], columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-            
+            df = pd.DataFrame(klines['result']['list'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             
@@ -181,46 +169,38 @@ class EMAMACDRSIBot:
         if entry_price == 0:
             return False, ""
         
-        if side == "Buy":
-            profit_pct = ((current_price - entry_price) / entry_price) * 100
-            if profit_pct >= self.config['net_take_profit']:
-                return True, "take_profit"
-            if profit_pct <= -self.config['net_stop_loss']:
-                return True, "stop_loss"
-        else:
-            profit_pct = ((entry_price - current_price) / entry_price) * 100
-            if profit_pct >= self.config['net_take_profit']:
-                return True, "take_profit"
-            if profit_pct <= -self.config['net_stop_loss']:
-                return True, "stop_loss"
+        profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
         
+        if profit_pct >= self.config['net_take_profit']:
+            return True, "take_profit"
+        if profit_pct <= -self.config['net_stop_loss']:
+            return True, "stop_loss"
+        
+        # Simplified MACD reversal check
         analysis = self.calculate_indicators(self.price_data)
-        if analysis and analysis['histogram_reversal']:
-            return True, "macd_reversal"
+        if analysis:
+            histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
+            if side == "Buy" and histogram_turning_negative and analysis['rsi'] > 60:
+                return True, "macd_reversal"
+            
+            histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
+            if side == "Sell" and histogram_turning_positive and analysis['rsi'] < 40:
+                return True, "macd_reversal"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        # NO COOLDOWN - Removed
-        
-        # Check for pending orders - ADDED
-        if await self.check_pending_orders():
-            return  # Silent return if pending order exists
-        
-        # Check if already in position - ADDED
-        if self.position:
+        if await self.check_pending_orders() or self.position:
             return
         
         qty = self.config['position_size'] / signal['price']
-        
-        # SOLUSDT uses integer quantities
         formatted_qty = str(int(round(qty)))
+        
         if int(formatted_qty) == 0:
             return
-            
-        # LIMIT order for entry
-        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset_mult, 4)
+        
+        offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(signal['price'] * offset, 4)
         
         try:
             order = self.exchange.place_order(
@@ -235,14 +215,9 @@ class EMAMACDRSIBot:
             
             if order.get('retCode') == 0:
                 self.trade_id += 1
-                self.last_order_time = datetime.now()  # ADDED
-                self.last_signal = signal  # ADDED
-                self.pending_order = order['result']  # ADDED
-                
-                print(f"\n✅ {signal['action']} Order Placed:")
-                print(f"   📊 Quantity: {formatted_qty} SOL @ ${limit_price:.4f}")
-                print(f"   📈 RSI: {signal['rsi']:.1f}")
-                print(f"   ⏱️ Order timeout: {self.order_timeout}s")
+                self.last_signal = signal
+                self.pending_order = order['result']
+                print(f"\n✅ {signal['action']}: {formatted_qty} SOL @ ${limit_price:.4f} | RSI: {signal['rsi']:.1f}")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -254,7 +229,6 @@ class EMAMACDRSIBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # MARKET order for exit
         try:
             order = self.exchange.place_order(
                 category="linear",
@@ -267,15 +241,10 @@ class EMAMACDRSIBot:
             
             if order.get('retCode') == 0:
                 pnl = float(self.position.get('unrealisedPnl', 0))
-                entry_price = float(self.position.get('avgPrice', 0))
-                current_price = float(self.price_data['close'].iloc[-1])
-                
-                print(f"\n💰 Position Closed: {reason}")
-                print(f"   Entry: ${entry_price:.4f} → Exit: ${current_price:.4f}")
-                print(f"   PnL: ${pnl:.2f}")
-                self.log_trade("CLOSE", current_price, f"{reason}_PnL:${pnl:.2f}")
+                print(f"\n💰 Closed: {reason} | PnL: ${pnl:.2f}")
+                self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), f"{reason}_PnL:${pnl:.2f}")
                 self.position = None
-                self.last_signal = None  # Reset signal tracking
+                self.last_signal = None
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
@@ -289,99 +258,81 @@ class EMAMACDRSIBot:
             }) + "\n")
     
     def show_status(self):
-        """Show status periodically - ADDED"""
-        now = datetime.now()
-        
-        if self.last_status_time:
-            if (now - self.last_status_time).total_seconds() < self.status_interval:
-                return
-        
-        self.last_status_time = now
-        
         if len(self.price_data) == 0:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
+        indicators = self.calculate_indicators(self.price_data)
         
-        # Build status line
-        status_parts = [f"📊 SOL: ${current_price:.2f}"]
+        status_parts = []
+        status_parts.append(f"📊 SOL: ${current_price:.2f}")
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
             pnl = float(self.position.get('unrealisedPnl', 0))
             side = self.position.get('side', '')
-            status_parts.append(f"| 📍 {side} from ${entry:.4f} | PnL: ${pnl:+.2f}")
+            status_parts.append(f"📍 {side} @ ${entry:.4f}")
+            status_parts.append(f"PnL: ${pnl:+.2f}")
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
-            order_time = int(self.pending_order.get('createdTime', 0)) / 1000
-            age = int(datetime.now().timestamp() - order_time)
-            status_parts.append(f"| ⏳ Pending {order_side} @ ${order_price:.4f} ({age}s)")
-        else:
-            indicators = self.calculate_indicators(self.price_data)
-            if indicators:
-                status_parts.append(f"| RSI: {indicators['rsi']:.1f}")
-                trend = "UP" if indicators['ema_aligned'] else "DOWN"
-                status_parts.append(f"| Trend: {trend}")
+            status_parts.append(f"⏳ {order_side} @ ${order_price:.4f}")
+        elif indicators:
+            status_parts.append(f"RSI: {indicators['rsi']:.1f}")
+            status_parts.append(f"MACD: {'↑' if indicators['histogram'] > 0 else '↓'}")
+            status_parts.append(f"Trend: {'UP' if indicators['ema_aligned'] else 'DOWN'}")
         
-        print(" ".join(status_parts), end='\r')
+        print(" | ".join(status_parts) + "    ", end='\r')
     
     async def run_cycle(self):
         if not await self.get_market_data():
             return
         
         await self.check_position()
-        await self.check_pending_orders()  # ADDED - Check and clean up orders
+        await self.check_pending_orders()
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        elif not self.pending_order:  # MODIFIED - Only generate signal if no pending order
+        elif not self.pending_order:
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
         
-        self.show_status()  # ADDED - Show periodic status
+        self.show_status()
     
     async def run(self):
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"🚀 Starting EMA+MACD+RSI Bot for {self.symbol}")
-        print(f"📊 Strategy: MACD histogram + RSI confirmation")
+        print(f"🚀 EMA+MACD+RSI Bot for {self.symbol}")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
-        print(f"🎯 Take Profit: {self.config['net_take_profit']}% | Stop Loss: {self.config['net_stop_loss']}%")
-        print(f"⏱️ No cooldown | Order timeout: {self.order_timeout}s")
-        print(f"{'='*50}")
+        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
+        print(f"⏱️ Order timeout: {self.order_timeout}s")
+        print(f"✅ Connected! Starting bot...")
+        print("=" * 50)
         
+        cycle_count = 0
         while True:
             try:
+                cycle_count += 1
+                if cycle_count % 60 == 1:  # Debug every 60 cycles (5 minutes)
+                    print(f"\n🔄 Heartbeat - Cycle {cycle_count}")
+                
                 await self.run_cycle()
                 await asyncio.sleep(5)
             except KeyboardInterrupt:
-                print(f"\n{'='*50}")
-                print("🛑 Shutting down bot...")
-                
-                # Cancel all pending orders on shutdown - ADDED
+                print("\n🛑 Shutting down...")
                 try:
-                    cancelled = self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
-                    if cancelled.get('retCode') == 0:
-                        result = cancelled.get('result', {})
-                        if result.get('list'):
-                            print(f"✅ Cancelled {len(result['list'])} pending orders")
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
                 except:
                     pass
-                
-                # Close position if exists - IMPROVED
                 if self.position:
-                    print("📍 Closing open position...")
                     await self.close_position("manual_stop")
-                
-                print("✅ Bot stopped successfully")
+                print("✅ Bot stopped")
                 break
-                
             except Exception as e:
                 print(f"\n⚠️ Error: {e}")
                 await asyncio.sleep(5)
