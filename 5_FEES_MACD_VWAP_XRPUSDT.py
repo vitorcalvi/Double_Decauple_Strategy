@@ -66,7 +66,6 @@ class UnifiedLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # FIXED: Correct maker rebate calculation
         entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
         exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
@@ -113,21 +112,22 @@ class Strategy5_EMARSIBot:
         self.pending_order = None
         self.price_data = pd.DataFrame()
         self.ema_divergence = 0
-        self.account_balance = 0  # FIXED: Track account balance
+        self.account_balance = 0
         
-        # FIXED CONFIG
+        # FIXED: Stronger signal thresholds
         self.config = {
             'ema_fast': 9,
             'ema_slow': 21,
             'rsi_period': 7,
-            'rsi_long_filter': 40,
-            'rsi_short_filter': 60,
-            'risk_per_trade_pct': 2.0,  # FIXED: Risk-based sizing
+            'rsi_long_threshold': 30,  # FIXED: Buy only when RSI < 30 (oversold)
+            'rsi_short_threshold': 70,  # FIXED: Sell only when RSI > 70 (overbought)
+            'risk_per_trade_pct': 2.0,
             'maker_offset_pct': 0.01,
             'stop_loss': 0.35,
+            'take_profit': 0.50,  # FIXED: Add take profit
             'trail_divergence': 0.15,
             'order_timeout': 180,
-            'expected_slippage_pct': 0.02,  # FIXED: Slippage modeling
+            'expected_slippage_pct': 0.02,
         }
         
         os.makedirs("logs", exist_ok=True)
@@ -136,6 +136,7 @@ class Strategy5_EMARSIBot:
         self.current_trade_id = None
         self.entry_price = None
         self.trailing_stop = None
+        self.last_ema_state = None  # FIXED: Track EMA state for crossover detection
     
     def connect(self):
         try:
@@ -145,7 +146,6 @@ class Strategy5_EMARSIBot:
             return False
     
     async def get_account_balance(self):
-        """FIXED: Get actual account balance"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
@@ -154,19 +154,16 @@ class Strategy5_EMARSIBot:
                     for coin in balance_list[0]['coin']:
                         if coin['coin'] == 'USDT':
                             balance_str = coin['availableToWithdraw']
-                            # FIXED: Handle empty strings
                             if balance_str and balance_str.strip():
                                 self.account_balance = float(balance_str)
                                 return True
-        except Exception as e:
-            pass  # Silent fallback
+        except:
+            pass
         
-        # Fallback for demo
         self.account_balance = 1000.0
         return True
     
     def calculate_position_size(self, price, stop_loss_price):
-        """FIXED: Calculate position size based on risk percentage"""
         if self.account_balance <= 0:
             return 0
         
@@ -176,32 +173,25 @@ class Strategy5_EMARSIBot:
         if price_diff == 0:
             return 0
         
-        # FIXED: More conservative calculation
         slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
         adjusted_risk = risk_amount / slippage_factor
         
-        # Calculate raw quantity
         raw_qty = adjusted_risk / price_diff
-        
-        # FIXED: Cap maximum position size for safety
-        max_position_value = self.account_balance * 0.1  # Max 10% of balance
+        max_position_value = self.account_balance * 0.1
         max_qty = max_position_value / price
         
         final_qty = min(raw_qty, max_qty)
-        return max(final_qty, 0.1)  # Minimum 0.1 XRP
+        return max(final_qty, 0.1)
     
     def format_qty(self, qty):
-        """FIXED: Format quantity with proper XRP precision"""
         if qty < 0.1:
             return "0"
-        # FIXED: XRP uses 1 decimal place precision
         formatted = f"{round(qty, 1):.1f}"
         return formatted if float(formatted) >= 0.1 else "0"
     
     def apply_slippage(self, price, side, order_type="market"):
-        """FIXED: Apply realistic slippage modeling"""
         if order_type == "limit":
-            return price  # No slippage for limit orders
+            return price
         
         slippage_pct = self.config['expected_slippage_pct'] / 100
         
@@ -253,9 +243,18 @@ class Strategy5_EMARSIBot:
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
         rsi = 100 - (100 / (1 + gain / (loss + 1e-10))).iloc[-1]
         
-        # Crossover detection
-        crossover_up = ema_fast.iloc[-2] <= ema_slow.iloc[-2] and ema_fast.iloc[-1] > ema_slow.iloc[-1]
-        crossover_down = ema_fast.iloc[-2] >= ema_slow.iloc[-2] and ema_fast.iloc[-1] < ema_slow.iloc[-1]
+        # FIXED: Proper crossover detection with state tracking
+        current_state = 'UP' if ema_fast.iloc[-1] > ema_slow.iloc[-1] else 'DOWN'
+        crossover_up = False
+        crossover_down = False
+        
+        if self.last_ema_state:
+            if self.last_ema_state == 'DOWN' and current_state == 'UP':
+                crossover_up = True
+            elif self.last_ema_state == 'UP' and current_state == 'DOWN':
+                crossover_down = True
+        
+        self.last_ema_state = current_state
         
         return {
             'ema_fast': ema_fast.iloc[-1],
@@ -266,18 +265,23 @@ class Strategy5_EMARSIBot:
         }
     
     def generate_signal(self, df):
+        # FIXED: Don't generate signals if position exists
+        if self.position:
+            return None
+            
         indicators = self.calculate_indicators(df)
         if not indicators:
             return None
         
         price = float(df['close'].iloc[-1])
         
-        # BUY: EMA crossover up + RSI > 40
-        if indicators['crossover_up'] and indicators['rsi'] > self.config['rsi_long_filter']:
+        # FIXED: Stronger signal requirements
+        # BUY: EMA crossover up + RSI < 30 (oversold)
+        if indicators['crossover_up'] and indicators['rsi'] < self.config['rsi_long_threshold']:
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         
-        # SELL: EMA crossover down + RSI < 60
-        elif indicators['crossover_down'] and indicators['rsi'] < self.config['rsi_short_filter']:
+        # SELL: EMA crossover down + RSI > 70 (overbought)
+        elif indicators['crossover_down'] and indicators['rsi'] > self.config['rsi_short_threshold']:
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
@@ -324,20 +328,22 @@ class Strategy5_EMARSIBot:
         # Calculate profit percentage
         profit_pct = ((current_price - self.entry_price) / self.entry_price * 100) if is_long else ((self.entry_price - current_price) / self.entry_price * 100)
         
+        # FIXED: Take profit exit
+        if profit_pct >= self.config['take_profit']:
+            return True, "take_profit"
+        
         # Hard stop loss
         if profit_pct <= -self.config['stop_loss']:
             return True, "stop_loss"
         
         # Trailing stop when EMAs diverge > 0.15%
-        if self.ema_divergence > self.config['trail_divergence']:
-            # Initialize trailing stop
+        if self.ema_divergence > self.config['trail_divergence'] and profit_pct > 0:
             if not self.trailing_stop:
                 if is_long:
                     self.trailing_stop = current_price * (1 - self.config['stop_loss'] / 100)
                 else:
                     self.trailing_stop = current_price * (1 + self.config['stop_loss'] / 100)
             else:
-                # Update trailing stop
                 if is_long:
                     new_stop = current_price * (1 - self.config['stop_loss'] / 100)
                     if new_stop > self.trailing_stop:
@@ -355,14 +361,14 @@ class Strategy5_EMARSIBot:
     
     def log_trade(self, action, price, info=""):
         if action in ["BUY", "SELL"] and not self.current_trade_id:
-            # FIXED: Use calculated position size
             if action == "BUY":
                 stop_loss_price = price * (1 - self.config['stop_loss']/100)
+                take_profit = price * (1 + self.config['take_profit']/100)
             else:
                 stop_loss_price = price * (1 + self.config['stop_loss']/100)
+                take_profit = price * (1 - self.config['take_profit']/100)
             
             qty = self.calculate_position_size(price, stop_loss_price)
-            take_profit = price * 1.01 if action == "BUY" else price * 0.99
             
             self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
                 side=action,
@@ -385,8 +391,8 @@ class Strategy5_EMARSIBot:
                 expected_exit=expected_exit,
                 actual_exit=actual_exit,
                 reason=info,
-                fees_entry=-0.04,  # Maker rebate
-                fees_exit=-0.04   # Maker rebate
+                fees_entry=-0.04,
+                fees_exit=-0.04
             )
             
             if log_entry:
@@ -395,19 +401,21 @@ class Strategy5_EMARSIBot:
             self.current_trade_id = None
     
     async def execute_trade(self, signal):
-        if await self.check_pending_orders() or self.position:
+        # FIXED: Double-check no position exists
+        await self.check_position()
+        if self.position:
+            return
+            
+        if await self.check_pending_orders():
             return
         
-        # Get account balance
         await self.get_account_balance()
         
-        # Calculate stop loss price for position sizing
         if signal['action'] == 'BUY':
             stop_loss_price = signal['price'] * (1 - self.config['stop_loss']/100)
         else:
             stop_loss_price = signal['price'] * (1 + self.config['stop_loss']/100)
         
-        # FIXED: Calculate position size based on risk
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
@@ -435,10 +443,10 @@ class Strategy5_EMARSIBot:
                 
                 risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
                 
-                print(f"✅ FIXED {signal['action']}: {formatted_qty} @ ${limit_price:.4f} | RSI:{signal['rsi']:.1f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f} | RSI:{signal['rsi']:.1f}")
                 print(f"   💰 Risk: ${risk_amount:.2f} ({self.config['risk_per_trade_pct']}% of ${self.account_balance:.2f})")
                 
-                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_EMA_cross_risk:{self.config['risk_per_trade_pct']}%")
+                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_EMA_cross")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
 
@@ -450,7 +458,6 @@ class Strategy5_EMARSIBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # Calculate limit price with maker offset
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 4)
         
@@ -484,10 +491,16 @@ class Strategy5_EMARSIBot:
         
         if self.position:
             side = self.position.get('side', '')
-            status_parts.append(f"📍 {side} @ ${self.entry_price:.4f}")
+            profit_pct = 0
+            if self.entry_price:
+                if side == "Buy":
+                    profit_pct = ((current_price - self.entry_price) / self.entry_price * 100)
+                else:
+                    profit_pct = ((self.entry_price - current_price) / self.entry_price * 100)
+            
+            status_parts.append(f"📍 {side} @ ${self.entry_price:.4f} ({profit_pct:+.2f}%)")
             if self.trailing_stop:
                 status_parts.append(f"Trail: ${self.trailing_stop:.4f}")
-            status_parts.append(f"EMA Div: {self.ema_divergence:.2f}%")
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
@@ -527,13 +540,10 @@ class Strategy5_EMARSIBot:
             print("❌ Failed to connect")
             return
         
-        print(f"✅ FIXED Strategy 5: EMA Crossover + RSI Filter")
+        print(f"✅ Strategy 5: EMA Crossover + RSI Filter (FIXED)")
         print(f"📊 {self.symbol} | EMA 9/21 | RSI 7")
-        print("✅ FIXES APPLIED:")
-        print(f"   • Position sizing: Risk-based ({self.config['risk_per_trade_pct']}% per trade)")
-        print(f"   • Fee calculations: Correct maker rebates")
-        print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
-        print(f"🎯 Hard Stop: {self.config['stop_loss']}% | Trail at EMA div > {self.config['trail_divergence']}%")
+        print(f"🎯 Strong signals: RSI<{self.config['rsi_long_threshold']} for LONG, RSI>{self.config['rsi_short_threshold']} for SHORT")
+        print(f"🎯 TP: {self.config['take_profit']}% | SL: {self.config['stop_loss']}% | Trail at EMA div > {self.config['trail_divergence']}%")
         
         while True:
             try:

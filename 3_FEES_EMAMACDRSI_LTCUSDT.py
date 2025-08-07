@@ -67,18 +67,16 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate gross PnL
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # FIXED: Simple fee calculation - maker rebates are positive
         entry_fee = trade["entry_price"] * trade["qty"] * fees_entry / 100
         exit_fee = actual_exit * trade["qty"] * fees_exit / 100
         total_fees = entry_fee + exit_fee
         
-        net_pnl = gross_pnl - total_fees  # Subtract fees (negative fees become positive)
+        net_pnl = gross_pnl - total_fees
         
         log_entry = {
             "id": trade_id,
@@ -106,57 +104,55 @@ class TradeLogger:
         del self.open_trades[trade_id]
         return log_entry
 
-class EMAMACDRSIBot:
+class EMARSIBot:
     def __init__(self):
-        self.symbol = 'LTCUSDT'
+        self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
-        self.exchange = None
         
+        self.exchange = None
         self.position = None
-        self.price_data = pd.DataFrame()
         self.pending_order = None
-        self.last_signal = None
+        self.price_data = pd.DataFrame()
         self.account_balance = 0
         
-        self.order_timeout = 180
-        
-        # FIXED CONFIG
+        # FIXED: Strong signal requirements
         self.config = {
-            'timeframe': '5',
-            'ema_short': 12,
-            'ema_long': 26,
-            'macd_signal': 9,
-            'rsi_period': 14,
-            'risk_per_trade': 1.0,  # FIXED: 1% risk per trade
-            'lookback': 100,
+            'ema_fast': 5,
+            'ema_slow': 13,
+            'rsi_period': 5,
+            'rsi_oversold': 30,  # FIXED: Only buy when RSI < 30
+            'rsi_overbought': 70,  # FIXED: Only sell when RSI > 70
+            'risk_per_trade': 1.0,
             'maker_offset_pct': 0.01,
-            'slippage_pct': 0.02,  # FIXED: Expected slippage
-            'net_take_profit': 1.08,
-            'net_stop_loss': 0.42,
-            'min_notional': 5,  # FIXED: Minimum trade size
+            'slippage_pct': 0.02,
+            'net_take_profit': 0.86,
+            'net_stop_loss': 0.43,
+            'order_timeout': 180,
+            'min_notional': 5,
         }
         
-        # FIXED: Get instrument info
         self.tick_size = 0.01
-        self.qty_step = 1.0  # LTC uses whole numbers
+        self.qty_step = 0.01
         
-        self.logger = TradeLogger("EMA_MACD_RSI_FIXED", self.symbol)
+        # FIXED: Track last trade time to prevent duplicates
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
+        
+        self.logger = TradeLogger("EMA_RSI_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
-        except Exception as e:
-            print(f"❌ Connection error: {e}")
+        except:
             return False
     
     async def get_account_balance(self):
-        """FIXED: Get actual account balance"""
         try:
             result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if result.get('retCode') == 0:
@@ -168,11 +164,10 @@ class EMAMACDRSIBot:
                             return True
             return False
         except:
-            self.account_balance = 1000  # Fallback
+            self.account_balance = 1000
             return False
     
     async def get_instrument_info(self):
-        """FIXED: Get proper instrument precision"""
         try:
             result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
             if result.get('retCode') == 0:
@@ -185,22 +180,17 @@ class EMAMACDRSIBot:
             return False
     
     def calculate_position_size(self, price, stop_loss_price):
-        """FIXED: Risk-based position sizing"""
         if self.account_balance <= 0:
             return 0
         
-        # Calculate risk amount
         risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
         
-        # Calculate stop loss distance
         stop_distance = abs(price - stop_loss_price)
         if stop_distance == 0:
             return 0
         
-        # Calculate position size
         position_size = risk_amount / stop_distance
         
-        # Apply minimum notional check
         notional = position_size * price
         if notional < self.config['min_notional']:
             return 0
@@ -208,24 +198,19 @@ class EMAMACDRSIBot:
         return position_size
     
     def format_price(self, price):
-        """FIXED: Format price with proper precision"""
         return round(price / self.tick_size) * self.tick_size
     
     def format_qty(self, qty):
-        """FIXED: Format quantity with proper precision"""
         formatted = round(qty / self.qty_step) * self.qty_step
-        return str(int(formatted))
+        return f"{formatted:.2f}"
     
     def estimate_execution_price(self, market_price, side, is_limit=True):
-        """FIXED: Realistic execution price with slippage"""
         if is_limit:
-            # Limit orders with maker offset
             if side == 'BUY':
                 return self.format_price(market_price * (1 - self.config['maker_offset_pct']/100))
             else:
                 return self.format_price(market_price * (1 + self.config['maker_offset_pct']/100))
         else:
-            # Market orders with slippage
             if side == 'BUY':
                 return self.format_price(market_price * (1 + self.config['slippage_pct']/100))
             else:
@@ -256,65 +241,49 @@ class EMAMACDRSIBot:
             return False
     
     def calculate_indicators(self, df):
-        if len(df) < self.config['lookback']:
+        if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
             return None
         
-        try:
-            close = df['close']
-            
-            ema_short = close.ewm(span=self.config['ema_short']).mean()
-            ema_long = close.ewm(span=self.config['ema_long']).mean()
-            
-            macd_line = ema_short - ema_long
-            signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
-            histogram = macd_line - signal_line
-            
-            delta = close.diff()
-            gain = delta.clip(lower=0).rolling(window=self.config['rsi_period']).mean()
-            loss = -delta.clip(upper=0).rolling(window=self.config['rsi_period']).mean()
-            epsilon = 1e-10
-            rsi = 100 - (100 / (1 + gain / (loss + epsilon)))
-            
-            return {
-                'price': close.iloc[-1],
-                'ema_aligned': ema_short.iloc[-1] > ema_long.iloc[-1],
-                'histogram': histogram.iloc[-1],
-                'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else 0,
-                'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
-            }
-        except Exception as e:
-            print(f"❌ Indicator calculation error: {e}")
-            return None
+        close = df['close']
+        
+        ema_fast = close.ewm(span=self.config['ema_fast']).mean().iloc[-1]
+        ema_slow = close.ewm(span=self.config['ema_slow']).mean().iloc[-1]
+        
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
+        rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
+        
+        return {
+            'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
+            'rsi': rsi if pd.notna(rsi) else 50,
+            'ema_fast': ema_fast,
+            'ema_slow': ema_slow
+        }
     
     def generate_signal(self, df):
-        analysis = self.calculate_indicators(df)
-        if not analysis:
+        # FIXED: Don't generate signals if position exists
+        if self.position:
             return None
         
-        if self.last_signal:
-            price_change = abs(analysis['price'] - self.last_signal['price']) / self.last_signal['price']
-            if price_change < 0.002:
-                return None
+        # FIXED: Check trade cooldown
+        time_since_last = datetime.now().timestamp() - self.last_trade_time
+        if time_since_last < self.trade_cooldown:
+            return None
         
-        histogram_positive = analysis['histogram'] > 0
-        histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
-        histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
+        indicators = self.calculate_indicators(df)
+        if not indicators:
+            return None
         
-        if (histogram_positive and analysis['rsi'] < 60) or (histogram_turning_positive and analysis['rsi'] < 70):
-            return {
-                'action': 'BUY', 
-                'price': analysis['price'], 
-                'rsi': analysis['rsi'],
-                'reason': 'macd_bullish'
-            }
+        price = float(df['close'].iloc[-1])
         
-        if (not histogram_positive and analysis['rsi'] > 40) or (histogram_turning_negative and analysis['rsi'] > 30):
-            return {
-                'action': 'SELL', 
-                'price': analysis['price'], 
-                'rsi': analysis['rsi'],
-                'reason': 'macd_bearish'
-            }
+        # FIXED: Strong signal requirements
+        # BUY: Uptrend + RSI < 30 (oversold)
+        if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
+            return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
+        # SELL: Downtrend + RSI > 70 (overbought)
+        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+            return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
     
@@ -365,25 +334,43 @@ class EMAMACDRSIBot:
         if profit_pct <= -self.config['net_stop_loss']:
             return True, "stop_loss"
         
+        # FIXED: Exit on opposite EMA crossover
+        indicators = self.calculate_indicators(self.price_data)
+        if indicators:
+            if is_long and indicators['trend'] == 'DOWN':
+                return True, "ema_crossover"
+            elif not is_long and indicators['trend'] == 'UP':
+                return True, "ema_crossover"
+        
         return False, ""
     
     async def execute_trade(self, signal):
-        if await self.check_pending_orders() or self.position:
+        # FIXED: Triple-check no position exists
+        await self.check_position()
+        if self.position:
+            print("⚠️ Position already exists, skipping trade")
+            return
+            
+        if await self.check_pending_orders():
+            print("⚠️ Pending order exists, skipping trade")
             return
         
-        # FIXED: Update balance and instrument info
+        # FIXED: Enforce cooldown
+        time_since_last = datetime.now().timestamp() - self.last_trade_time
+        if time_since_last < self.trade_cooldown:
+            print(f"⚠️ Trade cooldown active, wait {self.trade_cooldown - time_since_last:.0f}s")
+            return
+        
         await self.get_account_balance()
         
         market_price = signal['price']
         is_buy = signal['action'] == 'BUY'
         
-        # Calculate stop loss price
         if is_buy:
             stop_loss_price = market_price * (1 - self.config['net_stop_loss']/100)
         else:
             stop_loss_price = market_price * (1 + self.config['net_stop_loss']/100)
         
-        # FIXED: Calculate position size based on risk
         qty = self.calculate_position_size(market_price, stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
@@ -391,23 +378,22 @@ class EMAMACDRSIBot:
             print(f"⚠️ Position size too small: {formatted_qty}")
             return
         
-        # FIXED: Realistic execution price
         limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
         
         try:
             order = self.exchange.place_order(
-                category="linear", 
+                category="linear",
                 symbol=self.symbol,
                 side="Buy" if is_buy else "Sell",
-                orderType="Limit", 
-                qty=formatted_qty, 
+                orderType="Limit",
+                qty=formatted_qty,
                 price=str(limit_price),
                 timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
-                self.last_signal = signal
                 self.pending_order = order['result']
+                self.last_trade_time = datetime.now().timestamp()  # FIXED: Update last trade time
                 
                 take_profit = limit_price * (1 + self.config['net_take_profit']/100) if is_buy else limit_price * (1 - self.config['net_take_profit']/100)
                 
@@ -418,10 +404,11 @@ class EMAMACDRSIBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss_price,
                     take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_Risk:{self.config['risk_per_trade']}%_Balance:{self.account_balance:.0f}"
+                    info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
                 )
                 
-                print(f"✅ {signal['action']}: {formatted_qty} LTC @ ${limit_price:.2f} | Risk: {self.config['risk_per_trade']}% | Balance: ${self.account_balance:.0f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.0f}")
+                
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -433,7 +420,6 @@ class EMAMACDRSIBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         current_price = float(self.price_data['close'].iloc[-1])
         
-        # FIXED: Use market order for quick exit with realistic slippage
         execution_price = self.estimate_execution_price(current_price, side, is_limit=False)
         
         try:
@@ -453,8 +439,8 @@ class EMAMACDRSIBot:
                         expected_exit=current_price,
                         actual_exit=execution_price,
                         reason=reason,
-                        fees_entry=-0.04,  # Maker rebate
-                        fees_exit=0.1      # Taker fee
+                        fees_entry=-0.04,
+                        fees_exit=0.1
                     )
                     self.current_trade_id = None
                 
@@ -467,7 +453,7 @@ class EMAMACDRSIBot:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
-        status_parts = [f"📊 LTCUSDT: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
+        status_parts = [f"📊 BNB: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
@@ -483,7 +469,22 @@ class EMAMACDRSIBot:
         else:
             indicators = self.calculate_indicators(self.price_data)
             if indicators:
-                status_parts.append(f"RSI: {indicators['rsi']:.1f} | Trend: {indicators['trend']}")
+                # Show signal strength
+                signal_status = ""
+                if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
+                    signal_status = "🟢 BUY SIGNAL"
+                elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+                    signal_status = "🔴 SELL SIGNAL"
+                else:
+                    signal_status = "⚪ NO SIGNAL"
+                    
+                status_parts.append(f"RSI: {indicators['rsi']:.1f} | Trend: {indicators['trend']} | {signal_status}")
+        
+        # Show cooldown status
+        if self.last_trade_time > 0:
+            time_since_last = datetime.now().timestamp() - self.last_trade_time
+            if time_since_last < self.trade_cooldown:
+                status_parts.append(f"⏰ Cooldown: {self.trade_cooldown - time_since_last:.0f}s")
         
         print(" | ".join(status_parts), end='\r')
     
@@ -510,14 +511,15 @@ class EMAMACDRSIBot:
             print("❌ Failed to connect")
             return
         
-        # FIXED: Initialize account and instrument info
         await self.get_account_balance()
         await self.get_instrument_info()
         
-        print(f"🔧 FIXED EMA + RSI bot for {self.symbol}")
-        print(f"✅ FIXED: Risk-based position sizing ({self.config['risk_per_trade']}% per trade)")
-        print(f"✅ FIXED: Proper fee calculations")
-        print(f"✅ FIXED: Realistic slippage modeling ({self.config['slippage_pct']}%)")
+        print(f"🔧 EMA + RSI bot for {self.symbol} (FIXED)")
+        print(f"✅ FIXES APPLIED:")
+        print(f"   • Strong RSI signals: <{self.config['rsi_oversold']} for BUY, >{self.config['rsi_overbought']} for SELL")
+        print(f"   • Position tracking: No duplicate trades")
+        print(f"   • Trade cooldown: {self.trade_cooldown}s between trades")
+        print(f"   • Exit on EMA crossover")
         print(f"💰 Account Balance: ${self.account_balance:.2f}")
         print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
         
@@ -539,5 +541,5 @@ class EMAMACDRSIBot:
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = EMAMACDRSIBot()
+    bot = EMARSIBot()
     asyncio.run(bot.run())
