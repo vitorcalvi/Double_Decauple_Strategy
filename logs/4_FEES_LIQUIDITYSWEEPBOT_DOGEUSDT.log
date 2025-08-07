@@ -1,2 +1,13 @@
 {"timestamp": "2025-08-06 20:29:34", "action": "SELL", "price": 0.2059, "info": "swing_high"}
 {"timestamp": "2025-08-06 20:30:05", "action": "BUY", "price": 0.2059, "info": "swing_low"}
+{"timestamp": "2025-08-06 21:47:23", "action": "CLOSE", "price": 0, "info": "stop_loss_PnL:$-0.40"}
+{"timestamp": "2025-08-06 21:48:02", "action": "BUY", "price": 0.2051, "info": "swing_low"}
+{"timestamp": "2025-08-07 02:19:13", "action": "CLOSE", "price": 0, "info": "stop_loss_PnL:$-0.40"}
+{"timestamp": "2025-08-07 02:21:01", "action": "BUY", "price": 0.2041, "info": "swing_low"}
+{"timestamp": "2025-08-07 03:28:35", "action": "CLOSE", "price": 0, "info": "take_profit_PnL:$1.10"}
+{"timestamp": "2025-08-07 03:28:39", "action": "BUY", "price": 0.2063, "info": "swing_low"}
+{"timestamp": "2025-08-07 03:42:45", "action": "CLOSE", "price": 0, "info": "stop_loss_PnL:$-0.38"}
+{"timestamp": "2025-08-07 03:42:49", "action": "SELL", "price": 0.2055, "info": "swing_high"}
+{"timestamp": "2025-08-07 05:22:48", "action": "CLOSE", "price": 0, "info": "take_profit_PnL:$1.08"}
+{"timestamp": "2025-08-07 05:23:03", "action": "BUY", "price": 0.2033, "info": "swing_low"}
+{"timestamp": "2025-08-07 05:23:34", "action": "BUY", "price": 0.2034, "info": "swing_low"}
