@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "LSTM_XGBOOST", "symbol": "AVAXUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-07T17:25:30.543918+00:00", "expected_price": 22.509, "actual_price": 22.364, "slippage": 0.145, "qty": 449.6, "stop_loss": 22.61029, "take_profit": 22.162724, "currency": "USDT", "info": "hybrid:0.378_lstm:0.440_xgb:0.285_vol:0.0054"}

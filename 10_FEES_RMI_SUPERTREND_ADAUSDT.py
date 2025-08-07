@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Use the same TradeLogger class from above
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -26,7 +27,6 @@ class TradeLogger:
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        # ✅ FIXED: Proper slippage calculation
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
@@ -67,7 +67,6 @@ class TradeLogger:
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        # ✅ FIXED: Proper slippage calculation
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         if trade["side"] == "BUY":
@@ -75,7 +74,6 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # ✅ FIXED: Proper maker rebate calculation (negative fees = rebates earned)
         entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
         exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
@@ -119,9 +117,14 @@ class RMISuperTrendBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
-        self.account_balance = 1000  # Will be updated from API
+        self.account_balance = 1000
         
-        # ✅ FIXED: Strategy configuration with proper risk management
+        # 🔴 CRITICAL FIX: Order management state
+        self.pending_order = False
+        self.last_order_time = None
+        self.active_order_id = None
+        self.min_order_interval = 30  # Minimum seconds between orders
+        
         self.config = {
             'timeframe': '3',
             'rmi_period': 14,
@@ -130,14 +133,14 @@ class RMISuperTrendBot:
             'rmi_threshold_short': 45,
             'supertrend_period': 10,
             'supertrend_multiplier': 2,
-            'risk_pct': 2.0,              # Risk 2% of account per trade
+            'risk_pct': 2.0,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
             'net_take_profit': 0.70,
             'net_stop_loss': 0.35,
-            'slippage_pct': 0.02,         # Expected slippage 0.02%
-            'min_notional': 5,            # Minimum $5 position
-            'qty_precision': 0,           # ADA quantity precision (whole numbers)
+            'slippage_pct': 0.02,
+            'min_notional': 5,
+            'qty_precision': 0,
         }
         
         self.logger = TradeLogger("RMI_SUPERTREND_FIXED", self.symbol)
@@ -151,14 +154,10 @@ class RMISuperTrendBot:
             print(f"❌ Connection error: {e}")
             return False
     
-    # ✅ FIXED: Proper quantity formatting for ADA (whole numbers)
     def format_qty(self, qty):
-        """Format quantity with proper precision for ADA"""
         return str(int(round(qty)))
     
-    # ✅ FIXED: Get account balance for proper position sizing
     async def update_account_balance(self):
-        """Update account balance from API"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
             if wallet.get('retCode') == 0:
@@ -169,9 +168,7 @@ class RMISuperTrendBot:
         except Exception as e:
             print(f"⚠️ Balance update error: {e}")
     
-    # ✅ FIXED: Calculate position size based on account balance and risk
     def calculate_position_size(self, price, stop_loss_price):
-        """Calculate position size based on risk percentage"""
         if self.account_balance <= 0:
             return 0
         
@@ -181,34 +178,71 @@ class RMISuperTrendBot:
         if price_diff == 0:
             return 0
         
-        # Calculate quantity that risks exactly risk_amount
         qty = risk_amount / price_diff
         
-        # Apply minimum notional check
         notional = qty * price
         if notional < self.config['min_notional']:
             qty = self.config['min_notional'] / price
         
         return qty
     
-    # ✅ FIXED: Add slippage modeling to limit price calculation
     def calculate_limit_price(self, market_price, side, include_slippage=True):
-        """Calculate limit price with slippage and maker offset"""
         slippage_mult = 1 + (self.config['slippage_pct'] / 100) if include_slippage else 1
         
         if side == 'BUY':
-            # For buy: add slippage, subtract maker offset for better fill
             price_with_slippage = market_price * slippage_mult
             limit_price = price_with_slippage * (1 - self.config['maker_offset_pct'] / 100)
         else:
-            # For sell: subtract slippage, add maker offset for better fill
             price_with_slippage = market_price / slippage_mult
             limit_price = price_with_slippage * (1 + self.config['maker_offset_pct'] / 100)
         
         return round(limit_price, 4)
     
+    # 🔴 CRITICAL FIX: Check and cancel pending orders
+    async def check_pending_orders(self):
+        """Check for any unfilled orders and cancel old ones"""
+        try:
+            orders = self.exchange.get_open_orders(
+                category="linear",
+                symbol=self.symbol,
+                limit=50
+            )
+            
+            if orders.get('retCode') == 0:
+                open_orders = orders['result']['list']
+                
+                for order in open_orders:
+                    order_time = datetime.fromtimestamp(int(order['createdTime'])/1000, tz=timezone.utc)
+                    time_diff = (datetime.now(timezone.utc) - order_time).total_seconds()
+                    
+                    # Cancel orders older than 60 seconds
+                    if time_diff > 60:
+                        try:
+                            self.exchange.cancel_order(
+                                category="linear",
+                                symbol=self.symbol,
+                                orderId=order['orderId']
+                            )
+                            print(f"❌ Cancelled stale order: {order['orderId']}")
+                            self.pending_order = False
+                            self.active_order_id = None
+                        except:
+                            pass
+                    else:
+                        # We have a pending order
+                        self.pending_order = True
+                        self.active_order_id = order['orderId']
+                        return True
+                
+                # No pending orders
+                self.pending_order = False
+                self.active_order_id = None
+                return False
+        except Exception as e:
+            print(f"⚠️ Order check error: {e}")
+            return False
+    
     def calculate_rmi(self, prices):
-        """Calculate Relative Momentum Index"""
         if len(prices) < self.config['rmi_period'] + self.config['rmi_momentum']:
             return None
         
@@ -226,26 +260,22 @@ class RMISuperTrendBot:
         return rmi
     
     def calculate_supertrend(self, df):
-        """Calculate SuperTrend indicator"""
         high = df['high']
         low = df['low']
         close = df['close']
         
-        # Calculate ATR
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=self.config['supertrend_period']).mean()
         
-        # Calculate basic bands
         hl_avg = (high + low) / 2
         multiplier = self.config['supertrend_multiplier']
         
         upper_band = hl_avg + (multiplier * atr)
         lower_band = hl_avg - (multiplier * atr)
         
-        # Initialize supertrend
         supertrend = pd.Series(index=df.index, dtype=float)
         direction = pd.Series(index=df.index, dtype=int)
         
@@ -261,7 +291,6 @@ class RMISuperTrendBot:
                     direction.iloc[i] = 1
                     supertrend.iloc[i] = lower_band.iloc[i]
             else:
-                # Previous values
                 prev_dir = direction.iloc[i-1]
                 
                 if close.iloc[i] <= upper_band.iloc[i]:
@@ -288,19 +317,27 @@ class RMISuperTrendBot:
         return supertrend, direction
     
     def generate_signal(self, df):
+        # 🔴 CRITICAL FIX: Don't generate signals if we have pending orders or position
+        if self.pending_order or self.position:
+            return None
+        
+        # 🔴 CRITICAL FIX: Check minimum time between orders
+        if self.last_order_time:
+            time_since_last = (datetime.now() - self.last_order_time).total_seconds()
+            if time_since_last < self.min_order_interval:
+                return None
+        
         if len(df) < 50:
             return None
         
         current_price = float(df['close'].iloc[-1])
         
-        # Calculate RMI
         rmi = self.calculate_rmi(df['close'])
         if rmi is None or pd.isna(rmi.iloc[-1]):
             return None
         
         current_rmi = rmi.iloc[-1]
         
-        # Calculate SuperTrend
         supertrend, direction = self.calculate_supertrend(df)
         if pd.isna(supertrend.iloc[-1]) or pd.isna(direction.iloc[-1]):
             return None
@@ -308,7 +345,6 @@ class RMISuperTrendBot:
         current_supertrend = supertrend.iloc[-1]
         current_direction = direction.iloc[-1]
         
-        # Long signal: RMI > threshold + price above SuperTrend
         if current_rmi > self.config['rmi_threshold_long'] and current_direction == 1 and current_price > current_supertrend:
             return {
                 'action': 'BUY',
@@ -317,8 +353,6 @@ class RMISuperTrendBot:
                 'supertrend': current_supertrend,
                 'trend': 'UP'
             }
-        
-        # Short signal: RMI < threshold + price below SuperTrend
         elif current_rmi < self.config['rmi_threshold_short'] and current_direction == -1 and current_price < current_supertrend:
             return {
                 'action': 'SELL',
@@ -377,7 +411,6 @@ class RMISuperTrendBot:
         if entry_price == 0:
             return False, ""
         
-        # Check profit/loss targets
         if side == "Buy":
             profit_pct = (current_price - entry_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
@@ -391,7 +424,6 @@ class RMISuperTrendBot:
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
         
-        # Check for SuperTrend exit
         supertrend, direction = self.calculate_supertrend(self.price_data)
         if not pd.isna(supertrend.iloc[-1]):
             if side == "Buy" and current_price < supertrend.iloc[-1]:
@@ -399,7 +431,6 @@ class RMISuperTrendBot:
             elif side == "Sell" and current_price > supertrend.iloc[-1]:
                 return True, "supertrend_exit"
         
-        # Check for RMI reversal
         rmi = self.calculate_rmi(self.price_data['close'])
         if rmi is not None and not pd.isna(rmi.iloc[-1]):
             if side == "Buy" and rmi.iloc[-1] < self.config['rmi_threshold_short']:
@@ -410,24 +441,30 @@ class RMISuperTrendBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        # ✅ FIXED: Update account balance for proper position sizing
+        # 🔴 CRITICAL FIX: Double-check no pending orders
+        if self.pending_order:
+            print("⚠️ Order already pending, skipping signal")
+            return
+        
+        # 🔴 CRITICAL FIX: Set pending flag immediately
+        self.pending_order = True
+        self.last_order_time = datetime.now()
+        
         await self.update_account_balance()
         
-        # ✅ FIXED: Calculate stop loss based on SuperTrend level
         if signal['action'] == 'BUY':
             stop_loss_price = signal['supertrend'] * 0.995
         else:
             stop_loss_price = signal['supertrend'] * 1.005
         
-        # ✅ FIXED: Calculate position size based on risk
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if int(formatted_qty) < (self.config['min_notional'] / signal['price']):
             print(f"⚠️ Position size too small: {formatted_qty}")
+            self.pending_order = False  # Reset flag
             return
         
-        # ✅ FIXED: Calculate limit price with slippage
         limit_price = self.calculate_limit_price(signal['price'], signal['action'])
         
         try:
@@ -442,6 +479,8 @@ class RMISuperTrendBot:
             )
             
             if order.get('retCode') == 0:
+                self.active_order_id = order['result']['orderId']
+                
                 net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 net_sl = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
                 
@@ -456,24 +495,29 @@ class RMISuperTrendBot:
                 )
                 
                 position_value = float(formatted_qty) * limit_price
-                print(f"✅ FIXED RMI+ST {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
-                print(f"   💰 Position Value: ${position_value:.2f} (Risk: {self.config['risk_pct']}%)")
+                print(f"✅ ORDER PLACED {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
+                print(f"   💰 Position Value: ${position_value:.2f}")
                 print(f"   📊 RMI: {signal['rmi']:.1f} | SuperTrend: ${signal['supertrend']:.4f}")
-                print(f"   🎯 Trend: {signal['trend']}")
-                print(f"   🛡️ Account Balance: ${self.account_balance:.2f}")
+                print(f"   🆔 Order ID: {self.active_order_id}")
+            else:
+                print(f"❌ Order failed: {order.get('retMsg')}")
+                self.pending_order = False  # Reset flag on failure
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
+            self.pending_order = False  # Reset flag on error
     
     async def close_position(self, reason):
         if not self.position:
             return
         
+        # 🔴 CRITICAL FIX: Set pending flag for close orders too
+        self.pending_order = True
+        
         current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # ✅ FIXED: Use slippage modeling for close price
         limit_price = self.calculate_limit_price(current_price, side)
         
         try:
@@ -500,11 +544,15 @@ class RMISuperTrendBot:
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason}")
+                print(f"✅ CLOSE ORDER PLACED: {reason}")
                 self.position = None
+            else:
+                print(f"❌ Close failed: {order.get('retMsg')}")
+                self.pending_order = False  # Reset on failure
                 
         except Exception as e:
             print(f"❌ Close failed: {e}")
+            self.pending_order = False  # Reset on error
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -512,9 +560,12 @@ class RMISuperTrendBot:
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n📈 FIXED RMI + SuperTrend Bot - {self.symbol}")
+        print(f"\n📈 RMI + SuperTrend Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
-        print(f"🔧 FIXED: Risk-based position sizing ({self.config['risk_pct']}% per trade)")
+        
+        # 🔴 CRITICAL FIX: Show order status
+        if self.pending_order:
+            print(f"⏳ PENDING ORDER: {self.active_order_id}")
         
         rmi = self.calculate_rmi(self.price_data['close'])
         supertrend, direction = self.calculate_supertrend(self.price_data)
@@ -536,7 +587,7 @@ class RMISuperTrendBot:
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} ADA @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
         else:
-            print("🔍 Scanning for trend-sync signals...")
+            print("🔍 Scanning...")
         
         print("-" * 60)
     
@@ -544,16 +595,20 @@ class RMISuperTrendBot:
         if not await self.get_market_data():
             return
         
+        # 🔴 CRITICAL FIX: Check pending orders first
+        await self.check_pending_orders()
+        
         await self.check_position()
         
         if self.position:
             should_close, reason = self.should_close()
-            if should_close:
+            if should_close and not self.pending_order:
                 await self.close_position(reason)
         else:
-            signal = self.generate_signal(self.price_data)
-            if signal:
-                await self.execute_trade(signal)
+            if not self.pending_order:
+                signal = self.generate_signal(self.price_data)
+                if signal:
+                    await self.execute_trade(signal)
         
         self.show_status()
     
@@ -562,13 +617,12 @@ class RMISuperTrendBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📈 FULLY FIXED RMI + SuperTrend Bot")
-        print(f"✅ FIXES APPLIED:")
-        print(f"   • Position Sizing: Account balance-based ({self.config['risk_pct']}% risk)")
-        print(f"   • Fee Calculations: Proper maker rebates")
-        print(f"   • Slippage Modeling: {self.config['slippage_pct']}% expected")
-        print(f"   • Risk Management: Stop loss at SuperTrend levels")
-        print(f"   • Quantity Precision: {self.config['qty_precision']} decimals (ADA whole numbers)")
+        print(f"📈 RMI + SuperTrend Bot - ORDER MANAGEMENT FIXED")
+        print(f"✅ CRITICAL FIXES:")
+        print(f"   • Pending order tracking")
+        print(f"   • Minimum {self.min_order_interval}s between orders")
+        print(f"   • Stale order cancellation")
+        print(f"   • Race condition prevention")
         
         try:
             while True:
