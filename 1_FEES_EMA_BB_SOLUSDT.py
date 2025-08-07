@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Same TradeLogger class as original
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -121,28 +120,28 @@ class Strategy1_EMAMACDRSIBot:
         self.last_signal = None
         self.order_timeout = 180
         
-        # UPDATED CONFIG TO MATCH STRATEGY 1
+        # FIXED CONFIG - CRITICAL MACD BUG FIX
         self.config = {
             'timeframe': '5',
-            'ema_fast': 9,        # Changed from 12
-            'ema_slow': 21,       # Changed from 26
-            'ema_trend': 50,      # Added trend filter
-            'macd_fast': 5,       # Changed from 12
-            'macd_slow': 13,      # Changed from 26
-            'macd_signal': 1,     # Changed from 9
-            'rsi_period': 9,      # Changed from 14
-            'rsi_entry_long': 60, # Added specific entry
-            'rsi_entry_short': 40,# Added specific entry
-            'rsi_overbought': 75, # Added OB level
-            'rsi_oversold': 25,   # Added OS level
+            'ema_fast': 9,
+            'ema_slow': 21,
+            'ema_trend': 50,
+            'macd_fast': 5,
+            'macd_slow': 13,
+            'macd_signal': 9,        # FIXED: was 1, now 9 (proper signal line)
+            'rsi_period': 9,
+            'rsi_entry_long': 60,
+            'rsi_entry_short': 40,
+            'rsi_overbought': 75,
+            'rsi_oversold': 25,
             'position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,
-            'stop_loss': 0.30,    # Updated to 0.30%
-            'take_profit': 0.75,  # Updated to 0.75%
+            'stop_loss': 0.50,       # FIXED: was 0.30, now 0.50 for 1:2 ratio
+            'take_profit': 1.00,     # FIXED: was 0.75, now 1.00 for 1:2 ratio
         }
         
-        self.logger = TradeLogger("STRATEGY1_MACD", self.symbol)
+        self.logger = TradeLogger("STRATEGY1_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -191,11 +190,11 @@ class Strategy1_EMAMACDRSIBot:
             ema_slow = close.ewm(span=self.config['ema_slow']).mean()
             ema_trend = close.ewm(span=self.config['ema_trend']).mean()
             
-            # MACD with updated parameters
+            # FIXED MACD with proper signal line (9 instead of 1)
             exp1 = close.ewm(span=self.config['macd_fast']).mean()
             exp2 = close.ewm(span=self.config['macd_slow']).mean()
             macd_line = exp1 - exp2
-            signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
+            signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()  # Now using 9 instead of 1
             histogram = macd_line - signal_line
             
             # RSI
@@ -283,7 +282,10 @@ class Strategy1_EMAMACDRSIBot:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
+                if pos_list and float(pos_list[0]['size']) > 0:
+                    self.position = pos_list[0]
+                else:
+                    self.position = None
         except:
             self.position = None
     
@@ -356,10 +358,12 @@ class Strategy1_EMAMACDRSIBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}"
+                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_FIXED_MACD"
                 )
                 
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f} | RSI: {signal['rsi']:.1f}")
+                print(f"✅ FIXED {signal['action']}: {formatted_qty} @ ${limit_price:.4f} | RSI: {signal['rsi']:.1f}")
+                print(f"   🔧 MACD Signal Line: {self.config['macd_signal']} (FIXED from 1)")
+                print(f"   🎯 Risk:Reward = 1:2 (SL:{self.config['stop_loss']}% / TP:{self.config['take_profit']}%)")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -419,8 +423,10 @@ class Strategy1_EMAMACDRSIBot:
             print("❌ Failed to connect")
             return
         
-        print(f"🚀 Strategy 1: EMA+MACD+RSI Momentum Bot")
-        print(f"📊 {self.symbol} | 5-min | EMA 9/21/50 | MACD 5-13-1 | RSI 9")
+        print(f"🔧 Strategy 1: FIXED EMA+MACD+RSI Bot")
+        print(f"📊 {self.symbol} | 5-min | EMA 9/21/50 | MACD 5-13-9 | RSI 9")
+        print(f"✅ FIXED: MACD Signal Line 1 → 9")
+        print(f"✅ FIXED: Risk:Reward 1:1.5 → 1:2")
         print(f"🎯 TP: {self.config['take_profit']}% | SL: {self.config['stop_loss']}%")
         
         try:

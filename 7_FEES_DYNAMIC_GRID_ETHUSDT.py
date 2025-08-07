@@ -121,14 +121,15 @@ class DynamicGridBot:
         self.position = None
         self.price_data = pd.DataFrame()
         
+        # FIXED PARAMETERS - Based on Research Analysis
         self.config = {
-            'grid_levels': 5,
-            'grid_spacing_pct': 0.2,
+            'grid_levels': 10,           # INCREASED: 5 → 10 levels for better coverage
+            'grid_spacing_pct': 0.6,     # INCREASED: 0.2% → 0.6% (above fee threshold)
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 0.6,
-            'net_stop_loss': 0.3,
+            'net_take_profit': 1.2,      # INCREASED: 0.6% → 1.2% (2x risk:reward)
+            'net_stop_loss': 0.6,        # INCREASED: 0.3% → 0.6% (avoid noise)
             'atr_period': 14,
             'volatility_threshold': 0.015,
         }
@@ -193,7 +194,7 @@ class DynamicGridBot:
             return None
         
         for i, level in enumerate(self.grid_levels):
-            if abs(current_price - level['price']) / level['price'] < 0.001:
+            if abs(current_price - level['price']) / level['price'] < 0.002:  # Increased threshold
                 return i, level
         
         return None
@@ -249,7 +250,7 @@ class DynamicGridBot:
             klines = self.exchange.get_kline(
                 category="linear",
                 symbol=self.symbol,
-                interval="1",
+                interval="15",  # INCREASED: 1min → 15min to reduce noise
                 limit=50
             )
             
@@ -343,6 +344,7 @@ class DynamicGridBot:
                 
                 print(f"📊 GRID {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
                 print(f"   🎯 Grid Level: ${signal['grid_level']:.2f} (Index: {signal['grid_index']})")
+                print(f"   💎 TP: ${net_tp:.2f} | SL: ${net_sl:.2f} | R:R = 1:2")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -394,8 +396,10 @@ class DynamicGridBot:
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n📊 Dynamic Grid Bot - {self.symbol}")
+        print(f"\n📊 FIXED Dynamic Grid Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.2f}")
+        print(f"🔧 Grid: {self.config['grid_levels']} levels @ {self.config['grid_spacing_pct']}% spacing")
+        print(f"🎯 Targets: TP {self.config['net_take_profit']}% | SL {self.config['net_stop_loss']}% (1:2 R:R)")
         
         if self.grid_levels:
             buy_grids = [g for g in self.grid_levels if g['side'] == 'BUY']
@@ -415,7 +419,7 @@ class DynamicGridBot:
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} ETH @ ${entry_price:.2f} | PnL: ${pnl:.2f}")
         else:
-            print("⚡ Waiting for grid signals...")
+            print("⚡ Waiting for optimal grid signals...")
         
         print("-" * 50)
     
@@ -441,8 +445,14 @@ class DynamicGridBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📊 Dynamic Grid Trading Bot - {self.symbol}")
-        print(f"🎯 Grid Levels: {self.config['grid_levels']} | Spacing: {self.config['grid_spacing_pct']}%")
+        print(f"📊 FIXED Dynamic Grid Trading Bot - {self.symbol}")
+        print(f"🔧 IMPROVEMENTS:")
+        print(f"   • Grid Levels: 5 → 10 (better coverage)")
+        print(f"   • Grid Spacing: 0.2% → 0.6% (above fee threshold)")
+        print(f"   • Take Profit: 0.6% → 1.2% (optimal target)")
+        print(f"   • Stop Loss: 0.3% → 0.6% (reduce noise)")
+        print(f"   • Timeframe: 1min → 15min (less noise)")
+        print(f"   • Risk:Reward: 1:2 ratio")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
         
         try:

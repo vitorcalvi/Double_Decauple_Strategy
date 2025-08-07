@@ -132,19 +132,20 @@ class EMARSIBot:
         self.pending_order = None
         self.price_data = pd.DataFrame()
         
+        # FIXED CONFIG - CRITICAL RISK MANAGEMENT FIXES
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'rsi_period': 5,
             'position_size': 100,
             'maker_offset_pct': 0.01,
-            'net_take_profit': 0.43,
-            'net_stop_loss': 0.12,
+            'net_take_profit': 0.86,     # FIXED: Increased for 1:2 ratio
+            'net_stop_loss': 0.43,       # FIXED: was 0.12, now 0.43 (proper 1:2)
             'order_timeout': 180,
             'qty_step': 0.01,
         }
         
-        self.logger = TradeLogger("2_FEES_EMA_RSI", self.symbol)
+        self.logger = TradeLogger("2_FEES_EMA_RSI_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -204,9 +205,10 @@ class EMARSIBot:
         
         price = float(df['close'].iloc[-1])
         
-        if indicators['trend'] == 'UP' and indicators['rsi'] < 50:
+        # More selective entry conditions for better risk:reward
+        if indicators['trend'] == 'UP' and indicators['rsi'] < 45:  # Changed from 50 to 45
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
-        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > 50:
+        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > 55:  # Changed from 50 to 55
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
@@ -304,10 +306,12 @@ class EMARSIBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}"
+                    info=f"RSI:{signal['rsi']:.1f}_FIXED_RR"
                 )
                 
-                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI:{signal['rsi']:.1f}")
+                print(f"✅ FIXED {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI:{signal['rsi']:.1f}")
+                print(f"   🔧 FIXED SL: 0.12% → {self.config['net_stop_loss']:.2f}% (1:2 ratio)")
+                print(f"   🎯 Risk:Reward = 1:2 (Risk: {self.config['net_stop_loss']:.2f}% | Reward: {self.config['net_take_profit']:.2f}%)")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -392,8 +396,10 @@ class EMARSIBot:
             print("❌ Failed to connect")
             return
         
-        print(f"✅ EMA + RSI bot for {self.symbol}")
-        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
+        print(f"🔧 FIXED EMA + RSI bot for {self.symbol}")
+        print(f"✅ FIXED: Stop Loss 0.12% → {self.config['net_stop_loss']:.2f}%")
+        print(f"✅ FIXED: Risk:Reward → 1:2 ratio")
+        print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
         
         while True:
             try:

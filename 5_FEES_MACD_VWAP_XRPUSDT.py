@@ -130,7 +130,7 @@ class Strategy5_EMARSIBot:
         }
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/STRATEGY5_EMA_RSI_BNBUSDT.log"
+        self.log_file = "logs/5_EMA_RSI_BNBUSDT.log"
         self.unified_logger = UnifiedLogger("STRATEGY5_EMA_RSI", self.symbol)
         self.current_trade_id = None
         self.entry_price = None

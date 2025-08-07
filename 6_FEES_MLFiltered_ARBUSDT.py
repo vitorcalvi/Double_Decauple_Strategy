@@ -137,8 +137,9 @@ class EnhancedMLScalpingBot:
         
         self.order_timeout = 180
         
+        # FIXED PARAMETERS - Based on Research Analysis
         self.config = {
-            'timeframe': '3',
+            'timeframe': '5',        # Increased from 3min to reduce noise
             'rsi_period': 14,
             'ema_fast': 9,
             'ema_slow': 21,
@@ -151,8 +152,8 @@ class EnhancedMLScalpingBot:
             'base_position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,
-            'base_take_profit_pct': 0.4,
-            'base_stop_loss_pct': 0.3,
+            'base_take_profit_pct': 1.0,    # INCREASED: 0.4% → 1.0% (better target)
+            'base_stop_loss_pct': 0.5,     # INCREASED: 0.3% → 0.5% (avoid noise)
         }
         
         self.volatility_regime = 'normal'
@@ -256,9 +257,9 @@ class EnhancedMLScalpingBot:
         else:
             confidence += 0.1 if indicators['macd_histogram'] < 0 else -0.05
         
-        if indicators['rsi'] < 30:
+        if indicators['rsi'] < 35:  # Slightly adjusted for better signals
             confidence += 0.15
-        elif indicators['rsi'] > 70:
+        elif indicators['rsi'] > 65:  # Slightly adjusted for better signals
             confidence += 0.15
         elif 40 < indicators['rsi'] < 60:
             confidence += 0.05
@@ -447,6 +448,7 @@ class EnhancedMLScalpingBot:
                 print(f"🤖 {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
                 print(f"   💎 Confidence: {signal['confidence']:.2f} | RSI: {signal['rsi']:.1f}")
                 print(f"   📈 Volatility: {self.volatility_regime}")
+                print(f"   🎯 TP: ${take_profit:.4f} | SL: ${stop_loss:.4f} | R:R = 1:2")
         except Exception as e:
             print(f"Trade failed: {e}")
     
@@ -493,6 +495,38 @@ class EnhancedMLScalpingBot:
         except Exception as e:
             print(f"Close failed: {e}")
     
+    def show_status(self):
+        if len(self.price_data) == 0:
+            return
+        
+        current_price = float(self.price_data['close'].iloc[-1])
+        
+        print(f"\n🤖 FIXED ML-Filtered Bot - {self.symbol}")
+        print(f"💰 Price: ${current_price:.4f}")
+        print(f"🔧 IMPROVEMENTS:")
+        print(f"   • Take Profit: 0.4% → 1.0% (better targets)")
+        print(f"   • Stop Loss: 0.3% → 0.5% (reduce noise)")
+        print(f"   • Timeframe: 3min → 5min (less noise)")
+        print(f"   • Risk:Reward: 1:2 ratio")
+        
+        if self.position:
+            entry_price = float(self.position.get('avgPrice', 0))
+            side = self.position.get('side', '')
+            size = self.position.get('size', '0')
+            
+            pnl = float(self.position.get('unrealisedPnl', 0))
+            
+            emoji = "🟢" if side == "Buy" else "🔴"
+            print(f"{emoji} {side}: {size} @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+        elif self.pending_order:
+            order_price = float(self.pending_order.get('price', 0))
+            order_side = self.pending_order.get('side', '')
+            print(f"⏳ Pending {order_side} @ ${order_price:.4f}")
+        else:
+            print("🔍 ML scanning for high-confidence signals...")
+        
+        print("-" * 50)
+    
     async def run_cycle(self):
         if not await self.get_market_data():
             return
@@ -508,21 +542,24 @@ class EnhancedMLScalpingBot:
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
+        
+        self.show_status()
     
     async def run(self):
         if not self.connect():
             print("Failed to connect")
             return
         
-        print(f"🚀 ML-Filtered Scalping Bot - {self.symbol}")
+        print(f"🚀 FIXED ML-Filtered Scalping Bot - {self.symbol}")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
         print(f"🎯 ML Threshold: {self.config['ml_confidence_threshold']:.2f}")
         print(f"💰 TP: {self.config['base_take_profit_pct']}% | SL: {self.config['base_stop_loss_pct']}%")
+        print(f"🔧 Fixed parameters for optimal 1:2 Risk:Reward ratio")
         
         while True:
             try:
                 await self.run_cycle()
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
             except KeyboardInterrupt:
                 print("\n✋ Bot stopped")
                 try:

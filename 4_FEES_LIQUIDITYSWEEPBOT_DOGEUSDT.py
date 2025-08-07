@@ -2,6 +2,7 @@ import os
 import asyncio
 import pandas as pd
 import json
+import time
 from datetime import datetime, timezone
 from collections import deque
 from pybit.unified_trading import HTTP
@@ -9,7 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Integrated Trade Logger
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -18,7 +18,6 @@ class TradeLogger:
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Ensure logs directory exists
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
         
@@ -27,7 +26,6 @@ class TradeLogger:
         return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
-        """Log position opening with slippage"""
         trade_id = self.generate_trade_id()
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
@@ -63,7 +61,6 @@ class TradeLogger:
         return trade_id, log_entry
     
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
-        """Log position closing with slippage and PnL calculation including rebates"""
         if trade_id not in self.open_trades:
             return None
             
@@ -72,20 +69,17 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate gross PnL
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # Calculate fee rebates (negative fees = rebate)
         entry_fee_pct = abs(fees_entry) if fees_entry < 0 else -fees_entry
         exit_fee_pct = abs(fees_exit) if fees_exit < 0 else -fees_exit
         
         entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
         exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
         
-        # Calculate net PnL
         total_rebates = entry_rebate + exit_rebate
         net_pnl = gross_pnl + total_rebates
         
@@ -116,7 +110,7 @@ class TradeLogger:
         return log_entry
 
 class LiquiditySweepBot:
-    """Smart-Money Liquidity Sweep Strategy"""
+    """Smart-Money Liquidity Sweep Strategy - FIXED VERSION"""
     
     def __init__(self):
         self.symbol = 'DOGEUSDT'
@@ -130,7 +124,14 @@ class LiquiditySweepBot:
         
         # Trading state
         self.position = None
+        self.pending_order = None
         self.price_data = pd.DataFrame()
+        
+        # Anti-duplicate mechanisms
+        self.last_order_time = 0
+        self.order_cooldown = 10  # seconds
+        self.last_signal_price = 0
+        self.min_price_change_pct = 0.1  # minimum price change for new signal
         
         # Strategy parameters with Fee Calculations
         self.config = {
@@ -142,11 +143,11 @@ class LiquiditySweepBot:
             'position_size': 100,
             'lookback': 100,
             'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,  # Negative = rebate
+            'maker_fee_pct': -0.04,
             'gross_take_profit': 1.5,
             'gross_stop_loss': 0.5,
-            'net_take_profit': 1.58,  # 1.5 + 0.08 rebate
-            'net_stop_loss': 0.42,    # 0.5 - 0.08 rebate
+            'net_take_profit': 1.58,
+            'net_stop_loss': 0.42,
         }
         
         # Liquidity tracking
@@ -169,6 +170,43 @@ class LiquiditySweepBot:
     def format_qty(self, qty):
         """Format quantity for DOGE"""
         return str(int(round(qty))) if qty >= 1.0 else "0"
+    
+    async def check_pending_orders(self):
+        """Check for any pending orders"""
+        try:
+            orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
+            if orders.get('retCode') != 0:
+                self.pending_order = None
+                return False
+            
+            order_list = orders['result']['list']
+            if order_list and len(order_list) > 0:
+                self.pending_order = order_list[0]
+                return True
+            
+            self.pending_order = None
+            return False
+        except Exception as e:
+            print(f"❌ Order check error: {e}")
+            return False
+    
+    async def check_position(self):
+        """Check current position status"""
+        try:
+            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
+                if pos_list:
+                    for pos in pos_list:
+                        if float(pos.get('size', 0)) > 0:
+                            self.position = pos
+                            return True
+            self.position = None
+            return False
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
+            self.position = None
+            return False
     
     def calculate_break_even(self, entry_price, side):
         """Calculate break-even price including fee rebates"""
@@ -198,7 +236,6 @@ class LiquiditySweepBot:
         self.liquidity_pools['highs'].clear()
         self.liquidity_pools['lows'].clear()
         
-        # Find significant highs and lows
         for i in range(len(df) - 10, max(0, len(df) - self.config['liquidity_lookback']), -1):
             # Check significant high
             if df['high'].iloc[i] == highs.iloc[i]:
@@ -313,6 +350,17 @@ class LiquiditySweepBot:
         if len(df) < self.config['lookback']:
             return None
         
+        # Check if we already have a position
+        if self.position:
+            return None
+        
+        # Check for duplicate signals
+        current_price = df['close'].iloc[-1]
+        if self.last_signal_price != 0:
+            price_change_pct = abs(current_price - self.last_signal_price) / self.last_signal_price * 100
+            if price_change_pct < self.min_price_change_pct:
+                return None
+        
         self.identify_liquidity_pools(df)
         self.identify_order_blocks(df)
         
@@ -320,12 +368,12 @@ class LiquiditySweepBot:
         if not sweep:
             return None
         
-        current_price = df['close'].iloc[-1]
         has_confluence = self.check_order_block_confluence(sweep['type'], current_price)
         
         action = 'BUY' if sweep['type'] == 'bullish_sweep' else 'SELL' if sweep['type'] == 'bearish_sweep' else None
         
         if action:
+            self.last_signal_price = current_price
             return {
                 'action': action,
                 'price': current_price,
@@ -353,28 +401,15 @@ class LiquiditySweepBot:
                 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
             ])
             
-            # Convert data types
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col])
             
-            # Sort by time
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
         except Exception as e:
             print(f"❌ Market data error: {e}")
             return False
-    
-    async def check_position(self):
-        """Check current position status"""
-        try:
-            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except Exception as e:
-            print(f"❌ Position check error: {e}")
-            pass
     
     def should_close(self):
         """Determine if position should be closed based on net targets"""
@@ -417,6 +452,22 @@ class LiquiditySweepBot:
     
     async def execute_trade(self, signal):
         """Execute maker-only trade with rebate benefits"""
+        # Triple check no position or pending order exists
+        await self.check_position()
+        if self.position:
+            print("⚠️ Position already exists, skipping trade")
+            return
+        
+        if await self.check_pending_orders():
+            print("⚠️ Pending order exists, skipping trade")
+            return
+        
+        # Check cooldown
+        current_time = time.time()
+        if current_time - self.last_order_time < self.order_cooldown:
+            print(f"⚠️ Order cooldown active, wait {self.order_cooldown - (current_time - self.last_order_time):.1f}s")
+            return
+        
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
@@ -439,6 +490,8 @@ class LiquiditySweepBot:
             )
             
             if order.get('retCode') == 0:
+                self.last_order_time = current_time
+                
                 # Calculate targets for logging
                 break_even = self.calculate_break_even(limit_price, signal['action'])
                 net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
@@ -556,6 +609,8 @@ class LiquiditySweepBot:
             print(f"{emoji} {side}: {size} DOGE @ ${entry_price:.4f}")
             print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
             print(f"   🎯 BE: ${break_even:.4f} | TP: ${net_tp:.4f} | SL: ${net_sl:.4f}")
+        elif self.pending_order:
+            print(f"⏳ Pending order: {self.pending_order.get('side')} @ ${self.pending_order.get('price')}")
         else:
             print("🔍 Scanning for liquidity sweeps...")
         
@@ -573,6 +628,7 @@ class LiquiditySweepBot:
             if should_close:
                 await self.close_position(reason)
         else:
+            # Only generate signal if no position
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
@@ -585,7 +641,8 @@ class LiquiditySweepBot:
             print("❌ Failed to connect to exchange")
             return
         
-        print(f"💎 Smart-Money Liquidity Sweep Bot")
+        print(f"💎 Smart-Money Liquidity Sweep Bot - FIXED VERSION")
+        print(f"✅ Anti-duplicate protection enabled")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
         print(f"🎯 Net TP: 1.5 RR ({self.config['net_take_profit']}%) | Net SL: {self.config['net_stop_loss']}%")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")

@@ -3,6 +3,7 @@ import asyncio
 import pandas as pd
 import numpy as np
 import json
+import time
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
@@ -109,6 +110,8 @@ class TradeLogger:
         return log_entry
 
 class PivotReversalBot:
+    """Pivot Point Reversal Strategy - FIXED VERSION"""
+    
     def __init__(self):
         self.symbol = 'LINKUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
@@ -118,9 +121,18 @@ class PivotReversalBot:
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
+        # Trading state
         self.position = None
+        self.pending_order = None
         self.price_data = pd.DataFrame()
         
+        # Anti-duplicate mechanisms
+        self.last_order_time = 0
+        self.order_cooldown = 10  # seconds
+        self.last_signal = None
+        self.min_price_change_pct = 0.1  # minimum price change for new signal
+        
+        # Strategy configuration
         self.config = {
             'timeframe': '3',
             'rsi_period': 14,
@@ -132,13 +144,16 @@ class PivotReversalBot:
             'net_stop_loss': 0.3,
         }
         
+        # Pivot levels tracking
         self.pivot_levels = {}
         self.last_pivot_update = None
         
+        # Trade logging
         self.logger = TradeLogger("PIVOT_REVERSAL", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
+        """Connect to exchange"""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
@@ -147,13 +162,63 @@ class PivotReversalBot:
             return False
     
     def format_qty(self, qty):
+        """Format quantity for LINK"""
         return str(int(round(qty * 10)) / 10)
     
+    async def check_pending_orders(self):
+        """Check for any pending orders"""
+        try:
+            orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
+            if orders.get('retCode') != 0:
+                self.pending_order = None
+                return False
+            
+            order_list = orders['result']['list']
+            if order_list and len(order_list) > 0:
+                self.pending_order = order_list[0]
+                # Cancel old orders
+                order_age = (datetime.now().timestamp() - int(order_list[0]['createdTime']) / 1000)
+                if order_age > 300:  # 5 minutes
+                    self.exchange.cancel_order(
+                        category="linear",
+                        symbol=self.symbol,
+                        orderId=order_list[0]['orderId']
+                    )
+                    print(f"❌ Cancelled stale order (aged {order_age:.0f}s)")
+                    self.pending_order = None
+                    return False
+                return True
+            
+            self.pending_order = None
+            return False
+        except Exception as e:
+            print(f"❌ Order check error: {e}")
+            return False
+    
+    async def check_position(self):
+        """Check current position status with proper validation"""
+        try:
+            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
+                if pos_list:
+                    for pos in pos_list:
+                        if float(pos.get('size', 0)) > 0:
+                            self.position = pos
+                            return True
+            self.position = None
+            return False
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
+            self.position = None
+            return False
+    
     def calculate_pivot_points(self, df):
+        """Calculate pivot points using previous period data"""
         if len(df) < 2:
             return None
         
-        # Use previous day's data for pivot calculation
+        # Use previous period for pivot calculation
         prev_high = df['high'].iloc[-2]
         prev_low = df['low'].iloc[-2]
         prev_close = df['close'].iloc[-2]
@@ -179,6 +244,7 @@ class PivotReversalBot:
         }
     
     def calculate_rsi(self, prices):
+        """Calculate RSI indicator"""
         delta = prices.diff()
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
@@ -187,6 +253,7 @@ class PivotReversalBot:
         return rsi
     
     def calculate_mfi(self, df):
+        """Calculate Money Flow Index"""
         if len(df) < self.config['mfi_period'] + 1:
             return None
         
@@ -214,6 +281,7 @@ class PivotReversalBot:
         return mfi.iloc[-1] if not pd.isna(mfi.iloc[-1]) else 50
     
     def find_nearest_pivot(self, price, pivots):
+        """Find nearest pivot level to current price"""
         if not pivots:
             return None, None
         
@@ -229,16 +297,27 @@ class PivotReversalBot:
         
         for name, level in levels:
             distance_pct = abs(price - level) / level * 100
-            if distance_pct < 0.3:
+            if distance_pct < 0.3:  # Within 0.3% of pivot level
                 return name, level
         
         return None, None
     
     def generate_signal(self, df):
+        """Generate trading signal based on pivot reversals"""
         if len(df) < 30:
             return None
         
+        # Check if we already have a position
+        if self.position:
+            return None
+        
         current_price = float(df['close'].iloc[-1])
+        
+        # Check for duplicate signals
+        if self.last_signal:
+            price_change_pct = abs(current_price - self.last_signal['price']) / self.last_signal['price'] * 100
+            if price_change_pct < self.min_price_change_pct:
+                return None
         
         # Update pivot points every hour
         if not self.last_pivot_update or (datetime.now() - self.last_pivot_update).total_seconds() > 3600:
@@ -260,7 +339,7 @@ class PivotReversalBot:
         
         # Long signal: Near support with oversold conditions
         if pivot_name in ['s1', 's2', 's3'] and rsi < 30 and mfi < 30:
-            return {
+            signal = {
                 'action': 'BUY',
                 'price': current_price,
                 'pivot': pivot_name,
@@ -268,10 +347,12 @@ class PivotReversalBot:
                 'rsi': rsi,
                 'mfi': mfi
             }
+            self.last_signal = signal
+            return signal
         
         # Short signal: Near resistance with overbought conditions
         elif pivot_name in ['r1', 'r2', 'r3'] and rsi > 70 and mfi > 70:
-            return {
+            signal = {
                 'action': 'SELL',
                 'price': current_price,
                 'pivot': pivot_name,
@@ -279,10 +360,13 @@ class PivotReversalBot:
                 'rsi': rsi,
                 'mfi': mfi
             }
+            self.last_signal = signal
+            return signal
         
         return None
     
     async def get_market_data(self):
+        """Retrieve market data from exchange"""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -308,17 +392,8 @@ class PivotReversalBot:
             print(f"❌ Market data error: {e}")
             return False
     
-    async def check_position(self):
-        try:
-            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except Exception as e:
-            print(f"❌ Position check error: {e}")
-            pass
-    
     def should_close(self):
+        """Determine if position should be closed"""
         if not self.position or not self.pivot_levels:
             return False, ""
         
@@ -354,6 +429,24 @@ class PivotReversalBot:
         return False, ""
     
     async def execute_trade(self, signal):
+        """Execute trade with proper duplicate prevention"""
+        # Triple check no position exists
+        await self.check_position()
+        if self.position:
+            print("⚠️ Position already exists, skipping trade")
+            return
+        
+        # Check for pending orders
+        if await self.check_pending_orders():
+            print("⚠️ Pending order exists, skipping trade")
+            return
+        
+        # Check cooldown
+        current_time = time.time()
+        if current_time - self.last_order_time < self.order_cooldown:
+            print(f"⚠️ Order cooldown active, wait {self.order_cooldown - (current_time - self.last_order_time):.1f}s")
+            return
+        
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
@@ -381,6 +474,7 @@ class PivotReversalBot:
             )
             
             if order.get('retCode') == 0:
+                self.last_order_time = current_time
                 net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
@@ -401,6 +495,7 @@ class PivotReversalBot:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
+        """Close position with maker order for rebate benefits"""
         if not self.position:
             return
         
@@ -442,6 +537,7 @@ class PivotReversalBot:
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
+        """Show current status"""
         if len(self.price_data) == 0:
             return
         
@@ -467,15 +563,19 @@ class PivotReversalBot:
             
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} LINK @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+        elif self.pending_order:
+            print(f"⏳ Pending order: {self.pending_order.get('side')} @ ${self.pending_order.get('price')}")
         else:
             print("🔍 Scanning for pivot reversals...")
         
         print("-" * 50)
     
     async def run_cycle(self):
+        """Run one trading cycle"""
         if not await self.get_market_data():
             return
         
+        # Always check position first
         await self.check_position()
         
         if self.position:
@@ -483,6 +583,7 @@ class PivotReversalBot:
             if should_close:
                 await self.close_position(reason)
         else:
+            # Only generate signal if no position exists
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
@@ -490,11 +591,13 @@ class PivotReversalBot:
         self.show_status()
     
     async def run(self):
+        """Main bot loop"""
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"🎯 Pivot Point Reversal Bot - {self.symbol}")
+        print(f"🎯 Pivot Point Reversal Bot - FIXED VERSION")
+        print(f"✅ Anti-duplicate protection enabled")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
         print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
