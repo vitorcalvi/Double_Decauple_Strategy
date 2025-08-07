@@ -12,17 +12,6 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -116,20 +105,9 @@ class TradeLogger:
         del self.open_trades[trade_id]
         return log_entry
 
-class DynamicGridBot:
+class VWAPRSIDivergenceBot:
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
-        self.symbol = 'ETHUSDT'
+        self.symbol = 'AVAXUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -143,23 +121,22 @@ class DynamicGridBot:
         
         # FIXED PARAMETERS
         self.config = {
-            'grid_levels': 10,
-            'grid_spacing_pct': 0.6,
+            'timeframe': '5',
+            'rsi_period': 9,
+            'divergence_lookback': 5,
+            'ema_period': 50,
             'risk_per_trade': 2.0,       # FIXED: 2% risk per trade instead of fixed $100
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 1.2,
-            'net_stop_loss': 0.6,
-            'atr_period': 14,
-            'volatility_threshold': 0.015,
-            'slippage_basis_points': 2,  # FIXED: 0.02% expected slippage
+            'net_take_profit': 0.70,
+            'net_stop_loss': 0.35,
+            'slippage_basis_points': 3,  # FIXED: 0.03% expected slippage for AVAX
         }
         
-        self.grid_levels = []
-        self.current_grid_index = -1
-        self.last_update_time = None
+        self.rsi_pivots = {'highs': [], 'lows': []}
+        self.price_pivots = {'highs': [], 'lows': []}
         
-        self.logger = TradeLogger("DYNAMIC_GRID_FIXED", self.symbol)
+        self.logger = TradeLogger("VWAP_RSI_DIV_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -172,14 +149,14 @@ class DynamicGridBot:
     
     # FIXED: Proper quantity formatting with instrument precision
     def format_qty(self, qty):
-        # ETH minimum quantity is 0.001 with 3 decimal places
-        min_qty = 0.001
+        # AVAX minimum quantity is 0.01 with 2 decimal places
+        min_qty = 0.01
         if qty < min_qty:
             return "0"
         
-        # Round to 3 decimal places for ETH
+        # Round to 2 decimal places for AVAX
         formatted = round(qty / min_qty) * min_qty
-        return f"{formatted:.3f}"
+        return f"{formatted:.2f}"
     
     # FIXED: Get account balance for position sizing
     async def get_account_balance(self):
@@ -227,95 +204,110 @@ class DynamicGridBot:
         
         return actual_price
     
-    def calculate_atr(self, df):
-        if len(df) < self.config['atr_period']:
+    def calculate_vwap(self, df):
+        if len(df) < 20:
             return None
         
-        high = df['high']
-        low = df['low']
+        recent_data = df.tail(min(288, len(df)))
+        typical_price = (recent_data['high'] + recent_data['low'] + recent_data['close']) / 3
+        volume = recent_data['volume']
+        
+        vwap = (typical_price * volume).cumsum() / volume.cumsum()
+        return vwap.iloc[-1] if not vwap.empty else None
+    
+    def calculate_rsi(self, prices):
+        delta = prices.diff()
+        gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
+        rs = gain / (loss + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    def detect_pivots(self, series, window=5):
+        pivots_high = []
+        pivots_low = []
+        
+        for i in range(window, len(series) - window):
+            if all(series.iloc[i] >= series.iloc[i-j] for j in range(1, window+1)) and \
+               all(series.iloc[i] >= series.iloc[i+j] for j in range(1, window+1)):
+                pivots_high.append((i, series.iloc[i]))
+            
+            if all(series.iloc[i] <= series.iloc[i-j] for j in range(1, window+1)) and \
+               all(series.iloc[i] <= series.iloc[i+j] for j in range(1, window+1)):
+                pivots_low.append((i, series.iloc[i]))
+        
+        return pivots_high, pivots_low
+    
+    def detect_divergence(self, df):
+        if len(df) < 30:
+            return None
+        
         close = df['close']
+        rsi = self.calculate_rsi(close)
         
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
+        price_highs, price_lows = self.detect_pivots(close)
+        rsi_highs, rsi_lows = self.detect_pivots(rsi)
         
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=self.config['atr_period']).mean()
+        current_price = close.iloc[-1]
+        current_rsi = rsi.iloc[-1]
         
-        return atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else None
-    
-    def update_grid_levels(self, current_price, atr):
-        if not atr:
-            atr = current_price * 0.01
+        # Bullish divergence
+        if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+            if price_lows[-1][1] < price_lows[-2][1] and rsi_lows[-1][1] > rsi_lows[-2][1]:
+                if abs(price_lows[-1][0] - len(df) + 1) <= 5:
+                    return {
+                        'type': 'bullish',
+                        'price': current_price,
+                        'rsi': current_rsi,
+                        'strength': abs(rsi_lows[-1][1] - rsi_lows[-2][1])
+                    }
         
-        volatility_factor = min(max(atr / current_price, 0.005), 0.03)
-        adjusted_spacing = self.config['grid_spacing_pct'] / 100 * (1 + volatility_factor * 10)
-        
-        self.grid_levels = []
-        for i in range(-self.config['grid_levels'], self.config['grid_levels'] + 1):
-            if i != 0:
-                level = current_price * (1 + i * adjusted_spacing)
-                self.grid_levels.append({
-                    'price': level,
-                    'index': i,
-                    'side': 'BUY' if i < 0 else 'SELL'
-                })
-        
-        self.grid_levels.sort(key=lambda x: x['price'])
-        self.last_update_time = datetime.now()
-    
-    def find_nearest_grid(self, current_price):
-        if not self.grid_levels:
-            return None
-        
-        for i, level in enumerate(self.grid_levels):
-            if abs(current_price - level['price']) / level['price'] < 0.002:
-                return i, level
+        # Bearish divergence
+        if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+            if price_highs[-1][1] > price_highs[-2][1] and rsi_highs[-1][1] < rsi_highs[-2][1]:
+                if abs(price_highs[-1][0] - len(df) + 1) <= 5:
+                    return {
+                        'type': 'bearish',
+                        'price': current_price,
+                        'rsi': current_rsi,
+                        'strength': abs(rsi_highs[-1][1] - rsi_highs[-2][1])
+                    }
         
         return None
     
     def generate_signal(self, df):
-        if len(df) < 20:
+        if len(df) < 50:
+            return None
+        
+        divergence = self.detect_divergence(df)
+        if not divergence:
             return None
         
         current_price = float(df['close'].iloc[-1])
-        atr = self.calculate_atr(df)
+        vwap = self.calculate_vwap(df)
+        ema = df['close'].ewm(span=self.config['ema_period']).mean().iloc[-1]
         
-        if not self.grid_levels or not self.last_update_time:
-            self.update_grid_levels(current_price, atr)
+        if not vwap:
             return None
         
-        time_since_update = (datetime.now() - self.last_update_time).total_seconds()
-        if time_since_update > 300:
-            self.update_grid_levels(current_price, atr)
-        
-        grid_match = self.find_nearest_grid(current_price)
-        if not grid_match:
-            return None
-        
-        grid_index, grid_level = grid_match
-        
-        if grid_index == self.current_grid_index:
-            return None
-        
-        ema_short = df['close'].ewm(span=9).mean().iloc[-1]
-        trend = 'UP' if current_price > ema_short else 'DOWN'
-        
-        if grid_level['side'] == 'BUY' and trend == 'UP':
-            self.current_grid_index = grid_index
+        # Bullish divergence + price crosses above VWAP
+        if divergence['type'] == 'bullish' and current_price > vwap and current_price > ema:
             return {
                 'action': 'BUY',
                 'price': current_price,
-                'grid_level': grid_level['price'],
-                'grid_index': grid_level['index']
+                'vwap': vwap,
+                'rsi': divergence['rsi'],
+                'divergence_strength': divergence['strength']
             }
-        elif grid_level['side'] == 'SELL' and trend == 'DOWN':
-            self.current_grid_index = grid_index
+        
+        # Bearish divergence + price crosses below VWAP
+        elif divergence['type'] == 'bearish' and current_price < vwap and current_price < ema:
             return {
                 'action': 'SELL',
                 'price': current_price,
-                'grid_level': grid_level['price'],
-                'grid_index': grid_level['index']
+                'vwap': vwap,
+                'rsi': divergence['rsi'],
+                'divergence_strength': divergence['strength']
             }
         
         return None
@@ -325,8 +317,8 @@ class DynamicGridBot:
             klines = self.exchange.get_kline(
                 category="linear",
                 symbol=self.symbol,
-                interval="15",
-                limit=50
+                interval=self.config['timeframe'],
+                limit=100
             )
             
             if klines.get('retCode') != 0:
@@ -370,26 +362,36 @@ class DynamicGridBot:
         if side == "Buy":
             profit_pct = (current_price - entry_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
-                return True, "grid_target_reached"
+                return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
+            
+            # Check for swing high
+            price_highs, _ = self.detect_pivots(self.price_data['close'])
+            if price_highs and abs(price_highs[-1][0] - len(self.price_data) + 1) <= 3:
+                return True, "swing_high_exit"
         else:
             profit_pct = (entry_price - current_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
-                return True, "grid_target_reached"
+                return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
+            
+            # Check for swing low
+            _, price_lows = self.detect_pivots(self.price_data['close'])
+            if price_lows and abs(price_lows[-1][0] - len(self.price_data) + 1) <= 3:
+                return True, "swing_low_exit"
+        
+        # Check for opposite RSI extreme
+        rsi = self.calculate_rsi(self.price_data['close']).iloc[-1]
+        if side == "Buy" and rsi > 70:
+            return True, "rsi_overbought"
+        elif side == "Sell" and rsi < 30:
+            return True, "rsi_oversold"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        
-        # Check trade cooldown
-        import time
-        if time.time() - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
-            return
         # FIXED: Check account balance first
         if not await self.get_account_balance():
             print("❌ Could not get account balance")
@@ -415,7 +417,7 @@ class DynamicGridBot:
             return
         
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset_mult, 2)
+        limit_price = round(signal['price'] * offset_mult, 4)
         
         # FIXED: Apply slippage to expected execution price
         expected_execution_price = self.apply_slippage(limit_price, signal['action'])
@@ -432,7 +434,6 @@ class DynamicGridBot:
             )
             
             if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
                 net_tp = expected_execution_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 - self.config['net_take_profit']/100)
                 net_sl = expected_execution_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 + self.config['net_stop_loss']/100)
                 
@@ -446,13 +447,14 @@ class DynamicGridBot:
                     qty=float(formatted_qty),
                     stop_loss=net_sl,
                     take_profit=net_tp,
-                    info=f"grid_level:{signal['grid_level']:.2f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
+                    info=f"vwap:{signal['vwap']:.4f}_rsi:{signal['rsi']:.1f}_div:{signal['divergence_strength']:.1f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
                 )
                 
-                print(f"📊 GRID {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
+                print(f"📈 DIVERGENCE {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
                 print(f"   💰 Position Value: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
-                print(f"   🎯 Expected Execution: ${expected_execution_price:.2f} (with slippage)")
-                print(f"   💎 TP: ${net_tp:.2f} | SL: ${net_sl:.2f}")
+                print(f"   🎯 VWAP: ${signal['vwap']:.4f} | RSI: {signal['rsi']:.1f}")
+                print(f"   💪 Divergence Strength: {signal['divergence_strength']:.1f}")
+                print(f"   🎯 Expected Execution: ${expected_execution_price:.4f} (with slippage)")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -466,7 +468,7 @@ class DynamicGridBot:
         qty = float(self.position['size'])
         
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
-        limit_price = round(current_price * offset_mult, 2)
+        limit_price = round(current_price * offset_mult, 4)
         
         # FIXED: Apply slippage to exit price
         expected_exit_price = self.apply_slippage(limit_price, side)
@@ -495,7 +497,7 @@ class DynamicGridBot:
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason} @ ${expected_exit_price:.2f}")
+                print(f"✅ Closed: {reason} @ ${expected_exit_price:.4f}")
                 self.position = None
                 
         except Exception as e:
@@ -506,21 +508,20 @@ class DynamicGridBot:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
+        vwap = self.calculate_vwap(self.price_data)
+        rsi = self.calculate_rsi(self.price_data['close']).iloc[-1] if len(self.price_data) > 14 else 50
         
-        print(f"\n📊 FIXED Dynamic Grid Bot - {self.symbol}")
-        print(f"💰 Price: ${current_price:.2f} | Balance: ${self.account_balance:.2f}")
+        print(f"\n📈 FIXED VWAP + RSI Divergence - {self.symbol}")
+        print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
         print(f"🔧 FIXES APPLIED:")
         print(f"   • Position Sizing: Risk-based ({self.config['risk_per_trade']}% per trade)")
         print(f"   • Fee Calculations: Proper maker rebates")  
         print(f"   • Slippage Modeling: {self.config['slippage_basis_points']} basis points")
         
-        if self.grid_levels:
-            buy_grids = [g for g in self.grid_levels if g['side'] == 'BUY']
-            sell_grids = [g for g in self.grid_levels if g['side'] == 'SELL']
-            if buy_grids:
-                print(f"🟢 Next Buy Grid: ${buy_grids[-1]['price']:.2f}")
-            if sell_grids:
-                print(f"🔴 Next Sell Grid: ${sell_grids[0]['price']:.2f}")
+        if vwap:
+            print(f"📊 VWAP: ${vwap:.4f} | RSI: {rsi:.1f}")
+            position_to_vwap = "Above" if current_price > vwap else "Below"
+            print(f"📍 Price is {position_to_vwap} VWAP")
         
         if self.position:
             entry_price = float(self.position.get('avgPrice', 0))
@@ -532,21 +533,14 @@ class DynamicGridBot:
             risk_pct = (position_value / self.account_balance) * 100 if self.account_balance > 0 else 0
             
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} ETH @ ${entry_price:.2f} | PnL: ${pnl:.2f}")
+            print(f"{emoji} {side}: {size} AVAX @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
             print(f"   📊 Position: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
         else:
-            print("⚡ Waiting for optimal grid signals...")
+            print("🔍 Scanning for RSI divergences...")
         
         print("-" * 50)
     
     async def run_cycle(self):
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
         
@@ -568,18 +562,20 @@ class DynamicGridBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📊 FIXED Dynamic Grid Trading Bot - {self.symbol}")
+        print(f"📈 FIXED VWAP + RSI Divergence Bot - {self.symbol}")
         print(f"🔧 CRITICAL FIXES:")
         print(f"   ✅ Position Sizing: Account balance-based with {self.config['risk_per_trade']}% risk")
         print(f"   ✅ Fee Calculations: Proper maker rebate handling")
         print(f"   ✅ Slippage Modeling: {self.config['slippage_basis_points']} basis points expected slippage")
-        print(f"   ✅ Instrument Precision: ETH 0.001 minimum quantity")
+        print(f"   ✅ Instrument Precision: AVAX 0.01 minimum quantity")
+        print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
+        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
         
         try:
             while True:
                 await self.run_cycle()
-                await asyncio.sleep(2)
+                await asyncio.sleep(10)
         except KeyboardInterrupt:
             print("\n🛑 Bot stopped")
             if self.position:
@@ -589,5 +585,5 @@ class DynamicGridBot:
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = DynamicGridBot()
+    bot = VWAPRSIDivergenceBot()
     asyncio.run(bot.run())

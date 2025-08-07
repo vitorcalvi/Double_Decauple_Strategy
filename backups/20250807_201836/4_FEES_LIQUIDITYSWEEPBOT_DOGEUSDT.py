@@ -13,17 +13,6 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -122,17 +111,6 @@ class LiquiditySweepBot:
     """Fixed Liquidity Sweep Strategy"""
     
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = 'DOGEUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -444,13 +422,6 @@ class LiquiditySweepBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        
-        # Check trade cooldown
-        import time
-        if time.time() - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
-            return
         """FIXED: Execute trade with proper sizing and slippage"""
         # Check cooldown
         current_time = time.time()
@@ -493,7 +464,6 @@ class LiquiditySweepBot:
             )
             
             if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
                 self.last_order_time = current_time
                 
                 # Calculate targets
@@ -595,13 +565,6 @@ class LiquiditySweepBot:
     
     async def run_cycle(self):
         """Run one trading cycle"""
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
         

@@ -12,17 +12,6 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -118,17 +107,6 @@ class TradeLogger:
 
 class DynamicGridBot:
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = 'ETHUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -383,13 +361,6 @@ class DynamicGridBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        
-        # Check trade cooldown
-        import time
-        if time.time() - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
-            return
         # FIXED: Check account balance first
         if not await self.get_account_balance():
             print("❌ Could not get account balance")
@@ -432,7 +403,6 @@ class DynamicGridBot:
             )
             
             if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
                 net_tp = expected_execution_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 - self.config['net_take_profit']/100)
                 net_sl = expected_execution_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 + self.config['net_stop_loss']/100)
                 
@@ -540,13 +510,6 @@ class DynamicGridBot:
         print("-" * 50)
     
     async def run_cycle(self):
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
         

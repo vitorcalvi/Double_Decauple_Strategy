@@ -9,20 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Use the same TradeLogger class from above
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -115,20 +105,9 @@ class TradeLogger:
         del self.open_trades[trade_id]
         return log_entry
 
-class RangeBalancingBot:
+class RMISuperTrendBot:
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
-        self.symbol = 'DOTUSDT'
+        self.symbol = 'ADAUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -147,25 +126,24 @@ class RangeBalancingBot:
         self.min_order_interval = 30  # Minimum seconds between orders
         
         self.config = {
-            'timeframe': '5',
-            'regression_period': 50,
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'channel_width_pct': 1.5,
+            'timeframe': '3',
+            'rmi_period': 14,
+            'rmi_momentum': 5,
+            'rmi_threshold_long': 55,
+            'rmi_threshold_short': 45,
+            'supertrend_period': 10,
+            'supertrend_multiplier': 2,
             'risk_pct': 2.0,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 0.6,
-            'net_stop_loss': 0.3,
+            'net_take_profit': 0.70,
+            'net_stop_loss': 0.35,
             'slippage_pct': 0.02,
             'min_notional': 5,
-            'qty_precision': 1,
+            'qty_precision': 0,
         }
         
-        self.regression_channel = None
-        self.last_channel_update = None
-        
-        self.logger = TradeLogger("RANGE_REGRESSION_FIXED", self.symbol)
+        self.logger = TradeLogger("RMI_SUPERTREND_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -177,10 +155,7 @@ class RangeBalancingBot:
             return False
     
     def format_qty(self, qty):
-        precision = self.config['qty_precision']
-        step = 10 ** (-precision)
-        rounded_qty = round(qty / step) * step
-        return f"{rounded_qty:.{precision}f}"
+        return str(int(round(qty)))
     
     async def update_account_balance(self):
         try:
@@ -267,55 +242,79 @@ class RangeBalancingBot:
             print(f"⚠️ Order check error: {e}")
             return False
     
-    def calculate_linear_regression(self, prices):
-        if len(prices) < self.config['regression_period']:
+    def calculate_rmi(self, prices):
+        if len(prices) < self.config['rmi_period'] + self.config['rmi_momentum']:
             return None
         
-        recent_prices = prices.tail(self.config['regression_period'])
-        x = np.arange(len(recent_prices))
-        y = recent_prices.values
+        momentum = prices.diff(self.config['rmi_momentum'])
         
-        coefficients = np.polyfit(x, y, 1)
-        slope = coefficients[0]
-        intercept = coefficients[1]
+        gain = momentum.where(momentum > 0, 0)
+        loss = -momentum.where(momentum < 0, 0)
         
-        regression_line = slope * x + intercept
+        avg_gain = gain.rolling(window=self.config['rmi_period']).mean()
+        avg_loss = loss.rolling(window=self.config['rmi_period']).mean()
         
-        residuals = y - regression_line
-        std_dev = np.std(residuals)
+        rs = avg_gain / (avg_loss + 1e-10)
+        rmi = 100 - (100 / (1 + rs))
         
-        channel_width = std_dev * self.config['channel_width_pct']
-        upper_channel = regression_line[-1] + channel_width
-        lower_channel = regression_line[-1] - channel_width
-        midline = regression_line[-1]
-        
-        angle = np.degrees(np.arctan(slope))
-        
-        return {
-            'upper': upper_channel,
-            'lower': lower_channel,
-            'midline': midline,
-            'slope': slope,
-            'angle': angle,
-            'std_dev': std_dev
-        }
+        return rmi
     
-    def calculate_bollinger_bands(self, prices):
-        if len(prices) < self.config['bb_period']:
-            return None
+    def calculate_supertrend(self, df):
+        high = df['high']
+        low = df['low']
+        close = df['close']
         
-        sma = prices.rolling(window=self.config['bb_period']).mean()
-        std = prices.rolling(window=self.config['bb_period']).std()
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=self.config['supertrend_period']).mean()
         
-        upper_band = sma + (std * self.config['bb_std'])
-        lower_band = sma - (std * self.config['bb_std'])
+        hl_avg = (high + low) / 2
+        multiplier = self.config['supertrend_multiplier']
         
-        return {
-            'upper': upper_band.iloc[-1],
-            'lower': lower_band.iloc[-1],
-            'middle': sma.iloc[-1],
-            'bandwidth': (upper_band.iloc[-1] - lower_band.iloc[-1]) / sma.iloc[-1] * 100
-        }
+        upper_band = hl_avg + (multiplier * atr)
+        lower_band = hl_avg - (multiplier * atr)
+        
+        supertrend = pd.Series(index=df.index, dtype=float)
+        direction = pd.Series(index=df.index, dtype=int)
+        
+        for i in range(self.config['supertrend_period'], len(df)):
+            if pd.isna(upper_band.iloc[i]) or pd.isna(lower_band.iloc[i]):
+                continue
+                
+            if i == self.config['supertrend_period']:
+                if close.iloc[i] <= upper_band.iloc[i]:
+                    direction.iloc[i] = -1
+                    supertrend.iloc[i] = upper_band.iloc[i]
+                else:
+                    direction.iloc[i] = 1
+                    supertrend.iloc[i] = lower_band.iloc[i]
+            else:
+                prev_dir = direction.iloc[i-1]
+                
+                if close.iloc[i] <= upper_band.iloc[i]:
+                    if prev_dir == -1:
+                        if upper_band.iloc[i] < supertrend.iloc[i-1]:
+                            supertrend.iloc[i] = upper_band.iloc[i]
+                        else:
+                            supertrend.iloc[i] = supertrend.iloc[i-1]
+                        direction.iloc[i] = -1
+                    else:
+                        supertrend.iloc[i] = upper_band.iloc[i]
+                        direction.iloc[i] = -1
+                else:
+                    if prev_dir == 1:
+                        if lower_band.iloc[i] > supertrend.iloc[i-1]:
+                            supertrend.iloc[i] = lower_band.iloc[i]
+                        else:
+                            supertrend.iloc[i] = supertrend.iloc[i-1]
+                        direction.iloc[i] = 1
+                    else:
+                        supertrend.iloc[i] = lower_band.iloc[i]
+                        direction.iloc[i] = 1
+        
+        return supertrend, direction
     
     def generate_signal(self, df):
         # 🔴 CRITICAL FIX: Don't generate signals if we have pending orders or position
@@ -328,40 +327,39 @@ class RangeBalancingBot:
             if time_since_last < self.min_order_interval:
                 return None
         
-        if len(df) < self.config['regression_period']:
+        if len(df) < 50:
             return None
         
         current_price = float(df['close'].iloc[-1])
         
-        if not self.last_channel_update or (datetime.now() - self.last_channel_update).total_seconds() > 600:
-            self.regression_channel = self.calculate_linear_regression(df['close'])
-            self.last_channel_update = datetime.now()
-        
-        if not self.regression_channel:
+        rmi = self.calculate_rmi(df['close'])
+        if rmi is None or pd.isna(rmi.iloc[-1]):
             return None
         
-        bb = self.calculate_bollinger_bands(df['close'])
-        if not bb:
+        current_rmi = rmi.iloc[-1]
+        
+        supertrend, direction = self.calculate_supertrend(df)
+        if pd.isna(supertrend.iloc[-1]) or pd.isna(direction.iloc[-1]):
             return None
         
-        reg_position = (current_price - self.regression_channel['lower']) / (self.regression_channel['upper'] - self.regression_channel['lower'])
-        bb_position = (current_price - bb['lower']) / (bb['upper'] - bb['lower'])
+        current_supertrend = supertrend.iloc[-1]
+        current_direction = direction.iloc[-1]
         
-        if reg_position <= 0.1 and bb_position <= 0.2:
+        if current_rmi > self.config['rmi_threshold_long'] and current_direction == 1 and current_price > current_supertrend:
             return {
                 'action': 'BUY',
                 'price': current_price,
-                'reg_channel': self.regression_channel['lower'],
-                'bb_band': bb['lower'],
-                'trend_angle': self.regression_channel['angle']
+                'rmi': current_rmi,
+                'supertrend': current_supertrend,
+                'trend': 'UP'
             }
-        elif reg_position >= 0.9 and bb_position >= 0.8:
+        elif current_rmi < self.config['rmi_threshold_short'] and current_direction == -1 and current_price < current_supertrend:
             return {
                 'action': 'SELL',
                 'price': current_price,
-                'reg_channel': self.regression_channel['upper'],
-                'bb_band': bb['upper'],
-                'trend_angle': self.regression_channel['angle']
+                'rmi': current_rmi,
+                'supertrend': current_supertrend,
+                'trend': 'DOWN'
             }
         
         return None
@@ -403,7 +401,7 @@ class RangeBalancingBot:
             pass
     
     def should_close(self):
-        if not self.position or not self.regression_channel:
+        if not self.position:
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -419,36 +417,30 @@ class RangeBalancingBot:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
-            
-            if current_price >= self.regression_channel['midline']:
-                return True, "channel_midline"
         else:
             profit_pct = (entry_price - current_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
-            
-            if current_price <= self.regression_channel['midline']:
-                return True, "channel_midline"
         
-        bb = self.calculate_bollinger_bands(self.price_data['close'])
-        if bb:
-            if side == "Buy" and current_price >= bb['upper']:
-                return True, "opposite_bb_band"
-            elif side == "Sell" and current_price <= bb['lower']:
-                return True, "opposite_bb_band"
+        supertrend, direction = self.calculate_supertrend(self.price_data)
+        if not pd.isna(supertrend.iloc[-1]):
+            if side == "Buy" and current_price < supertrend.iloc[-1]:
+                return True, "supertrend_exit"
+            elif side == "Sell" and current_price > supertrend.iloc[-1]:
+                return True, "supertrend_exit"
+        
+        rmi = self.calculate_rmi(self.price_data['close'])
+        if rmi is not None and not pd.isna(rmi.iloc[-1]):
+            if side == "Buy" and rmi.iloc[-1] < self.config['rmi_threshold_short']:
+                return True, "rmi_reversal"
+            elif side == "Sell" and rmi.iloc[-1] > self.config['rmi_threshold_long']:
+                return True, "rmi_reversal"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        
-        # Check trade cooldown
-        import time
-        if time.time() - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
-            return
         # 🔴 CRITICAL FIX: Double-check no pending orders
         if self.pending_order:
             print("⚠️ Order already pending, skipping signal")
@@ -461,14 +453,14 @@ class RangeBalancingBot:
         await self.update_account_balance()
         
         if signal['action'] == 'BUY':
-            stop_loss_price = signal['reg_channel'] * 0.995
+            stop_loss_price = signal['supertrend'] * 0.995
         else:
-            stop_loss_price = signal['reg_channel'] * 1.005
+            stop_loss_price = signal['supertrend'] * 1.005
         
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < (self.config['min_notional'] / signal['price']):
+        if int(formatted_qty) < (self.config['min_notional'] / signal['price']):
             print(f"⚠️ Position size too small: {formatted_qty}")
             self.pending_order = False  # Reset flag
             return
@@ -487,7 +479,6 @@ class RangeBalancingBot:
             )
             
             if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
                 self.active_order_id = order['result']['orderId']
                 
                 net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
@@ -500,12 +491,13 @@ class RangeBalancingBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss_price,
                     take_profit=net_tp,
-                    info=f"reg:{signal['reg_channel']:.4f}_bb:{signal['bb_band']:.4f}_angle:{signal['trend_angle']:.1f}_risk:{self.config['risk_pct']}%"
+                    info=f"rmi:{signal['rmi']:.1f}_st:{signal['supertrend']:.4f}_trend:{signal['trend']}_risk:{self.config['risk_pct']}%"
                 )
                 
                 position_value = float(formatted_qty) * limit_price
                 print(f"✅ ORDER PLACED {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
                 print(f"   💰 Position Value: ${position_value:.2f}")
+                print(f"   📊 RMI: {signal['rmi']:.1f} | SuperTrend: ${signal['supertrend']:.4f}")
                 print(f"   🆔 Order ID: {self.active_order_id}")
             else:
                 print(f"❌ Order failed: {order.get('retMsg')}")
@@ -568,15 +560,22 @@ class RangeBalancingBot:
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n📊 Range Balancing Bot - {self.symbol}")
+        print(f"\n📈 RMI + SuperTrend Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
         
         # 🔴 CRITICAL FIX: Show order status
         if self.pending_order:
             print(f"⏳ PENDING ORDER: {self.active_order_id}")
         
-        if self.regression_channel:
-            print(f"📈 Regression: L:${self.regression_channel['lower']:.4f} | M:${self.regression_channel['midline']:.4f} | U:${self.regression_channel['upper']:.4f}")
+        rmi = self.calculate_rmi(self.price_data['close'])
+        supertrend, direction = self.calculate_supertrend(self.price_data)
+        
+        if rmi is not None and not pd.isna(rmi.iloc[-1]):
+            print(f"📊 RMI: {rmi.iloc[-1]:.1f}")
+        
+        if not pd.isna(supertrend.iloc[-1]):
+            trend = "UP" if direction.iloc[-1] == 1 else "DOWN"
+            print(f"📈 SuperTrend: ${supertrend.iloc[-1]:.4f} | Trend: {trend}")
         
         if self.position:
             entry_price = float(self.position.get('avgPrice', 0))
@@ -586,20 +585,13 @@ class RangeBalancingBot:
             pnl = float(self.position.get('unrealisedPnl', 0))
             
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} DOT @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+            print(f"{emoji} {side}: {size} ADA @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
         else:
             print("🔍 Scanning...")
         
         print("-" * 60)
     
     async def run_cycle(self):
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
         
@@ -625,7 +617,7 @@ class RangeBalancingBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📊 Range Balancing Bot - ORDER MANAGEMENT FIXED")
+        print(f"📈 RMI + SuperTrend Bot - ORDER MANAGEMENT FIXED")
         print(f"✅ CRITICAL FIXES:")
         print(f"   • Pending order tracking")
         print(f"   • Minimum {self.min_order_interval}s between orders")
@@ -645,5 +637,5 @@ class RangeBalancingBot:
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = RangeBalancingBot()
+    bot = RMISuperTrendBot()
     asyncio.run(bot.run())

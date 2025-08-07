@@ -17,17 +17,6 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -73,7 +62,7 @@ class TradeLogger:
         
         return trade_id, log_entry
     
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.04, fees_exit=0.04):
         if trade_id not in self.open_trades:
             return None
             
@@ -87,9 +76,9 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # Fixed: Fees are costs, should be subtracted from PnL
-        entry_fee = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
-        exit_fee = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        # Fix: Fees are costs, not rebates
+        entry_fee = trade["entry_price"] * trade["qty"] * fees_entry / 100
+        exit_fee = actual_exit * trade["qty"] * fees_exit / 100
         net_pnl = gross_pnl - entry_fee - exit_fee
         
         log_entry = {
@@ -107,6 +96,7 @@ class TradeLogger:
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
             "net_pnl": round(net_pnl, 2),
+            "fees": round(entry_fee + exit_fee, 2),
             "reason": reason,
             "currency": self.currency
         }
@@ -119,18 +109,7 @@ class TradeLogger:
 
 class LSTMXGBoostBot:
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
-        self.symbol = 'JPYUSDT'
+        self.symbol = 'AVAXUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -140,21 +119,27 @@ class LSTMXGBoostBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
+        
+        # Account and instrument info
         self.account_balance = 0
         self.instrument_info = {}
+        self.qty_step = 0.0001
+        self.price_precision = 6
         
         self.config = {
             'timeframe': '30',
-            'risk_percent': 1.0,  # Risk 1% of account per trade
+            'risk_pct': 1.0,  # Risk 1% of account per trade
+            'max_position_value_pct': 10.0,  # Max 10% of account in one position
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.9,
             'net_stop_loss': 0.45,
             'lstm_lookback': 60,
             'prediction_threshold': 0.6,
             'lookback': 200,
-            'slippage_pct': 0.02,  # Expected slippage 0.02%
-            'maker_fee': -0.01,  # Maker rebate
-            'taker_fee': 0.055   # Taker fee
+            'maker_fee': -0.01,  # Negative for rebate
+            'taker_fee': 0.06,   # Positive for cost
+            'slippage_base_pct': 0.02,  # Base slippage
+            'slippage_vol_multiplier': 0.5  # Volatility multiplier for slippage
         }
         
         self.lstm_model = None
@@ -164,88 +149,99 @@ class LSTMXGBoostBot:
         
         self.logger = TradeLogger("LSTM_XGBOOST", self.symbol)
         self.current_trade_id = None
+        self.last_volatility = 0
     
     def connect(self):
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            if self.exchange.get_server_time().get('retCode') == 0:
-                self.get_instrument_info()
-                self.update_account_balance()
-                return True
-            return False
+            return self.exchange.get_server_time().get('retCode') == 0
         except:
             return False
     
-    def get_instrument_info(self):
+    async def fetch_account_info(self):
+        """Fetch account balance and instrument info"""
         try:
-            info = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
-            if info.get('retCode') == 0:
-                instrument = info['result']['list'][0]
-                self.instrument_info = {
-                    'qty_step': float(instrument['lotSizeFilter']['qtyStep']),
-                    'min_qty': float(instrument['lotSizeFilter']['minOrderQty']),
-                    'max_qty': float(instrument['lotSizeFilter']['maxOrderQty']),
-                    'tick_size': float(instrument['priceFilter']['tickSize'])
-                }
-        except:
-            # Default values if API fails
-            self.instrument_info = {
-                'qty_step': 0.0001,
-                'min_qty': 0.0001,
-                'max_qty': 10000,
-                'tick_size': 0.000001
-            }
-    
-    def update_account_balance(self):
-        try:
-            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
+            # Get account balance
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
-                for coin in wallet['result']['list'][0]['coin']:
-                    if coin['coin'] == 'USDT':
-                        self.account_balance = float(coin['availableToWithdraw'])
-                        break
+                self.account_balance = float(wallet['result']['list'][0]['coin'][0]['walletBalance'])
+            
+            # Get instrument info for precision
+            instruments = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
+            if instruments.get('retCode') == 0:
+                info = instruments['result']['list'][0]
+                self.instrument_info = info
+                self.qty_step = float(info['lotSizeFilter']['qtyStep'])
+                price_filter = info['priceFilter']
+                tick_size = float(price_filter['tickSize'])
+                self.price_precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+                
+            return True
         except:
-            if self.demo_mode:
-                self.account_balance = 10000  # Default demo balance
+            return False
+    
+    def calculate_slippage(self, side, volume_ratio=1.0):
+        """Calculate dynamic slippage based on volatility and volume"""
+        if len(self.price_data) < 20:
+            return self.config['slippage_base_pct'] / 100
+        
+        # Calculate recent volatility
+        returns = self.price_data['close'].pct_change().dropna()
+        volatility = returns.rolling(20).std().iloc[-1] if len(returns) > 20 else 0.001
+        self.last_volatility = volatility
+        
+        # Calculate volume impact
+        avg_volume = self.price_data['volume'].rolling(20).mean().iloc[-1]
+        current_volume = self.price_data['volume'].iloc[-1]
+        volume_impact = max(0, (volume_ratio - current_volume/avg_volume) * 0.01)
+        
+        # Calculate total slippage
+        slippage = self.config['slippage_base_pct'] / 100
+        slippage += volatility * self.config['slippage_vol_multiplier']
+        slippage += volume_impact
+        
+        # More slippage for taker orders
+        return slippage * 1.5 if side == "market" else slippage
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """Calculate position size based on risk management"""
+        if self.account_balance <= 0:
+            return 0
+        
+        # Calculate risk amount (1% of account)
+        risk_amount = self.account_balance * (self.config['risk_pct'] / 100)
+        
+        # Calculate position size based on stop loss distance
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance == 0:
+            return 0
+        
+        position_size = risk_amount / stop_distance
+        
+        # Apply max position value constraint
+        max_position_value = self.account_balance * (self.config['max_position_value_pct'] / 100)
+        max_position_size = max_position_value / price
+        
+        position_size = min(position_size, max_position_size)
+        
+        # Round to instrument precision
+        position_size = np.floor(position_size / self.qty_step) * self.qty_step
+        
+        return position_size
     
     def format_qty(self, qty):
-        # Properly round to instrument precision
-        step = self.instrument_info.get('qty_step', 0.0001)
-        qty = round(qty / step) * step
-        qty = max(qty, self.instrument_info.get('min_qty', 0.0001))
-        qty = min(qty, self.instrument_info.get('max_qty', 10000))
-        return str(qty)
+        """Format quantity to exchange precision"""
+        return str(np.floor(qty / self.qty_step) * self.qty_step)
     
-    def calculate_position_size(self, price):
-        # Risk-based position sizing
-        self.update_account_balance()
-        risk_amount = self.account_balance * (self.config['risk_percent'] / 100)
-        stop_loss_pct = self.config['net_stop_loss'] / 100
-        position_value = risk_amount / stop_loss_pct
-        qty = position_value / price
-        return qty
-    
-    def simulate_slippage(self, price, side, size_usdt):
-        # Simulate realistic slippage based on order size
-        base_slippage = self.config['slippage_pct'] / 100
-        
-        # Larger orders have more slippage
-        size_factor = min(size_usdt / 10000, 2.0)  # Cap at 2x for very large orders
-        total_slippage = base_slippage * (1 + size_factor * 0.5)
-        
-        # Add random component
-        random_factor = np.random.uniform(0.5, 1.5)
-        total_slippage *= random_factor
-        
-        if side == "BUY":
-            return price * (1 + total_slippage)
-        else:
-            return price * (1 - total_slippage)
+    def format_price(self, price):
+        """Format price to exchange precision"""
+        return str(round(price, self.price_precision))
     
     def prepare_lstm_data(self, df):
         if len(df) < self.config['lstm_lookback'] + 20:
             return None, None
         
+        # Prepare features
         features = pd.DataFrame()
         features['returns'] = df['close'].pct_change()
         features['volume'] = df['volume'] / df['volume'].rolling(20).mean()
@@ -253,11 +249,15 @@ class LSTMXGBoostBot:
         features['close_open'] = (df['close'] - df['open']) / df['open']
         
         features = features.fillna(0)
+        
+        # Scale data
         scaled_data = self.scaler.fit_transform(features)
         
+        # Create sequences
         X, y = [], []
         for i in range(self.config['lstm_lookback'], len(scaled_data) - 1):
             X.append(scaled_data[i-self.config['lstm_lookback']:i])
+            # Target: next return
             y.append(1 if df['close'].iloc[i+1] > df['close'].iloc[i] else 0)
         
         return np.array(X), np.array(y)
@@ -282,21 +282,25 @@ class LSTMXGBoostBot:
         features = []
         close = df['close']
         
+        # Short-term features
         features.append(close.pct_change(1).iloc[-1])
         features.append(close.pct_change(5).iloc[-1])
         features.append((close.iloc[-1] - close.rolling(10).mean().iloc[-1]) / close.iloc[-1])
         
+        # RSI
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain / loss))
         features.append(rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50)
         
+        # Bollinger position
         sma = close.rolling(20).mean()
         std = close.rolling(20).std()
         bb_pos = (close.iloc[-1] - sma.iloc[-1]) / (2 * std.iloc[-1]) if std.iloc[-1] > 0 else 0
         features.append(bb_pos)
         
+        # Volume
         features.append(df['volume'].iloc[-1] / df['volume'].rolling(20).mean().iloc[-1])
         
         return np.array(features).reshape(1, -1)
@@ -305,17 +309,22 @@ class LSTMXGBoostBot:
         if len(df) < 100:
             return
         
+        # Train LSTM
         X_lstm, y_lstm = self.prepare_lstm_data(df)
         if X_lstm is not None and len(X_lstm) > 50:
+            # Build and train LSTM
             self.lstm_model = self.build_lstm_model()
             
+            # Split data
             split = int(0.8 * len(X_lstm))
             X_train, X_test = X_lstm[:split], X_lstm[split:]
             y_train, y_test = y_lstm[:split], y_lstm[split:]
             
+            # Train with minimal epochs for speed
             self.lstm_model.fit(X_train, y_train, epochs=5, batch_size=32, 
                               validation_data=(X_test, y_test), verbose=0)
         
+        # Train XGBoost
         X_xgb = []
         y_xgb = []
         
@@ -323,6 +332,7 @@ class LSTMXGBoostBot:
             features = self.calculate_xgb_features(df.iloc[:i+1])
             if features is not None:
                 X_xgb.append(features[0])
+                # Target
                 future_return = (df['close'].iloc[i+5] - df['close'].iloc[i]) / df['close'].iloc[i]
                 y_xgb.append(1 if future_return > 0.001 else 0)
         
@@ -348,17 +358,20 @@ class LSTMXGBoostBot:
         if not self.models_trained:
             return 0.5, 0.5, 0.5
         
+        # LSTM prediction
         lstm_pred = 0.5
         X_lstm, _ = self.prepare_lstm_data(df)
         if X_lstm is not None and len(X_lstm) > 0:
             lstm_pred = self.lstm_model.predict(X_lstm[-1:], verbose=0)[0][0]
         
+        # XGBoost prediction
         xgb_pred = 0.5
         features = self.calculate_xgb_features(df)
         if features is not None:
             dtest = xgb.DMatrix(features)
             xgb_pred = self.xgb_model.predict(dtest)[0]
         
+        # Hybrid prediction (weighted average)
         hybrid_pred = 0.6 * lstm_pred + 0.4 * xgb_pred
         
         return hybrid_pred, lstm_pred, xgb_pred
@@ -367,6 +380,7 @@ class LSTMXGBoostBot:
         if len(df) < 100:
             return None
         
+        # Train models periodically
         if not self.models_trained or np.random.random() < 0.02:
             self.train_models(df)
         
@@ -376,7 +390,9 @@ class LSTMXGBoostBot:
         hybrid_pred, lstm_pred, xgb_pred = self.get_hybrid_prediction(df)
         current_price = float(df['close'].iloc[-1])
         
+        # Buy signal
         if hybrid_pred > self.config['prediction_threshold']:
+            # Confirm trend
             sma20 = df['close'].rolling(20).mean().iloc[-1]
             if current_price > sma20:
                 return {
@@ -387,6 +403,7 @@ class LSTMXGBoostBot:
                     'xgb_pred': xgb_pred
                 }
         
+        # Sell signal
         elif hybrid_pred < (1 - self.config['prediction_threshold']):
             sma20 = df['close'].rolling(20).mean().iloc[-1]
             if current_price < sma20:
@@ -451,6 +468,7 @@ class LSTMXGBoostBot:
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
             
+            # Check hybrid prediction
             if self.models_trained:
                 hybrid_pred, _, _ = self.get_hybrid_prediction(self.price_data)
                 if hybrid_pred < 0.35:
@@ -470,26 +488,32 @@ class LSTMXGBoostBot:
         return False, ""
     
     async def execute_trade(self, signal):
+        # Calculate stop loss price
+        stop_loss_price = signal['price'] * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else signal['price'] * (1 + self.config['net_stop_loss']/100)
         
-        # Check trade cooldown
-        import time
-        if time.time() - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
+        # Calculate position size based on risk
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
+        
+        if qty < self.qty_step:
+            print(f"⚠️ Position size too small: {qty}")
             return
-        qty = self.calculate_position_size(signal['price'])
+        
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < self.instrument_info.get('min_qty', 0.0001):
-            return
+        # Calculate slippage
+        slippage = self.calculate_slippage("limit")
         
-        # Calculate limit price with maker offset
+        # Apply maker offset and slippage
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 6)
+        limit_price = signal['price'] * offset
         
-        # Simulate actual execution price with slippage
-        position_value = float(formatted_qty) * signal['price']
-        actual_price = self.simulate_slippage(limit_price, signal['action'], position_value)
+        # Apply slippage to expected execution
+        if signal['action'] == 'BUY':
+            limit_price = limit_price * (1 + slippage)
+        else:
+            limit_price = limit_price * (1 - slippage)
+        
+        limit_price = float(self.format_price(limit_price))
         
         try:
             order = self.exchange.place_order(
@@ -503,23 +527,25 @@ class LSTMXGBoostBot:
             )
             
             if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
-                stop_loss = actual_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else actual_price * (1 + self.config['net_stop_loss']/100)
-                take_profit = actual_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else actual_price * (1 - self.config['net_take_profit']/100)
+                take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
-                    actual_price=actual_price,
+                    actual_price=limit_price,
                     qty=float(formatted_qty),
-                    stop_loss=stop_loss,
+                    stop_loss=stop_loss_price,
                     take_profit=take_profit,
-                    info=f"hybrid:{signal['hybrid_pred']:.3f}_lstm:{signal['lstm_pred']:.3f}_xgb:{signal['xgb_pred']:.3f}"
+                    info=f"hybrid:{signal['hybrid_pred']:.3f}_lstm:{signal['lstm_pred']:.3f}_xgb:{signal['xgb_pred']:.3f}_vol:{self.last_volatility:.4f}"
                 )
                 
-                print(f"🧠 HYBRID {signal['action']}: {formatted_qty} @ ${limit_price:.6f} (slippage: ${actual_price:.6f})")
-                print(f"   📊 Hybrid: {signal['hybrid_pred']:.3f} | LSTM: {signal['lstm_pred']:.3f} | XGB: {signal['xgb_pred']:.3f}")
-                print(f"   💰 Risk: ${self.account_balance * self.config['risk_percent'] / 100:.2f} ({self.config['risk_percent']}%)")
+                position_value = float(formatted_qty) * limit_price
+                risk_pct = (position_value / self.account_balance) * 100 if self.account_balance > 0 else 0
+                
+                print(f"🧠 HYBRID {signal['action']}: {formatted_qty} @ ${limit_price:.6f}")
+                print(f"   📊 Predictions: H:{signal['hybrid_pred']:.3f} | L:{signal['lstm_pred']:.3f} | X:{signal['xgb_pred']:.3f}")
+                print(f"   💰 Position: ${position_value:.2f} ({risk_pct:.1f}% of account)")
+                print(f"   📈 Slippage: {slippage*100:.3f}% | Volatility: {self.last_volatility:.4f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -531,34 +557,39 @@ class LSTMXGBoostBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        # Simulate slippage for market exit
-        position_value = qty * current_price
-        actual_exit = self.simulate_slippage(current_price, side, position_value)
+        # Calculate market slippage
+        slippage = self.calculate_slippage("market")
+        
+        # Apply slippage to expected execution
+        if side == "Sell":
+            actual_price = current_price * (1 - slippage)
+        else:
+            actual_price = current_price * (1 + slippage)
         
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
+                orderType="Market",
                 qty=self.format_qty(qty),
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
-                    # Use appropriate fees (maker for limit entry, taker for market exit)
+                    # Use taker fee for market orders
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
-                        actual_exit=actual_exit,
+                        actual_exit=actual_price,
                         reason=reason,
-                        fees_entry=self.config['maker_fee'],
+                        fees_entry=abs(self.config['maker_fee']) if self.config['maker_fee'] < 0 else self.config['maker_fee'],
                         fees_exit=self.config['taker_fee']
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason} @ ${actual_exit:.6f}")
+                print(f"✅ Closed: {reason} | Slippage: {slippage*100:.3f}%")
         except:
             pass
     
@@ -583,23 +614,27 @@ class LSTMXGBoostBot:
             size = self.position.get('size', '0')
             pnl = float(self.position.get('unrealisedPnl', 0))
             
+            # Calculate fees
+            position_value = float(size) * entry
+            entry_fee = position_value * abs(self.config['maker_fee']) / 100
+            exit_fee = position_value * self.config['taker_fee'] / 100
+            net_pnl = pnl - entry_fee - exit_fee
+            
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} @ ${entry:.6f} | PnL: ${pnl:.2f}")
+            print(f"{emoji} {side}: {size} @ ${entry:.6f}")
+            print(f"   📊 Gross PnL: ${pnl:.2f} | Net PnL: ${net_pnl:.2f} (after fees)")
         else:
-            print(f"🔍 Analyzing (Risk per trade: {self.config['risk_percent']}%)")
+            print("🔍 Analyzing patterns... | Volatility: {:.4f}".format(self.last_volatility))
         
         print("-" * 50)
     
     async def run_cycle(self):
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
+        
+        # Update account info periodically
+        if np.random.random() < 0.1:  # 10% chance each cycle
+            await self.fetch_account_info()
         
         await self.check_position()
         
@@ -619,10 +654,17 @@ class LSTMXGBoostBot:
             print("❌ Failed to connect")
             return
         
+        # Initial account setup
+        if not await self.fetch_account_info():
+            print("❌ Failed to fetch account info")
+            return
+        
         print(f"🧠 LSTM-XGBoost Hybrid Bot - {self.symbol}")
+        print(f"💰 Account Balance: ${self.account_balance:.2f}")
+        print(f"⚖️ Risk per trade: {self.config['risk_pct']}%")
+        print(f"📏 Quantity Step: {self.qty_step}")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
-        print(f"🎯 Risk Management: {self.config['risk_percent']}% per trade")
-        print(f"💎 Target win rate: 66%")
+        print(f"🎯 Target win rate: 66%")
         
         try:
             while True:
