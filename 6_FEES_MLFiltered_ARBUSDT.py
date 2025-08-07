@@ -7,95 +7,104 @@ from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
-# TradeLogger class included directly
+load_dotenv()
+
+# Fixed TradeLogger to match other files
 class TradeLogger:
-    def __init__(self, bot_name):
+    def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        self.trades = {}
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
         self.trade_id = 1000
         
         # Ensure logs directory exists
         os.makedirs("logs", exist_ok=True)
-    
-    def open(self, symbol, side, expected_price, actual_price, qty, stop_loss, take_profit):
-        """Log position opening with slippage"""
-        self.trade_id += 1
+        self.log_file = f"logs/{bot_name}_{symbol}.log"
         
-        log = {
-            "id": self.trade_id,
+    def generate_trade_id(self):
+        self.trade_id += 1
+        return self.trade_id
+    
+    def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
+        """Log position opening with slippage"""
+        trade_id = self.generate_trade_id()
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
+        
+        log_entry = {
+            "id": trade_id,
             "bot": self.bot_name,
-            "symbol": symbol,
+            "symbol": self.symbol,
             "side": "LONG" if side == "BUY" else "SHORT",
             "action": "OPEN",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "expected_price": round(expected_price, 2),
-            "actual_price": round(actual_price, 2),
-            "slippage": round(actual_price - expected_price, 2),
+            "expected_price": round(expected_price, 4),
+            "actual_price": round(actual_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(qty, 6),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit": round(take_profit, 4),
+            "currency": self.currency,
+            "info": info
+        }
+        
+        self.open_trades[trade_id] = {
+            "entry_time": datetime.now(),
+            "entry_price": actual_price,
+            "side": side,
             "qty": qty,
-            "stop_loss": round(stop_loss, 2),
-            "take_profit": round(take_profit, 2),
-            "currency": "USDT"
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
         }
         
-        self.trades[symbol] = {
-            **log,
-            "open_time": datetime.now()
-        }
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
         
-        with open("logs/trades.jsonl", "a") as f:
-            f.write(json.dumps(log) + "\n")
-        
-        return self.trade_id
+        return trade_id, log_entry
     
-    def close(self, symbol, expected_exit, actual_exit, reason="manual"):
-        """Log position closing with slippage"""
-        if symbol not in self.trades:
-            return
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
+        """Log position closing with slippage and PnL calculation"""
+        if trade_id not in self.open_trades:
+            return None
+            
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        trade = self.trades[symbol]
-        duration = int((datetime.now() - trade["open_time"]).total_seconds())
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate fees (simple: maker on entry, taker on exit)
-        entry_fee = trade["actual_price"] * trade["qty"] * 0.0002
-        exit_fee = actual_exit * trade["qty"] * 0.0005
-        
-        # Calculate PnL
-        if trade["side"] == "LONG":
-            gross_pnl = (actual_exit - trade["actual_price"]) * trade["qty"]
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
-            gross_pnl = (trade["actual_price"] - actual_exit) * trade["qty"]
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        log = {
-            "id": trade["id"],
+        total_fees = fees_entry + fees_exit
+        net_pnl = gross_pnl - total_fees
+        
+        log_entry = {
+            "id": trade_id,
             "bot": self.bot_name,
-            "symbol": symbol,
-            "side": trade["side"],
+            "symbol": self.symbol,
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
             "action": "CLOSE",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "duration_sec": duration,
-            "entry_price": trade["actual_price"],
-            "expected_exit": round(expected_exit, 2),
-            "actual_exit": round(actual_exit, 2),
-            "slippage": round(actual_exit - expected_exit, 2),
-            "qty": trade["qty"],
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
+            "expected_exit": round(expected_exit, 4),
+            "actual_exit": round(actual_exit, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": {
-                "entry": round(entry_fee, 2),
-                "exit": round(exit_fee, 2),
-                "total": round(entry_fee + exit_fee, 2)
-            },
-            "net_pnl": round(gross_pnl - entry_fee - exit_fee, 2),
+            "fees": {"entry": fees_entry, "exit": fees_exit, "total": total_fees},
+            "net_pnl": round(net_pnl, 2),
             "reason": reason,
-            "currency": "USDT"
+            "currency": self.currency
         }
         
-        with open("logs/trades.jsonl", "a") as f:
-            f.write(json.dumps(log) + "\n")
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
         
-        del self.trades[symbol]
-        return log["net_pnl"]
-
-load_dotenv()
+        del self.open_trades[trade_id]
+        return log_entry
 
 class EnhancedMLScalpingBot:
     def __init__(self):
@@ -113,6 +122,7 @@ class EnhancedMLScalpingBot:
         self.price_data = pd.DataFrame()
         self.pending_order = None
         self.daily_pnl = 0
+        self.current_trade_id = None  # Add this to track current trade
         
         # Order management
         self.order_timeout = 180  # seconds
@@ -139,9 +149,8 @@ class EnhancedMLScalpingBot:
         # Status tracking
         self.volatility_regime = 'normal'
         
-        # Logging
-        os.makedirs("logs", exist_ok=True)
-        self.logger = TradeLogger("ML_ARB_BOT")
+        # Logging - Fixed to match other files
+        self.logger = TradeLogger("ML_ARB", self.symbol)
     
     def connect(self):
         """Connect to Bybit exchange."""
@@ -448,15 +457,15 @@ class EnhancedMLScalpingBot:
                 stop_loss = limit_price * (1 - self.config['base_stop_loss_pct']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['base_stop_loss_pct']/100)
                 take_profit = limit_price * (1 + self.config['base_take_profit_pct']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['base_take_profit_pct']/100)
                 
-                # Log trade
-                self.logger.open(
-                    symbol=self.symbol,
+                # Log trade using the correct method
+                self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
                     actual_price=limit_price,
                     qty=float(formatted_qty),
                     stop_loss=stop_loss,
-                    take_profit=take_profit
+                    take_profit=take_profit,
+                    info=f"confidence:{signal['confidence']:.2f}_rsi:{signal['rsi']:.1f}"
                 )
                 
                 print(f"🤖 {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
@@ -489,18 +498,22 @@ class EnhancedMLScalpingBot:
             )
             
             if order.get('retCode') == 0:
-                # Log trade close
-                pnl = self.logger.close(
-                    symbol=self.symbol,
-                    expected_exit=current_price,
-                    actual_exit=current_price,
-                    reason=reason
-                )
-                
-                self.daily_pnl += pnl if pnl else 0
-                
-                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
-                print(f"   📊 Daily PnL: ${self.daily_pnl:.2f}")
+                # Log trade close using the correct method
+                if self.current_trade_id:
+                    log_entry = self.logger.log_trade_close(
+                        trade_id=self.current_trade_id,
+                        expected_exit=current_price,
+                        actual_exit=current_price,
+                        reason=reason
+                    )
+                    
+                    if log_entry:
+                        pnl = log_entry.get('net_pnl', 0)
+                        self.daily_pnl += pnl
+                        print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
+                        print(f"   📊 Daily PnL: ${self.daily_pnl:.2f}")
+                    
+                    self.current_trade_id = None
         except Exception as e:
             print(f"Close failed: {e}")
     
