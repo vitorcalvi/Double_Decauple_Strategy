@@ -101,7 +101,7 @@ class UnifiedLogger:
 
 class Strategy5_EMARSIBot:
     def __init__(self):
-        self.symbol = 'BNBUSDT'
+        self.symbol = 'XRPUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
