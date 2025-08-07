@@ -8,6 +8,94 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+class UnifiedLogger:
+    def __init__(self, bot_name, symbol):
+        self.bot_name = bot_name
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
+        self.trade_counter = 1000
+        
+    def generate_trade_id(self):
+        self.trade_counter += 1
+        return self.trade_counter
+    
+    def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
+        trade_id = self.generate_trade_id()
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if side == "BUY" else "SHORT",
+            "action": "OPEN",
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expected_price": round(expected_price, 4),
+            "actual_price": round(actual_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(qty, 6),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit": round(take_profit, 4),
+            "currency": self.currency,
+            "info": info
+        }
+        
+        self.open_trades[trade_id] = {
+            "entry_time": datetime.now(),
+            "entry_price": actual_price,
+            "side": side,
+            "qty": qty,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
+        }
+        
+        return trade_id, log_entry
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
+        if trade_id not in self.open_trades:
+            return None
+            
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
+        
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
+        
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
+        else:
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
+        
+        total_fees = fees_entry + fees_exit
+        net_pnl = gross_pnl - total_fees
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+            "action": "CLOSE",
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
+            "expected_exit": round(expected_exit, 4),
+            "actual_exit": round(actual_exit, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
+            "gross_pnl": round(gross_pnl, 2),
+            "fees": {"entry": fees_entry, "exit": fees_exit, "total": total_fees},
+            "net_pnl": round(net_pnl, 2),
+            "reason": reason,
+            "currency": self.currency
+        }
+        
+        del self.open_trades[trade_id]
+        return log_entry
+    
+    def write_log(self, log_entry, log_file):
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
 class EMARSIBot:
     def __init__(self):
         self.symbol = 'BNBUSDT'
@@ -21,7 +109,6 @@ class EMARSIBot:
         self.position = None
         self.pending_order = None
         self.price_data = pd.DataFrame()
-        self.trade_id = 0
         
         self.config = {
             'ema_fast': 5,
@@ -37,6 +124,8 @@ class EMARSIBot:
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = "logs/2_FEES_EMA_RSI_BNBUSDT.log"
+        self.unified_logger = UnifiedLogger("2_FEES_EMA_RSI", self.symbol)
+        self.current_trade_id = None
     
     def connect(self):
         try:
@@ -61,7 +150,6 @@ class EMARSIBot:
             
             if age > self.config['order_timeout']:
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
-                print(f"❌ Cancelled old order: {order['orderId']}")
                 self.pending_order = None
                 return False
             
@@ -76,11 +164,9 @@ class EMARSIBot:
         
         close = df['close']
         
-        # EMAs
         ema_fast = close.ewm(span=self.config['ema_fast']).mean().iloc[-1]
         ema_slow = close.ewm(span=self.config['ema_slow']).mean().iloc[-1]
         
-        # RSI
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
@@ -160,6 +246,37 @@ class EMARSIBot:
         step = self.config['qty_step']
         return f"{round(qty / step) * step:.2f}"
     
+    def log_trade(self, action, price, info=""):
+        if action in ["BUY", "SELL"] and not self.current_trade_id:
+            qty = self.config['position_size'] / price
+            stop_loss = price * (1 - self.config['net_stop_loss']/100) if action == "BUY" else price * (1 + self.config['net_stop_loss']/100)
+            take_profit = price * (1 + self.config['net_take_profit']/100) if action == "BUY" else price * (1 - self.config['net_take_profit']/100)
+            
+            self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
+                side=action,
+                expected_price=price,
+                actual_price=price,
+                qty=qty,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                info=info
+            )
+            
+            self.unified_logger.write_log(log_entry, self.log_file)
+            
+        elif action == "CLOSE" and self.current_trade_id:
+            log_entry = self.unified_logger.log_trade_close(
+                trade_id=self.current_trade_id,
+                expected_exit=price,
+                actual_exit=price,
+                reason=info.split("_")[0] if "_" in info else info
+            )
+            
+            if log_entry:
+                self.unified_logger.write_log(log_entry, self.log_file)
+            
+            self.current_trade_id = None
+    
     async def execute_trade(self, signal):
         if await self.check_pending_orders() or self.position:
             return
@@ -186,7 +303,6 @@ class EMARSIBot:
             )
             
             if order.get('retCode') == 0:
-                self.trade_id += 1
                 self.pending_order = order['result']
                 print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI:{signal['rsi']:.1f}")
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}")
@@ -211,20 +327,11 @@ class EMARSIBot:
             )
             
             if order.get('retCode') == 0:
-                pnl = float(self.position.get('unrealisedPnl', 0))
-                print(f"✅ Closed: {reason} | PnL: ${pnl:.2f}")
-                self.log_trade("CLOSE", float(self.price_data['close'].iloc[-1]), f"{reason}_PnL:${pnl:.2f}")
+                current = float(self.price_data['close'].iloc[-1])
+                print(f"✅ Closed: {reason}")
+                self.log_trade("CLOSE", current, reason)
         except Exception as e:
             print(f"❌ Close failed: {e}")
-    
-    def log_trade(self, action, price, info):
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps({
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'action': action,
-                'price': round(price, 2),
-                'info': info
-            }) + "\n")
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -235,9 +342,8 @@ class EMARSIBot:
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
-            pnl = float(self.position.get('unrealisedPnl', 0))
             side = self.position.get('side', '')
-            status_parts.append(f"📍 {side} @ ${entry:.2f} PnL: ${pnl:+.2f}")
+            status_parts.append(f"📍 {side} @ ${entry:.2f}")
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
@@ -273,10 +379,8 @@ class EMARSIBot:
             print("❌ Failed to connect")
             return
         
-        print(f"✅ Starting EMA + RSI bot for {self.symbol}")
+        print(f"✅ EMA + RSI bot for {self.symbol}")
         print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
-        print(f"⏱️ Order timeout: {self.config['order_timeout']}s")
-        print("-" * 50)
         
         while True:
             try:

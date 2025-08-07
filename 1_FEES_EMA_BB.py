@@ -8,6 +8,94 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+class UnifiedLogger:
+    def __init__(self, bot_name, symbol):
+        self.bot_name = bot_name
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
+        self.trade_counter = 1000
+        
+    def generate_trade_id(self):
+        self.trade_counter += 1
+        return self.trade_counter
+    
+    def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
+        trade_id = self.generate_trade_id()
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if side == "BUY" else "SHORT",
+            "action": "OPEN",
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expected_price": round(expected_price, 4),
+            "actual_price": round(actual_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(qty, 6),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit": round(take_profit, 4),
+            "currency": self.currency,
+            "info": info
+        }
+        
+        self.open_trades[trade_id] = {
+            "entry_time": datetime.now(),
+            "entry_price": actual_price,
+            "side": side,
+            "qty": qty,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
+        }
+        
+        return trade_id, log_entry
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
+        if trade_id not in self.open_trades:
+            return None
+            
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
+        
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
+        
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
+        else:
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
+        
+        total_fees = fees_entry + fees_exit
+        net_pnl = gross_pnl - total_fees
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+            "action": "CLOSE",
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
+            "expected_exit": round(expected_exit, 4),
+            "actual_exit": round(actual_exit, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
+            "gross_pnl": round(gross_pnl, 2),
+            "fees": {"entry": fees_entry, "exit": fees_exit, "total": total_fees},
+            "net_pnl": round(net_pnl, 2),
+            "reason": reason,
+            "currency": self.currency
+        }
+        
+        del self.open_trades[trade_id]
+        return log_entry
+    
+    def write_log(self, log_entry, log_file):
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
 class ETHScalpingBot:
     def __init__(self):
         self.symbol = 'ETHUSDT'
@@ -20,27 +108,27 @@ class ETHScalpingBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
-        self.trade_id = 0
         self.pending_order = None
         self.last_signal = None
         self.last_order_time = None
-        self.order_timeout = 60  # Cancel after 60 seconds
-        self.order_cooldown = 30  # 30 second cooldown between orders
+        self.order_timeout = 60
+        self.order_cooldown = 30
         
-        # FIXED CONFIG - Proper position sizing and risk/reward
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'bb_period': 20,
             'bb_std': 2.0,
-            'position_size': 500,  # FIXED: Minimum for ETHUSDT
-            'maker_offset_pct': 0.02,  # Slightly higher offset to ensure PostOnly
-            'net_take_profit': 1.05,  # FIXED: 1% net after fees (was 0.28%)
-            'net_stop_loss': 0.45,    # FIXED: Tighter stop with fee rebate (was 0.07%)
+            'position_size': 500,
+            'maker_offset_pct': 0.02,
+            'net_take_profit': 1.05,
+            'net_stop_loss': 0.45,
         }
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT_FIXED.log"
+        self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT.log"
+        self.unified_logger = UnifiedLogger("1_FEES_EMA_BB", self.symbol)
+        self.current_trade_id = None
     
     def connect(self):
         try:
@@ -50,12 +138,9 @@ class ETHScalpingBot:
             return False
     
     def format_qty(self, qty):
-        """FIXED: Proper quantity formatting for ETHUSDT"""
-        # ETHUSDT requires 3 decimals
         return f"{round(qty / 0.001) * 0.001:.3f}"
     
     async def check_pending_orders(self):
-        """FIXED: Proper order lifecycle management"""
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
@@ -71,7 +156,6 @@ class ETHScalpingBot:
             
             if age > self.order_timeout:
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
-                print(f"❌ Cancelled stale order (aged {age:.0f}s)")
                 self.pending_order = None
                 self.last_signal = None
                 return False
@@ -82,20 +166,17 @@ class ETHScalpingBot:
             return False
     
     def is_valid_signal(self, signal):
-        """FIXED: Signal validation to prevent duplicates"""
         if not signal:
             return False
             
-        # Check cooldown
         if self.last_order_time:
             elapsed = (datetime.now() - self.last_order_time).total_seconds()
             if elapsed < self.order_cooldown:
                 return False
         
-        # Check for duplicate signal
         if self.last_signal:
             price_change = abs(signal['price'] - self.last_signal['price']) / self.last_signal['price']
-            if price_change < 0.001:  # Less than 0.1% change
+            if price_change < 0.001:
                 return False
         
         return True
@@ -129,13 +210,11 @@ class ETHScalpingBot:
         if not indicators:
             return None
         
-        # Long signal - EMA bullish and price oversold
         if indicators['trend'] == 'UP' and indicators['bb_position'] <= 0.3:
             signal = {'action': 'BUY', 'price': indicators['price'], 'bb_pos': indicators['bb_position']}
             if self.is_valid_signal(signal):
                 return signal
         
-        # Short signal - EMA bearish and price overbought
         if indicators['trend'] == 'DOWN' and indicators['bb_position'] >= 0.7:
             signal = {'action': 'SELL', 'price': indicators['price'], 'bb_pos': indicators['bb_position']}
             if self.is_valid_signal(signal):
@@ -169,7 +248,6 @@ class ETHScalpingBot:
             pass
     
     def should_close(self):
-        """FIXED: Proper risk/reward calculation"""
         if not self.position:
             return False, ""
         
@@ -182,7 +260,6 @@ class ETHScalpingBot:
         
         profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
         
-        # Fixed risk/reward with proper targets
         if profit_pct >= self.config['net_take_profit']:
             return True, "take_profit"
         if profit_pct <= -self.config['net_stop_loss']:
@@ -190,30 +267,51 @@ class ETHScalpingBot:
         
         return False, ""
     
+    def log_trade(self, action, price, info=""):
+        if action in ["BUY", "SELL"] and not self.current_trade_id:
+            qty = self.config['position_size'] / price
+            stop_loss = price * (1 - self.config['net_stop_loss']/100) if action == "BUY" else price * (1 + self.config['net_stop_loss']/100)
+            take_profit = price * (1 + self.config['net_take_profit']/100) if action == "BUY" else price * (1 - self.config['net_take_profit']/100)
+            
+            self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
+                side=action,
+                expected_price=price,
+                actual_price=price,
+                qty=qty,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                info=info
+            )
+            
+            self.unified_logger.write_log(log_entry, self.log_file)
+            
+        elif action == "CLOSE" and self.current_trade_id:
+            log_entry = self.unified_logger.log_trade_close(
+                trade_id=self.current_trade_id,
+                expected_exit=price,
+                actual_exit=price,
+                reason=info.split("_")[0] if "_" in info else info
+            )
+            
+            if log_entry:
+                self.unified_logger.write_log(log_entry, self.log_file)
+            
+            self.current_trade_id = None
+    
     async def execute_trade(self, signal):
-        """FIXED: Proper order execution with all safeguards"""
-        # Check all conditions
-        if await self.check_pending_orders():
-            return
-        if self.position:
-            return
-        if not self.is_valid_signal(signal):
+        if await self.check_pending_orders() or self.position or not self.is_valid_signal(signal):
             return
         
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
-        # Verify minimum quantity
         if float(formatted_qty) < 0.001:
-            print(f"⚠️ Quantity too small: {formatted_qty}")
             return
         
-        # Calculate limit price with proper offset
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset, 2)
         
         try:
-            # FIXED: Limit order with PostOnly for maker rebate
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
@@ -221,28 +319,20 @@ class ETHScalpingBot:
                 orderType="Limit",
                 qty=formatted_qty,
                 price=str(limit_price),
-                timeInForce="PostOnly"  # CRITICAL: Earn rebate
+                timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
-                self.trade_id += 1
                 self.last_signal = signal
                 self.last_order_time = datetime.now()
                 self.pending_order = order['result']
                 
-                print(f"✅ {signal['action']} Order Placed:")
-                print(f"   📊 Quantity: {formatted_qty} ETH @ ${limit_price:.2f}")
-                print(f"   📈 BB Position: {signal['bb_pos']:.2f}")
-                print(f"   🎯 Risk/Reward: 1:{self.config['net_take_profit']/self.config['net_stop_loss']:.1f}")
-                
+                print(f"✅ {signal['action']}: {formatted_qty} ETH @ ${limit_price:.2f} | BB: {signal['bb_pos']:.2f}")
                 self.log_trade(signal['action'], limit_price, f"BB:{signal['bb_pos']:.2f}")
-            else:
-                print(f"❌ Order failed: {order.get('retMsg', 'Unknown error')}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """FIXED: Market order for immediate exit"""
         if not self.position:
             return
         
@@ -251,39 +341,23 @@ class ETHScalpingBot:
         formatted_qty = self.format_qty(qty)
         
         try:
-            # FIXED: Market order for quick exit
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Market",  # Quick exit
+                orderType="Market",
                 qty=formatted_qty,
-                reduceOnly=True  # Only close position
+                reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                pnl = float(self.position.get('unrealisedPnl', 0))
-                entry = float(self.position.get('avgPrice', 0))
                 current = float(self.price_data['close'].iloc[-1])
-                
-                print(f"\n💰 Position Closed: {reason}")
-                print(f"   Entry: ${entry:.2f} → Exit: ${current:.2f}")
-                print(f"   PnL: ${pnl:.2f}")
-                
-                self.log_trade("CLOSE", current, f"{reason}_PnL:${pnl:.2f}")
+                print(f"💰 Position Closed: {reason}")
+                self.log_trade("CLOSE", current, reason)
                 self.position = None
                 self.last_signal = None
         except Exception as e:
             print(f"❌ Close failed: {e}")
-    
-    def log_trade(self, action, price, info):
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps({
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'action': action,
-                'price': round(price, 2),
-                'info': info
-            }) + "\n")
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -296,10 +370,9 @@ class ETHScalpingBot:
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
-            pnl = float(self.position.get('unrealisedPnl', 0))
             side = self.position.get('side', '')
             pct = ((current_price - entry) / entry * 100) if side == "Buy" else ((entry - current_price) / entry * 100)
-            status += f" | 📍 {side} @ ${entry:.2f} | {pct:+.2f}% | PnL: ${pnl:+.2f}"
+            status += f" | 📍 {side} @ ${entry:.2f} | {pct:+.2f}%"
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
@@ -333,50 +406,27 @@ class ETHScalpingBot:
             print("❌ Failed to connect")
             return
         
-        print(f"🚀 FIXED EMA + BB Bot for {self.symbol}")
-        print(f"💰 Position Size: ${self.config['position_size']} (Minimum for ETH)")
+        print(f"🚀 EMA + BB Bot for {self.symbol}")
         print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
-        print(f"⚖️ Risk/Reward Ratio: 1:{self.config['net_take_profit']/self.config['net_stop_loss']:.1f}")
-        print(f"⏱️ Cooldown: {self.order_cooldown}s | Timeout: {self.order_timeout}s")
-        print(f"✅ Connected! Starting bot with proper risk management...")
-        print("-" * 50)
+        print("✅ Connected! Starting bot...")
         
         while True:
             try:
                 await self.run_cycle()
-                
-                # FIXED: Proper loop timing based on state
-                if self.pending_order:
-                    await asyncio.sleep(5)   # Check pending less often
-                elif self.position:
-                    await asyncio.sleep(3)   # Monitor position
-                else:
-                    await asyncio.sleep(10)  # Scan for entries slower
+                await asyncio.sleep(10 if not self.position and not self.pending_order else 3)
                     
             except KeyboardInterrupt:
-                print("\n" + "=" * 50)
-                print("🛑 Shutting down bot...")
-                
-                # Cancel all pending orders
+                print("\n🛑 Shutting down...")
                 try:
-                    cancelled = self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
-                    if cancelled.get('retCode') == 0:
-                        result = cancelled.get('result', {})
-                        if result.get('list'):
-                            print(f"✅ Cancelled {len(result['list'])} pending orders")
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
                 except:
                     pass
-                
-                # Close position if exists
                 if self.position:
-                    print("📍 Closing open position...")
                     await self.close_position("manual_stop")
-                
-                print("✅ Bot stopped successfully")
+                print("✅ Bot stopped")
                 break
-                
             except Exception as e:
-                print(f"\n⚠️ Error: {e}")
+                print(f"⚠️ Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
