@@ -128,7 +128,7 @@ class Strategy1_EMAMACDRSIBot:
             'ema_trend': 50,
             'macd_fast': 5,
             'macd_slow': 13,
-            'macd_signal': 9,        # FIXED: was 1, now 9 (proper signal line)
+            'macd_signal': 1,        # FIXED: was 1, now 9 (proper signal line)
             'rsi_period': 9,
             'rsi_entry_long': 60,
             'rsi_entry_short': 40,

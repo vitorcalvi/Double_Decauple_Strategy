@@ -122,9 +122,9 @@ class VWAPRSIDivergenceBot:
         self.price_data = pd.DataFrame()
         
         self.config = {
-            'timeframe': '1',
+            'timeframe': '5',
             'rsi_period': 9,
-            'divergence_lookback': 10,
+            'divergence_lookback': 5,
             'ema_period': 50,
             'position_size': 100,
             'maker_offset_pct': 0.01,

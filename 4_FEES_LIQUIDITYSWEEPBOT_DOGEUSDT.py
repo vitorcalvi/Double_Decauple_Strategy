@@ -136,8 +136,8 @@ class LiquiditySweepBot:
         # Strategy parameters with Fee Calculations
         self.config = {
             'timeframe': '5',
-            'liquidity_lookback': 50,
-            'order_block_lookback': 20,
+            'liquidity_lookback': 11,
+            'order_block_lookback': 40,
             'sweep_threshold': 0.15,
             'retracement_ratio': 0.5,
             'position_size': 100,
