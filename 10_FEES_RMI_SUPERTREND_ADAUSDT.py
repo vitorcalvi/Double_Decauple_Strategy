@@ -123,13 +123,13 @@ class RMISuperTrendBot:
         
         # FIXED CONFIGURATION - OPTIMAL 1:2 RISK:REWARD RATIO
         self.config = {
-            'timeframe': '5',
+            'timeframe': '3',
             'rmi_period': 14,
             'rmi_momentum': 5,
             'rmi_threshold_long': 60,
             'rmi_threshold_short': 40,
             'supertrend_period': 10,
-            'supertrend_multiplier': 3,
+            'supertrend_multiplier': 2,
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
