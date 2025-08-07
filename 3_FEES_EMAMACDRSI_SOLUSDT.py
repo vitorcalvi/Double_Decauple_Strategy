@@ -120,7 +120,7 @@ class TradeLogger:
 
 class EMAMACDRSIBot:
     def __init__(self):
-        self.symbol = 'SOLUSDT'
+        self.symbol = 'LTCUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
