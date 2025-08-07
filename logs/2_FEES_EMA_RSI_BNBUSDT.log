@@ -46,3 +46,5 @@
 {"timestamp": "2025-08-07 07:42:31", "action": "SELL", "price": 765.88, "info": "RSI:54.5"}
 {"timestamp": "2025-08-07 07:47:28", "action": "CLOSE", "price": 766.9, "info": "stop_loss_PnL:$-0.10"}
 {"timestamp": "2025-08-07 07:50:11", "action": "BUY", "price": 766.02, "info": "RSI:37.5"}
+{"timestamp": "2025-08-07 07:53:12", "action": "BUY", "price": 766.12, "info": "RSI:42.9"}
+{"timestamp": "2025-08-07 07:56:14", "action": "BUY", "price": 766.42, "info": "RSI:41.2"}

@@ -6,3 +6,4 @@
 {"timestamp": "2025-08-06 20:55:35", "action": "SELL", "price": 168.5469, "info": "RSI:48.1"}
 {"timestamp": "2025-08-07 05:22:25", "action": "CLOSE", "price": 166.7, "info": "take_profit_PnL:$1.80"}
 {"timestamp": "2025-08-07 05:40:03", "action": "BUY", "price": 166.9633, "info": "RSI:37.1"}
+{"timestamp": "2025-08-07 08:02:59", "action": "CLOSE", "price": 168.8, "info": "take_profit_PnL:$1.80"}

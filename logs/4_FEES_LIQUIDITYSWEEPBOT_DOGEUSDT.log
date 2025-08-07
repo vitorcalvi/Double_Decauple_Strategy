@@ -11,3 +11,5 @@
 {"timestamp": "2025-08-07 05:22:48", "action": "CLOSE", "price": 0, "info": "take_profit_PnL:$1.08"}
 {"timestamp": "2025-08-07 05:23:03", "action": "BUY", "price": 0.2033, "info": "swing_low"}
 {"timestamp": "2025-08-07 05:23:34", "action": "BUY", "price": 0.2034, "info": "swing_low"}
+{"timestamp": "2025-08-07 08:04:12", "action": "CLOSE", "price": 0, "info": "take_profit_PnL:$1.07"}
+{"timestamp": "2025-08-07 08:04:15", "action": "BUY", "price": 0.2056, "info": "swing_low"}
