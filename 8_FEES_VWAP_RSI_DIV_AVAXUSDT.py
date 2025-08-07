@@ -129,8 +129,8 @@ class VWAPRSIDivergenceBot:
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 0.65,
-            'net_stop_loss': 0.35,
+            'net_take_profit': 0.70,     # ✅ FIXED: 0.65% → 0.70% (optimal 1:2 R:R)
+            'net_stop_loss': 0.35,       # Maintains same risk level
         }
         
         self.rsi_pivots = {'highs': [], 'lows': []}

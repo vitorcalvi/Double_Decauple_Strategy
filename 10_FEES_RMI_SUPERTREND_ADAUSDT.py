@@ -121,6 +121,7 @@ class RMISuperTrendBot:
         self.position = None
         self.price_data = pd.DataFrame()
         
+        # FIXED CONFIGURATION - OPTIMAL 1:2 RISK:REWARD RATIO
         self.config = {
             'timeframe': '5',
             'rmi_period': 14,
@@ -132,8 +133,8 @@ class RMISuperTrendBot:
             'position_size': 100,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 0.65,
-            'net_stop_loss': 0.35,
+            'net_take_profit': 0.70,     # ✅ FIXED: 0.65% → 0.70% (optimal 1:2 R:R)
+            'net_stop_loss': 0.35,       # Maintains same risk level
         }
         
         self.logger = TradeLogger("RMI_SUPERTREND", self.symbol)

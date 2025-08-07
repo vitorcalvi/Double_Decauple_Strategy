@@ -352,29 +352,34 @@ class Strategy5_EMARSIBot:
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_EMA_cross")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
-    
+
     async def close_position(self, reason):
         if not self.position:
             return
         
-        qty = float(self.position['size'])
+        current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
+        qty = float(self.position['size'])
+        
+        # Calculate limit price with maker offset to ensure rebate
+        offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
+        limit_price = round(current_price * offset_mult, 2)
         
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Market",
+                orderType="Limit",           # ✅ FIXED: Limit instead of Market
                 qty=self.format_qty(qty),
+                price=str(limit_price),      # ✅ ADDED: Limit price for maker rebate
+                timeInForce="PostOnly",      # ✅ ADDED: Ensures maker execution
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
                 current = float(self.price_data['close'].iloc[-1])
-                print(f"✅ Closed: {reason} @ ${current:.2f}")
-                if self.trailing_stop:
-                    print(f"   Trailing stop was: ${self.trailing_stop:.2f}")
+                print(f"✅ Closed: {reason} @ ${limit_price:.2f}")
                 self.log_trade("CLOSE", current, reason)
                 self.entry_price = None
                 self.trailing_stop = None
