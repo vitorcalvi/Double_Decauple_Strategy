@@ -19,6 +19,7 @@ class UnifiedLogger:
         
         # Emergency stop tracking
         self.daily_pnl = 0
+        self.max_daily_loss = 100  # Maximum daily loss limit in USD
         self.consecutive_losses = 0
         self.max_daily_loss = 50  # $50 max daily loss
         

@@ -125,6 +125,7 @@ class EnhancedMLScalpingBot:
         self.pending_order = None
         self.daily_pnl = 0
         self.current_trade_id = None
+        self.max_daily_loss = 100  # Maximum daily loss limit in USD
         self.account_balance = 0  # FIXED: Track account balance
         
         # Anti-duplicate mechanisms
