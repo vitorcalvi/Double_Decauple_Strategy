@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "STRATEGY5_EMA_RSI_FIXED", "symbol": "XRPUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-07T19:02:20Z", "expected_price": 3.0339, "actual_price": 3.0339, "slippage": 0.0, "qty": 32.960875, "stop_loss": 3.0445, "take_profit": 3.0036, "currency": "USDT", "info": "RSI:48.5_EMA_cross_risk:2.0%"}
