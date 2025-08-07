@@ -1,1 +1,7 @@
-
+python-dotenv
+pandas
+numpy
+pybit
+pymexc
+aiohttp
+asyncio
