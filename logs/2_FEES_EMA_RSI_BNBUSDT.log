@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "2_FEES_EMA_RSI", "symbol": "BNBUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-07T07:46:47.565699+00:00", "expected_price": 766.9, "actual_price": 766.98, "slippage": -0.08, "qty": 0.13, "stop_loss": 767.9004, "take_profit": 763.682, "currency": "USDT", "info": "RSI:57.1"}

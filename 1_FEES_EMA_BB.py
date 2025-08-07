@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Same TradeLogger class as original
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -57,8 +58,8 @@ class TradeLogger:
             f.write(json.dumps(log_entry) + "\n")
         
         return trade_id, log_entry
-    
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
+
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
         if trade_id not in self.open_trades:
             return None
             
@@ -72,21 +73,11 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
-        
-        if fees_entry < 0:
-            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        else:
-            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
-            
-        if fees_exit < 0:
-            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        else:
-            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
-        
-        total_fee_impact = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_fee_impact
+        fee_rate = 0.001
+        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
+        fees_exit = actual_exit * trade["qty"] * fee_rate
+        total_fees = fees_entry + fees_exit
+        net_pnl = gross_pnl - total_fees
         
         log_entry = {
             "id": trade_id,
@@ -102,11 +93,7 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_impact": {
-                "entry": round(entry_rebate, 2), 
-                "exit": round(exit_rebate, 2), 
-                "total": round(total_fee_impact, 2)
-            },
+            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -118,9 +105,9 @@ class TradeLogger:
         del self.open_trades[trade_id]
         return log_entry
 
-class ETHScalpingBot:
+class Strategy1_EMAMACDRSIBot:
     def __init__(self):
-        self.symbol = 'ETHUSDT'
+        self.symbol = 'SOLUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -132,22 +119,30 @@ class ETHScalpingBot:
         self.price_data = pd.DataFrame()
         self.pending_order = None
         self.last_signal = None
-        self.last_order_time = None
-        self.order_timeout = 60
-        self.order_cooldown = 30
+        self.order_timeout = 180
         
+        # UPDATED CONFIG TO MATCH STRATEGY 1
         self.config = {
-            'ema_fast': 5,
-            'ema_slow': 13,
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'position_size': 500,
-            'maker_offset_pct': 0.02,
-            'net_take_profit': 1.05,
-            'net_stop_loss': 0.45,
+            'timeframe': '5',
+            'ema_fast': 9,        # Changed from 12
+            'ema_slow': 21,       # Changed from 26
+            'ema_trend': 50,      # Added trend filter
+            'macd_fast': 5,       # Changed from 12
+            'macd_slow': 13,      # Changed from 26
+            'macd_signal': 1,     # Changed from 9
+            'rsi_period': 9,      # Changed from 14
+            'rsi_entry_long': 60, # Added specific entry
+            'rsi_entry_short': 40,# Added specific entry
+            'rsi_overbought': 75, # Added OB level
+            'rsi_oversold': 25,   # Added OS level
+            'position_size': 100,
+            'lookback': 100,
+            'maker_offset_pct': 0.01,
+            'stop_loss': 0.30,    # Updated to 0.30%
+            'take_profit': 0.75,  # Updated to 0.75%
         }
         
-        self.logger = TradeLogger("1_FEES_EMA_BB", self.symbol)
+        self.logger = TradeLogger("STRATEGY1_MACD", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -158,7 +153,7 @@ class ETHScalpingBot:
             return False
     
     def format_qty(self, qty):
-        return f"{round(qty / 0.001) * 0.001:.3f}"
+        return str(int(round(qty)))
     
     async def check_pending_orders(self):
         try:
@@ -177,7 +172,6 @@ class ETHScalpingBot:
             if age > self.order_timeout:
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
                 self.pending_order = None
-                self.last_signal = None
                 return False
             
             self.pending_order = order
@@ -185,76 +179,102 @@ class ETHScalpingBot:
         except:
             return False
     
-    def is_valid_signal(self, signal):
-        if not signal:
-            return False
-            
-        if self.last_order_time:
-            elapsed = (datetime.now() - self.last_order_time).total_seconds()
-            if elapsed < self.order_cooldown:
-                return False
-        
-        if self.last_signal:
-            price_change = abs(signal['price'] - self.last_signal['price']) / self.last_signal['price']
-            if price_change < 0.001:
-                return False
-        
-        return True
-    
     def calculate_indicators(self, df):
-        if len(df) < 20:
+        if len(df) < self.config['lookback']:
             return None
         
-        close = df['close']
-        ema_fast = close.ewm(span=self.config['ema_fast']).mean().iloc[-1]
-        ema_slow = close.ewm(span=self.config['ema_slow']).mean().iloc[-1]
-        
-        sma = close.rolling(window=self.config['bb_period']).mean()
-        std = close.rolling(window=self.config['bb_period']).std()
-        upper_band = (sma + std * self.config['bb_std']).iloc[-1]
-        lower_band = (sma - std * self.config['bb_std']).iloc[-1]
-        
-        bb_range = upper_band - lower_band
-        bb_position = (close.iloc[-1] - lower_band) / bb_range if bb_range != 0 else 0.5
-        
-        return {
-            'price': close.iloc[-1],
-            'ema_fast': ema_fast,
-            'ema_slow': ema_slow,
-            'bb_position': bb_position,
-            'trend': 'UP' if ema_fast > ema_slow else 'DOWN'
-        }
+        try:
+            close = df['close']
+            
+            # EMAs with trend filter
+            ema_fast = close.ewm(span=self.config['ema_fast']).mean()
+            ema_slow = close.ewm(span=self.config['ema_slow']).mean()
+            ema_trend = close.ewm(span=self.config['ema_trend']).mean()
+            
+            # MACD with updated parameters
+            exp1 = close.ewm(span=self.config['macd_fast']).mean()
+            exp2 = close.ewm(span=self.config['macd_slow']).mean()
+            macd_line = exp1 - exp2
+            signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
+            histogram = macd_line - signal_line
+            
+            # RSI
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(window=self.config['rsi_period']).mean()
+            loss = -delta.clip(upper=0).rolling(window=self.config['rsi_period']).mean()
+            rsi = 100 - (100 / (1 + gain / (loss + 1e-10)))
+            
+            return {
+                'price': close.iloc[-1],
+                'ema_fast': ema_fast.iloc[-1],
+                'ema_slow': ema_slow.iloc[-1],
+                'ema_trend': ema_trend.iloc[-1],
+                'trend_bullish': ema_fast.iloc[-1] > ema_slow.iloc[-1] and close.iloc[-1] > ema_trend.iloc[-1],
+                'trend_bearish': ema_fast.iloc[-1] < ema_slow.iloc[-1] and close.iloc[-1] < ema_trend.iloc[-1],
+                'histogram': histogram.iloc[-1],
+                'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else 0,
+                'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
+            }
+        except Exception as e:
+            print(f"Indicator error: {e}")
+            return None
     
     def generate_signal(self, df):
-        indicators = self.calculate_indicators(df)
-        if not indicators:
+        ind = self.calculate_indicators(df)
+        if not ind:
             return None
         
-        if indicators['trend'] == 'UP' and indicators['bb_position'] <= 0.3:
-            signal = {'action': 'BUY', 'price': indicators['price'], 'bb_pos': indicators['bb_position']}
-            if self.is_valid_signal(signal):
-                return signal
+        # Avoid duplicate signals
+        if self.last_signal:
+            price_change = abs(ind['price'] - self.last_signal['price']) / self.last_signal['price']
+            if price_change < 0.002:
+                return None
         
-        if indicators['trend'] == 'DOWN' and indicators['bb_position'] >= 0.7:
-            signal = {'action': 'SELL', 'price': indicators['price'], 'bb_pos': indicators['bb_position']}
-            if self.is_valid_signal(signal):
-                return signal
+        # BUY signal: trend bullish + RSI >= 60 + MACD turning positive
+        if ind['trend_bullish'] and ind['rsi'] >= self.config['rsi_entry_long'] and ind['rsi'] < self.config['rsi_overbought']:
+            if ind['histogram'] > 0 and ind['histogram_prev'] <= 0:
+                return {
+                    'action': 'BUY',
+                    'price': ind['price'],
+                    'rsi': ind['rsi'],
+                    'reason': 'momentum_long'
+                }
+        
+        # SELL signal: trend bearish + RSI <= 40 + MACD turning negative
+        if ind['trend_bearish'] and ind['rsi'] <= self.config['rsi_entry_short'] and ind['rsi'] > self.config['rsi_oversold']:
+            if ind['histogram'] < 0 and ind['histogram_prev'] >= 0:
+                return {
+                    'action': 'SELL',
+                    'price': ind['price'],
+                    'rsi': ind['rsi'],
+                    'reason': 'momentum_short'
+                }
         
         return None
     
     async def get_market_data(self):
         try:
-            klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
+            klines = self.exchange.get_kline(
+                category="linear",
+                symbol=self.symbol,
+                interval=self.config['timeframe'],
+                limit=self.config['lookback']
+            )
+            
             if klines.get('retCode') != 0:
                 return False
             
-            df = pd.DataFrame(klines['result']['list'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            df = pd.DataFrame(klines['result']['list'], 
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col])
+                df[col] = pd.to_numeric(df[col], errors='coerce')
             
+            df = df.dropna(subset=['open', 'high', 'low', 'close'])
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
-            return True
+            
+            return len(self.price_data) >= 20
         except:
             return False
     
@@ -265,40 +285,51 @@ class ETHScalpingBot:
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except:
-            pass
+            self.position = None
     
     def should_close(self):
         if not self.position:
             return False, ""
         
-        current_price = float(self.price_data['close'].iloc[-1])
-        entry_price = float(self.position.get('avgPrice', 0))
-        side = self.position.get('side', '')
-        
-        if entry_price == 0:
+        try:
+            current_price = float(self.price_data['close'].iloc[-1])
+            entry_price = float(self.position.get('avgPrice', 0))
+            side = self.position.get('side', '')
+            
+            if entry_price == 0:
+                return False, ""
+            
+            profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
+            
+            if profit_pct >= self.config['take_profit']:
+                return True, "take_profit"
+            if profit_pct <= -self.config['stop_loss']:
+                return True, "stop_loss"
+            
+            # Exit on RSI extremes
+            ind = self.calculate_indicators(self.price_data)
+            if ind:
+                if side == "Buy" and ind['rsi'] >= self.config['rsi_overbought']:
+                    return True, "rsi_overbought"
+                if side == "Sell" and ind['rsi'] <= self.config['rsi_oversold']:
+                    return True, "rsi_oversold"
+            
             return False, ""
-        
-        profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
-        
-        if profit_pct >= self.config['net_take_profit']:
-            return True, "take_profit"
-        if profit_pct <= -self.config['net_stop_loss']:
-            return True, "stop_loss"
-        
-        return False, ""
+        except:
+            return False, ""
     
     async def execute_trade(self, signal):
-        if await self.check_pending_orders() or self.position or not self.is_valid_signal(signal):
+        if await self.check_pending_orders() or self.position:
             return
         
         qty = self.config['position_size'] / signal['price']
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < 0.001:
+        if float(formatted_qty) < 1:
             return
         
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 2)
+        limit_price = round(signal['price'] * offset, 4)
         
         try:
             order = self.exchange.place_order(
@@ -313,11 +344,10 @@ class ETHScalpingBot:
             
             if order.get('retCode') == 0:
                 self.last_signal = signal
-                self.last_order_time = datetime.now()
                 self.pending_order = order['result']
                 
-                stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
-                take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
+                stop_loss = limit_price * (1 - self.config['stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['stop_loss']/100)
+                take_profit = limit_price * (1 + self.config['take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -326,10 +356,10 @@ class ETHScalpingBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    info=f"BB:{signal['bb_pos']:.2f}"
+                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}"
                 )
                 
-                print(f"✅ {signal['action']}: {formatted_qty} ETH @ ${limit_price:.2f} | BB: {signal['bb_pos']:.2f}")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.4f} | RSI: {signal['rsi']:.1f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -339,7 +369,6 @@ class ETHScalpingBot:
         
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        formatted_qty = self.format_qty(qty)
         
         try:
             order = self.exchange.place_order(
@@ -347,53 +376,27 @@ class ETHScalpingBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Market",
-                qty=formatted_qty,
+                qty=self.format_qty(qty),
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                current = float(self.price_data['close'].iloc[-1])
+                current_price = float(self.price_data['close'].iloc[-1])
                 
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=current,
-                        actual_exit=current,
-                        reason=reason,
-                        fees_entry=-0.04,
-                        fees_exit=0.1
+                        expected_exit=current_price,
+                        actual_exit=current_price,
+                        reason=reason
                     )
                     self.current_trade_id = None
                 
-                print(f"💰 Position Closed: {reason}")
+                print(f"💰 Closed: {reason}")
                 self.position = None
                 self.last_signal = None
-        except Exception as e:
-            print(f"❌ Close failed: {e}")
-    
-    def show_status(self):
-        if len(self.price_data) == 0:
-            return
-        
-        current_price = float(self.price_data['close'].iloc[-1])
-        indicators = self.calculate_indicators(self.price_data)
-        
-        status = f"📊 ETH: ${current_price:,.2f}"
-        
-        if self.position:
-            entry = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            pct = ((current_price - entry) / entry * 100) if side == "Buy" else ((entry - current_price) / entry * 100)
-            status += f" | 📍 {side} @ ${entry:.2f} | {pct:+.2f}%"
-        elif self.pending_order:
-            order_price = float(self.pending_order.get('price', 0))
-            order_side = self.pending_order.get('side', '')
-            age = int(datetime.now().timestamp() - int(self.pending_order.get('createdTime', 0)) / 1000)
-            status += f" | ⏳ Pending {order_side} @ ${order_price:.2f} ({age}s)"
-        elif indicators:
-            status += f" | BB: {indicators['bb_position']:.2f} | Trend: {indicators['trend']}"
-        
-        print(status, end='\r')
+        except:
+            pass
     
     async def run_cycle(self):
         if not await self.get_market_data():
@@ -410,37 +413,29 @@ class ETHScalpingBot:
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
-        
-        self.show_status()
     
     async def run(self):
         if not self.connect():
             print("❌ Failed to connect")
             return
         
-        print(f"🚀 EMA + BB Bot for {self.symbol}")
-        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
-        print("✅ Connected! Starting bot...")
+        print(f"🚀 Strategy 1: EMA+MACD+RSI Momentum Bot")
+        print(f"📊 {self.symbol} | 5-min | EMA 9/21/50 | MACD 5-13-1 | RSI 9")
+        print(f"🎯 TP: {self.config['take_profit']}% | SL: {self.config['stop_loss']}%")
         
-        while True:
-            try:
+        try:
+            while True:
                 await self.run_cycle()
-                await asyncio.sleep(10 if not self.position and not self.pending_order else 3)
-                    
-            except KeyboardInterrupt:
-                print("\n🛑 Shutting down...")
-                try:
-                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
-                except:
-                    pass
-                if self.position:
-                    await self.close_position("manual_stop")
-                print("✅ Bot stopped")
-                break
-            except Exception as e:
-                print(f"⚠️ Error: {e}")
                 await asyncio.sleep(5)
+        except KeyboardInterrupt:
+            print("\n🛑 Bot stopped")
+            try:
+                self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+            except:
+                pass
+            if self.position:
+                await self.close_position("manual_stop")
 
 if __name__ == "__main__":
-    bot = ETHScalpingBot()
+    bot = Strategy1_EMAMACDRSIBot()
     asyncio.run(bot.run())

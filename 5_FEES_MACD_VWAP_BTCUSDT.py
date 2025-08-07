@@ -2,31 +2,25 @@ import os
 import asyncio
 import pandas as pd
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Integrated Trade Logger
-class TradeLogger:
+class UnifiedLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
-        self.trade_id = 1000
-        
-        # Ensure logs directory exists
-        os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.trade_counter = 1000
         
     def generate_trade_id(self):
-        self.trade_id += 1
-        return self.trade_id
+        self.trade_counter += 1
+        return self.trade_counter
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
-        """Log position opening with slippage"""
         trade_id = self.generate_trade_id()
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
@@ -36,7 +30,7 @@ class TradeLogger:
             "symbol": self.symbol,
             "side": "LONG" if side == "BUY" else "SHORT",
             "action": "OPEN",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "expected_price": round(expected_price, 4),
             "actual_price": round(actual_price, 4),
             "slippage": round(slippage, 4),
@@ -56,13 +50,9 @@ class TradeLogger:
             "take_profit": take_profit
         }
         
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
-        
         return trade_id, log_entry
-    
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
-        """Log position closing with slippage and PnL calculation including rebates"""
+
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
         if trade_id not in self.open_trades:
             return None
             
@@ -71,22 +61,16 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate gross PnL
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # Calculate fee rebates (negative fees = rebate)
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else -fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else -fees_exit
-        
-        entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        
-        # Calculate net PnL
-        total_rebates = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_rebates
+        fee_rate = 0.001
+        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
+        fees_exit = actual_exit * trade["qty"] * fee_rate
+        total_fees = fees_entry + fees_exit
+        net_pnl = gross_pnl - total_fees
         
         log_entry = {
             "id": trade_id,
@@ -94,7 +78,7 @@ class TradeLogger:
             "symbol": self.symbol,
             "side": "LONG" if trade["side"] == "BUY" else "SHORT",
             "action": "CLOSE",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "duration_sec": int(duration),
             "entry_price": round(trade["entry_price"], 4),
             "expected_exit": round(expected_exit, 4),
@@ -102,299 +86,260 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
+            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
         }
         
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
-        
         del self.open_trades[trade_id]
         return log_entry
+    
+    def write_log(self, log_entry, log_file):
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
-class MACDVWAPBot:
+class Strategy5_EMARSIBot:
     def __init__(self):
-        self.symbol = 'BTCUSDT'
+        self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API connection
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
+        
         self.exchange = None
-        
-        # Trading state
         self.position = None
+        self.pending_order = None
         self.price_data = pd.DataFrame()
+        self.ema_divergence = 0
         
-        # MACD + VWAP Strategy Config with Fee Calculations
+        # UPDATED CONFIG TO MATCH STRATEGY 5
         self.config = {
-            'macd_fast': 8,
-            'macd_slow': 21,
-            'macd_signal': 5,
-            'rsi_period': 9,
-            'ema_period': 13,
-            'rsi_oversold': 35,
-            'rsi_overbought': 65,
+            'ema_fast': 9,           # Changed from 5
+            'ema_slow': 21,          # Changed from 13
+            'rsi_period': 7,         # Changed from 5
+            'rsi_long_filter': 40,   # Long only if RSI > 40
+            'rsi_short_filter': 60,  # Short only if RSI < 60
             'position_size': 100,
             'maker_offset_pct': 0.01,
-            # Fee structure
-            'maker_fee_pct': -0.04,  # Negative = rebate
-            # Gross TP/SL
-            'gross_take_profit': 0.35,
-            'gross_stop_loss': 0.25,
-            # Net TP/SL (adjusted for 2x maker rebate)
-            'net_take_profit': 0.43,  # 0.35 + 0.08 rebate
-            'net_stop_loss': 0.17,    # 0.25 - 0.08 rebate
+            'stop_loss': 0.35,       # Hard stop 0.35%
+            'trail_divergence': 0.15,# Trail when EMAs diverge > 0.15%
+            'order_timeout': 180,
+            'qty_step': 0.01,
         }
         
-        # Quantity formatting
-        self.qty_step, self.min_qty = '0.01', 0.01  # BNB uses 0.01 precision
-        
-        # Trade logging
-        self.logger = TradeLogger("MACD_VWAP", self.symbol)
+        os.makedirs("logs", exist_ok=True)
+        self.log_file = "logs/STRATEGY5_EMA_RSI_BNBUSDT.log"
+        self.unified_logger = UnifiedLogger("STRATEGY5_EMA_RSI", self.symbol)
         self.current_trade_id = None
+        self.entry_price = None
+        self.trailing_stop = None
     
     def connect(self):
-        """Connect to exchange API"""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
-        except Exception as e:
-            print(f"❌ Connection error: {e}")
+        except:
             return False
     
-    def format_qty(self, qty):
-        """Format quantity according to exchange requirements"""
-        if qty < self.min_qty:
-            return "0"
-        
-        decimals = len(str(self.qty_step).split('.')[1]) if '.' in str(self.qty_step) else 0
-        return f"{round(qty, decimals):.{decimals}f}"
-    
-    def calculate_break_even(self, entry_price, side):
-        """Calculate break-even price including fee rebates"""
-        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        
-        # With rebate, break-even is better than entry
-        if side == "Buy":
-            return entry_price * (1 - fee_impact)
-        else:
-            return entry_price * (1 + fee_impact)
-    
-    def calculate_net_targets(self, entry_price, side):
-        """Calculate net TP/SL accounting for round-trip fee rebates"""
-        if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-        else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        
-        return net_tp, net_sl
-    
-    def calculate_vwap(self, df):
-        """Calculate Volume Weighted Average Price"""
-        if len(df) < 20:
-            return None
-        
-        recent_data = df.tail(min(1440, len(df)))  # Last 24 hours max
-        typical_price = (recent_data['high'] + recent_data['low'] + recent_data['close']) / 3
-        volume = recent_data['volume']
-        
-        vwap = (typical_price * volume).cumsum() / volume.cumsum()
-        return vwap.iloc[-1] if not vwap.empty else None
+    async def check_pending_orders(self):
+        try:
+            orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
+            if orders.get('retCode') != 0:
+                return False
+            
+            order_list = orders['result']['list']
+            if not order_list:
+                self.pending_order = None
+                return False
+            
+            order = order_list[0]
+            age = datetime.now().timestamp() - int(order['createdTime']) / 1000
+            
+            if age > self.config['order_timeout']:
+                self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
+                self.pending_order = None
+                return False
+            
+            self.pending_order = order
+            return True
+        except:
+            return False
     
     def calculate_indicators(self, df):
-        """Calculate all technical indicators for signal generation"""
-        if len(df) < 50:
+        if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
             return None
         
         close = df['close']
         
-        # MACD
-        ema_fast = close.ewm(span=self.config['macd_fast']).mean()
-        ema_slow = close.ewm(span=self.config['macd_slow']).mean()
-        macd_line = ema_fast - ema_slow
-        signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
-        histogram = macd_line - signal_line
+        # EMAs
+        ema_fast = close.ewm(span=self.config['ema_fast']).mean()
+        ema_slow = close.ewm(span=self.config['ema_slow']).mean()
         
-        # VWAP
-        vwap = self.calculate_vwap(df)
-        if not vwap:
-            return None
+        # EMA divergence for trailing
+        self.ema_divergence = abs((ema_fast.iloc[-1] - ema_slow.iloc[-1]) / ema_slow.iloc[-1] * 100)
         
         # RSI
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
-        rs = gain / (loss + 1e-10)  # Avoid division by zero
-        rsi = 100 - (100 / (1 + rs))
+        rsi = 100 - (100 / (1 + gain / (loss + 1e-10))).iloc[-1]
         
-        # EMA trend filter
-        ema = close.ewm(span=self.config['ema_period']).mean()
-        
-        return {
-            'histogram': histogram.iloc[-1],
-            'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else histogram.iloc[-1],
-            'vwap': vwap,
-            'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50,
-            'rsi_prev': rsi.iloc[-2] if len(rsi) > 1 and not pd.isna(rsi.iloc[-2]) else 50,
-            'ema': ema.iloc[-1],
-            'price': close.iloc[-1]
-        }
-    
-    def detect_signals(self, indicators):
-        """Detect histogram flip, RSI cross, and VWAP alignment"""
-        # Histogram flip
-        hist_bullish = indicators['histogram_prev'] <= 0 and indicators['histogram'] > 0
-        hist_bearish = indicators['histogram_prev'] >= 0 and indicators['histogram'] < 0
-        
-        # RSI cross
-        rsi_bullish = indicators['rsi_prev'] <= self.config['rsi_oversold'] and indicators['rsi'] > self.config['rsi_oversold']
-        rsi_bearish = indicators['rsi_prev'] >= self.config['rsi_overbought'] and indicators['rsi'] < self.config['rsi_overbought']
-        
-        # VWAP alignment
-        vwap_bullish = indicators['price'] > indicators['vwap'] and indicators['ema'] > indicators['vwap']
-        vwap_bearish = indicators['price'] < indicators['vwap'] and indicators['ema'] < indicators['vwap']
+        # Crossover detection
+        crossover_up = ema_fast.iloc[-2] <= ema_slow.iloc[-2] and ema_fast.iloc[-1] > ema_slow.iloc[-1]
+        crossover_down = ema_fast.iloc[-2] >= ema_slow.iloc[-2] and ema_fast.iloc[-1] < ema_slow.iloc[-1]
         
         return {
-            'hist_bullish': hist_bullish,
-            'hist_bearish': hist_bearish,
-            'rsi_bullish': rsi_bullish,
-            'rsi_bearish': rsi_bearish,
-            'vwap_bullish': vwap_bullish,
-            'vwap_bearish': vwap_bearish
+            'ema_fast': ema_fast.iloc[-1],
+            'ema_slow': ema_slow.iloc[-1],
+            'crossover_up': crossover_up,
+            'crossover_down': crossover_down,
+            'rsi': rsi if pd.notna(rsi) else 50
         }
     
     def generate_signal(self, df):
-        """Generate trading signal based on MACD, RSI and VWAP alignment"""
         indicators = self.calculate_indicators(df)
         if not indicators:
             return None
         
-        signals = self.detect_signals(indicators)
+        price = float(df['close'].iloc[-1])
         
-        # Bullish signal: All three align
-        if signals['hist_bullish'] and signals['rsi_bullish'] and signals['vwap_bullish']:
-            return {
-                'action': 'BUY',
-                'price': indicators['price'],
-                'macd_hist': indicators['histogram'],
-                'rsi': indicators['rsi'],
-                'vwap': indicators['vwap']
-            }
+        # BUY: EMA crossover up + RSI > 40
+        if indicators['crossover_up'] and indicators['rsi'] > self.config['rsi_long_filter']:
+            return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         
-        # Bearish signal: All three align
-        if signals['hist_bearish'] and signals['rsi_bearish'] and signals['vwap_bearish']:
-            return {
-                'action': 'SELL',
-                'price': indicators['price'],
-                'macd_hist': indicators['histogram'],
-                'rsi': indicators['rsi'],
-                'vwap': indicators['vwap']
-            }
+        # SELL: EMA crossover down + RSI < 60
+        elif indicators['crossover_down'] and indicators['rsi'] < self.config['rsi_short_filter']:
+            return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
     
     async def get_market_data(self):
-        """Retrieve market data from exchange"""
         try:
-            klines = self.exchange.get_kline(
-                category="linear",
-                symbol=self.symbol,
-                interval="1",
-                limit=100
-            )
-            
+            klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
             if klines.get('retCode') != 0:
                 return False
             
-            df = pd.DataFrame(klines['result']['list'], columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-            
-            # Convert data types
+            df = pd.DataFrame(klines['result']['list'], 
+                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col])
             
-            # Sort by time
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
-        except Exception as e:
-            print(f"❌ Market data error: {e}")
+        except:
             return False
     
     async def check_position(self):
-        """Check current position status"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except Exception as e:
-            print(f"❌ Position check error: {e}")
+                if pos_list and float(pos_list[0]['size']) > 0:
+                    self.position = pos_list[0]
+                    if not self.entry_price:
+                        self.entry_price = float(self.position.get('avgPrice', 0))
+                else:
+                    self.position = None
+                    self.entry_price = None
+                    self.trailing_stop = None
+        except:
             pass
     
     def should_close(self):
-        """Determine if position should be closed based on net targets"""
-        if not self.position:
+        if not self.position or not self.entry_price:
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
-        entry_price = float(self.position.get('avgPrice', 0))
-        side = self.position.get('side', '')
+        is_long = self.position.get('side') == "Buy"
         
-        if entry_price == 0:
-            return False, ""
+        # Calculate profit percentage
+        profit_pct = ((current_price - self.entry_price) / self.entry_price * 100) if is_long else ((self.entry_price - current_price) / self.entry_price * 100)
         
-        # Calculate NET targets
-        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
+        # Hard stop loss
+        if profit_pct <= -self.config['stop_loss']:
+            return True, "stop_loss"
         
-        # Check against NET targets
-        if side == "Buy":
-            if current_price >= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price <= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
-        else:
-            if current_price <= net_tp:
-                return True, f"take_profit_net_{self.config['net_take_profit']}%"
-            if current_price >= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
-        
-        # Check for signal reversal
-        indicators = self.calculate_indicators(self.price_data)
-        if indicators:
-            signals = self.detect_signals(indicators)
-            if side == "Buy" and signals['hist_bearish']:
-                return True, "macd_reversal"
-            elif side == "Sell" and signals['hist_bullish']:
-                return True, "macd_reversal"
+        # Trailing stop when EMAs diverge > 0.15%
+        if self.ema_divergence > self.config['trail_divergence']:
+            # Initialize trailing stop
+            if not self.trailing_stop:
+                if is_long:
+                    self.trailing_stop = current_price * (1 - self.config['stop_loss'] / 100)
+                else:
+                    self.trailing_stop = current_price * (1 + self.config['stop_loss'] / 100)
+            else:
+                # Update trailing stop
+                if is_long:
+                    new_stop = current_price * (1 - self.config['stop_loss'] / 100)
+                    if new_stop > self.trailing_stop:
+                        self.trailing_stop = new_stop
+                    if current_price <= self.trailing_stop:
+                        return True, "trailing_stop"
+                else:
+                    new_stop = current_price * (1 + self.config['stop_loss'] / 100)
+                    if new_stop < self.trailing_stop:
+                        self.trailing_stop = new_stop
+                    if current_price >= self.trailing_stop:
+                        return True, "trailing_stop"
         
         return False, ""
     
+    def format_qty(self, qty):
+        step = self.config['qty_step']
+        return f"{round(qty / step) * step:.2f}"
+    
+    def log_trade(self, action, price, info=""):
+        if action in ["BUY", "SELL"] and not self.current_trade_id:
+            qty = self.config['position_size'] / price
+            stop_loss = price * (1 - self.config['stop_loss']/100) if action == "BUY" else price * (1 + self.config['stop_loss']/100)
+            take_profit = price * 1.01 if action == "BUY" else price * 0.99  # Placeholder since we use trailing
+            
+            self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
+                side=action,
+                expected_price=price,
+                actual_price=price,
+                qty=qty,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                info=info
+            )
+            
+            self.unified_logger.write_log(log_entry, self.log_file)
+            
+        elif action == "CLOSE" and self.current_trade_id:
+            log_entry = self.unified_logger.log_trade_close(
+                trade_id=self.current_trade_id,
+                expected_exit=price,
+                actual_exit=price,
+                reason=info
+            )
+            
+            if log_entry:
+                self.unified_logger.write_log(log_entry, self.log_file)
+            
+            self.current_trade_id = None
+    
     async def execute_trade(self, signal):
-        """Execute maker-only trade with rebate benefits"""
-        current_price = signal['price']
-        qty = self.config['position_size'] / current_price
-        formatted_qty = self.format_qty(qty)
-        
-        if formatted_qty == "0":
+        if await self.check_pending_orders() or self.position:
             return
         
-        # Calculate limit price with maker offset
-        offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(current_price * offset_mult, 4)
+        qty = self.config['position_size'] / signal['price']
+        formatted_qty = self.format_qty(qty)
+        
+        if float(formatted_qty) < self.config['qty_step']:
+            return
+        
+        is_buy = signal['action'] == 'BUY'
+        offset = 1 - self.config['maker_offset_pct']/100 if is_buy else 1 + self.config['maker_offset_pct']/100
+        limit_price = round(signal['price'] * offset, 2)
         
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
+                side="Buy" if is_buy else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
                 price=str(limit_price),
@@ -402,129 +347,81 @@ class MACDVWAPBot:
             )
             
             if order.get('retCode') == 0:
-                # Calculate targets for logging
-                break_even = self.calculate_break_even(limit_price, signal['action'])
-                net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
-                
-                # Log the trade
-                self.current_trade_id, _ = self.logger.log_trade_open(
-                    side=signal['action'],
-                    expected_price=signal['price'],
-                    actual_price=limit_price,
-                    qty=float(formatted_qty),
-                    stop_loss=net_sl,
-                    take_profit=net_tp,
-                    info=f"HIST:{signal['macd_hist']:.6f}_RSI:{signal['rsi']:.1f}_BE:{break_even:.4f}"
-                )
-                
-                print(f"✅ MAKER {signal['action']}: {formatted_qty} BNB @ ${limit_price:.4f}")
-                print(f"   📊 Break-Even: ${break_even:.4f} | Net TP: ${net_tp:.4f} | Net SL: ${net_sl:.4f}")
-                print(f"   📈 MACD Hist:{signal['macd_hist']:.6f} | RSI:{signal['rsi']:.1f} | VWAP:${signal['vwap']:.4f}")
+                self.pending_order = order['result']
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI:{signal['rsi']:.1f}")
+                self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_EMA_cross")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order for rebate benefits"""
         if not self.position:
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
-        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
-        
-        # Calculate limit price with offset
-        offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
-        limit_price = round(current_price * offset_mult, 4)
+        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
+                orderType="Market",
                 qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                # Log the trade close with rebates
-                if self.current_trade_id:
-                    self.logger.log_trade_close(
-                        trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=limit_price,
-                        reason=reason,
-                        fees_entry=self.config['maker_fee_pct'],
-                        fees_exit=self.config['maker_fee_pct']
-                    )
-                    self.current_trade_id = None
-                
-                # Calculate NET PnL including fee rebates
-                entry_price = float(self.position.get('avgPrice', 0))
-                gross_pnl = float(self.position.get('unrealisedPnl', 0))
-                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
-                net_pnl = gross_pnl + fee_earned
-                
-                print(f"✅ Closed: {reason} | Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-                
-                # Clear position after successful close
-                self.position = None
-                
+                current = float(self.price_data['close'].iloc[-1])
+                print(f"✅ Closed: {reason} @ ${current:.2f}")
+                if self.trailing_stop:
+                    print(f"   Trailing stop was: ${self.trailing_stop:.2f}")
+                self.log_trade("CLOSE", current, reason)
+                self.entry_price = None
+                self.trailing_stop = None
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
-        """Show current status and indicator values"""
         if len(self.price_data) == 0:
             return
         
-        price = float(self.price_data['close'].iloc[-1])
-        indicators = self.calculate_indicators(self.price_data)
-        
-        print(f"\n⚡ MACD + VWAP BOT - {self.symbol}")
-        print(f"💰 Price: ${price:.4f}")
-        
-        if indicators:
-            print(f"📊 MACD Hist: {indicators['histogram']:.6f} | RSI: {indicators['rsi']:.1f}")
-            print(f"📈 VWAP: ${indicators['vwap']:.4f} | EMA: ${indicators['ema']:.4f}")
+        current_price = float(self.price_data['close'].iloc[-1])
+        status_parts = [f"📊 BNB: ${current_price:.2f}"]
         
         if self.position:
-            entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
-            size = self.position.get('size', '0')
-            
-            # Calculate current NET PnL with rebates
-            gross_pnl = float(self.position.get('unrealisedPnl', 0))
-            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
-            net_pnl = gross_pnl + fee_earned
-            
-            # Calculate break-even and targets
-            break_even = self.calculate_break_even(entry_price, side)
-            net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-            
-            emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} BNB @ ${entry_price:.4f}")
-            print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-            print(f"   🎯 BE: ${break_even:.4f} | TP: ${net_tp:.4f} | SL: ${net_sl:.4f}")
+            status_parts.append(f"📍 {side} @ ${self.entry_price:.2f}")
+            if self.trailing_stop:
+                status_parts.append(f"Trail: ${self.trailing_stop:.2f}")
+            status_parts.append(f"EMA Div: {self.ema_divergence:.2f}%")
+        elif self.pending_order:
+            order_price = float(self.pending_order.get('price', 0))
+            order_side = self.pending_order.get('side', '')
+            age = int(datetime.now().timestamp() - int(self.pending_order.get('createdTime', 0)) / 1000)
+            status_parts.append(f"⏳ {order_side} @ ${order_price:.2f} ({age}s)")
         else:
-            print("⚡ Scanning for MACD + VWAP signals...")
+            indicators = self.calculate_indicators(self.price_data)
+            if indicators:
+                status_parts.append(f"RSI: {indicators['rsi']:.1f}")
+                if indicators['ema_fast'] > indicators['ema_slow']:
+                    status_parts.append("EMA: ↑")
+                else:
+                    status_parts.append("EMA: ↓")
         
-        print("-" * 60)
+        print(" | ".join(status_parts), end='\r')
     
     async def run_cycle(self):
-        """Run one trading cycle"""
         if not await self.get_market_data():
             return
         
         await self.check_position()
+        await self.check_pending_orders()
         
         if self.position:
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
-        else:
+        elif not self.pending_order:
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
@@ -532,30 +429,31 @@ class MACDVWAPBot:
         self.show_status()
     
     async def run(self):
-        """Main bot loop"""
         if not self.connect():
-            print("❌ Failed to connect to exchange")
+            print("❌ Failed to connect")
             return
         
-        print(f"✅ Connected! Starting MACD + VWAP bot for {self.symbol}")
-        print("📊 Strategy: MACD histogram flip + RSI cross + VWAP alignment")
-        print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
-        print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
+        print(f"✅ Strategy 5: EMA Crossover + RSI Filter")
+        print(f"📊 {self.symbol} | EMA 9/21 | RSI 7")
+        print(f"🎯 Hard Stop: {self.config['stop_loss']}% | Trail at EMA div > {self.config['trail_divergence']}%")
         
-        try:
-            while True:
+        while True:
+            try:
                 await self.run_cycle()
                 await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user")
-            if self.position:
-                await self.close_position("manual_stop")
-        except Exception as e:
-            print(f"⚠️ Runtime error: {e}")
-            if self.position:
-                await self.close_position("error_stop")
-            await asyncio.sleep(5)
+            except KeyboardInterrupt:
+                print("\n🛑 Bot stopped")
+                try:
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+                except:
+                    pass
+                if self.position:
+                    await self.close_position("manual_stop")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = MACDVWAPBot()
+    bot = Strategy5_EMARSIBot()
     asyncio.run(bot.run())
