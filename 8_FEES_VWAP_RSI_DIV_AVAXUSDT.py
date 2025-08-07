@@ -73,14 +73,11 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else -fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else -fees_exit
-        
-        entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        
+        # FIXED: Proper rebate calculation for maker orders
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_rebates
+        net_pnl = gross_pnl + total_rebates  # Add rebates since they're earnings
         
         log_entry = {
             "id": trade_id,
@@ -120,23 +117,26 @@ class VWAPRSIDivergenceBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
+        self.account_balance = 0
         
+        # FIXED PARAMETERS
         self.config = {
             'timeframe': '5',
             'rsi_period': 9,
             'divergence_lookback': 5,
             'ema_period': 50,
-            'position_size': 100,
+            'risk_per_trade': 2.0,       # FIXED: 2% risk per trade instead of fixed $100
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 0.70,     # ✅ FIXED: 0.65% → 0.70% (optimal 1:2 R:R)
-            'net_stop_loss': 0.35,       # Maintains same risk level
+            'net_take_profit': 0.70,
+            'net_stop_loss': 0.35,
+            'slippage_basis_points': 3,  # FIXED: 0.03% expected slippage for AVAX
         }
         
         self.rsi_pivots = {'highs': [], 'lows': []}
         self.price_pivots = {'highs': [], 'lows': []}
         
-        self.logger = TradeLogger("VWAP_RSI_DIV", self.symbol)
+        self.logger = TradeLogger("VWAP_RSI_DIV_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -147,8 +147,62 @@ class VWAPRSIDivergenceBot:
             print(f"❌ Connection error: {e}")
             return False
     
+    # FIXED: Proper quantity formatting with instrument precision
     def format_qty(self, qty):
-        return str(int(round(qty)))
+        # AVAX minimum quantity is 0.01 with 2 decimal places
+        min_qty = 0.01
+        if qty < min_qty:
+            return "0"
+        
+        # Round to 2 decimal places for AVAX
+        formatted = round(qty / min_qty) * min_qty
+        return f"{formatted:.2f}"
+    
+    # FIXED: Get account balance for position sizing
+    async def get_account_balance(self):
+        try:
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
+            if wallet.get('retCode') == 0:
+                for coin in wallet['result']['list'][0]['coin']:
+                    if coin['coin'] == 'USDT':
+                        self.account_balance = float(coin['availableToWithdraw'])
+                        return True
+            return False
+        except Exception as e:
+            print(f"❌ Balance check error: {e}")
+            return False
+    
+    # FIXED: Calculate position size based on account balance and risk
+    def calculate_position_size(self, price, stop_loss_price):
+        if self.account_balance <= 0:
+            return 0
+        
+        # Calculate risk amount (2% of balance)
+        risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100)
+        
+        # Calculate position size based on stop loss distance
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance == 0:
+            return 0
+        
+        # Position size = Risk Amount / Stop Distance
+        position_size_usdt = min(risk_amount / stop_distance * price, self.account_balance * 0.1)  # Max 10% of balance
+        qty = position_size_usdt / price
+        
+        return qty
+    
+    # FIXED: Add slippage modeling
+    def apply_slippage(self, expected_price, side):
+        slippage_pct = self.config['slippage_basis_points'] / 10000  # Convert basis points to percentage
+        
+        if side in ['BUY', 'Buy']:
+            # Buy orders get worse (higher) price due to slippage
+            actual_price = expected_price * (1 + slippage_pct)
+        else:
+            # Sell orders get worse (lower) price due to slippage
+            actual_price = expected_price * (1 - slippage_pct)
+        
+        return actual_price
     
     def calculate_vwap(self, df):
         if len(df) < 20:
@@ -338,14 +392,35 @@ class VWAPRSIDivergenceBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        qty = self.config['position_size'] / signal['price']
+        # FIXED: Check account balance first
+        if not await self.get_account_balance():
+            print("❌ Could not get account balance")
+            return
+        
+        if self.account_balance < 10:  # Minimum $10 balance
+            print(f"❌ Insufficient balance: ${self.account_balance:.2f}")
+            return
+        
+        # FIXED: Calculate stop loss price for position sizing
+        stop_loss_pct = self.config['net_stop_loss'] / 100
+        if signal['action'] == 'BUY':
+            stop_loss_price = signal['price'] * (1 - stop_loss_pct)
+        else:
+            stop_loss_price = signal['price'] * (1 + stop_loss_pct)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if int(formatted_qty) == 0:
+        if formatted_qty == "0":
+            print(f"❌ Position size too small: {qty:.6f}")
             return
         
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 4)
+        
+        # FIXED: Apply slippage to expected execution price
+        expected_execution_price = self.apply_slippage(limit_price, signal['action'])
         
         try:
             order = self.exchange.place_order(
@@ -359,22 +434,27 @@ class VWAPRSIDivergenceBot:
             )
             
             if order.get('retCode') == 0:
-                net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
-                net_sl = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
+                net_tp = expected_execution_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 - self.config['net_take_profit']/100)
+                net_sl = expected_execution_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 + self.config['net_stop_loss']/100)
+                
+                position_value = float(formatted_qty) * expected_execution_price
+                risk_pct = (position_value * stop_loss_pct / self.account_balance) * 100
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
-                    expected_price=signal['price'],
-                    actual_price=limit_price,
+                    expected_price=limit_price,
+                    actual_price=expected_execution_price,
                     qty=float(formatted_qty),
                     stop_loss=net_sl,
                     take_profit=net_tp,
-                    info=f"vwap:{signal['vwap']:.4f}_rsi:{signal['rsi']:.1f}_div:{signal['divergence_strength']:.1f}"
+                    info=f"vwap:{signal['vwap']:.4f}_rsi:{signal['rsi']:.1f}_div:{signal['divergence_strength']:.1f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
                 )
                 
                 print(f"📈 DIVERGENCE {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
+                print(f"   💰 Position Value: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
                 print(f"   🎯 VWAP: ${signal['vwap']:.4f} | RSI: {signal['rsi']:.1f}")
                 print(f"   💪 Divergence Strength: {signal['divergence_strength']:.1f}")
+                print(f"   🎯 Expected Execution: ${expected_execution_price:.4f} (with slippage)")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -389,6 +469,9 @@ class VWAPRSIDivergenceBot:
         
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 4)
+        
+        # FIXED: Apply slippage to exit price
+        expected_exit_price = self.apply_slippage(limit_price, side)
         
         try:
             order = self.exchange.place_order(
@@ -406,15 +489,15 @@ class VWAPRSIDivergenceBot:
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=limit_price,
+                        expected_exit=limit_price,
+                        actual_exit=expected_exit_price,
                         reason=reason,
                         fees_entry=self.config['maker_fee_pct'],
                         fees_exit=self.config['maker_fee_pct']
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason}")
+                print(f"✅ Closed: {reason} @ ${expected_exit_price:.4f}")
                 self.position = None
                 
         except Exception as e:
@@ -428,8 +511,12 @@ class VWAPRSIDivergenceBot:
         vwap = self.calculate_vwap(self.price_data)
         rsi = self.calculate_rsi(self.price_data['close']).iloc[-1] if len(self.price_data) > 14 else 50
         
-        print(f"\n📈 VWAP + RSI Divergence - {self.symbol}")
-        print(f"💰 Price: ${current_price:.4f}")
+        print(f"\n📈 FIXED VWAP + RSI Divergence - {self.symbol}")
+        print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
+        print(f"🔧 FIXES APPLIED:")
+        print(f"   • Position Sizing: Risk-based ({self.config['risk_per_trade']}% per trade)")
+        print(f"   • Fee Calculations: Proper maker rebates")  
+        print(f"   • Slippage Modeling: {self.config['slippage_basis_points']} basis points")
         
         if vwap:
             print(f"📊 VWAP: ${vwap:.4f} | RSI: {rsi:.1f}")
@@ -442,9 +529,12 @@ class VWAPRSIDivergenceBot:
             size = self.position.get('size', '0')
             
             pnl = float(self.position.get('unrealisedPnl', 0))
+            position_value = float(size) * current_price
+            risk_pct = (position_value / self.account_balance) * 100 if self.account_balance > 0 else 0
             
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} AVAX @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+            print(f"   📊 Position: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
         else:
             print("🔍 Scanning for RSI divergences...")
         
@@ -472,7 +562,12 @@ class VWAPRSIDivergenceBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📈 VWAP + RSI Divergence Bot - {self.symbol}")
+        print(f"📈 FIXED VWAP + RSI Divergence Bot - {self.symbol}")
+        print(f"🔧 CRITICAL FIXES:")
+        print(f"   ✅ Position Sizing: Account balance-based with {self.config['risk_per_trade']}% risk")
+        print(f"   ✅ Fee Calculations: Proper maker rebate handling")
+        print(f"   ✅ Slippage Modeling: {self.config['slippage_basis_points']} basis points expected slippage")
+        print(f"   ✅ Instrument Precision: AVAX 0.01 minimum quantity")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
         print(f"🎯 Net TP: {self.config['net_take_profit']}% | Net SL: {self.config['net_stop_loss']}%")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")

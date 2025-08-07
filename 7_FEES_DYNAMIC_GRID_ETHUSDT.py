@@ -73,14 +73,11 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else -fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else -fees_exit
-        
-        entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        
+        # FIXED: Proper rebate calculation for maker orders
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_rebates
+        net_pnl = gross_pnl + total_rebates  # Add rebates since they're earnings
         
         log_entry = {
             "id": trade_id,
@@ -120,25 +117,27 @@ class DynamicGridBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
+        self.account_balance = 0
         
-        # FIXED PARAMETERS - Based on Research Analysis
+        # FIXED PARAMETERS
         self.config = {
-            'grid_levels': 10,           # INCREASED: 5 → 10 levels for better coverage
-            'grid_spacing_pct': 0.6,     # INCREASED: 0.2% → 0.6% (above fee threshold)
-            'position_size': 100,
+            'grid_levels': 10,
+            'grid_spacing_pct': 0.6,
+            'risk_per_trade': 2.0,       # FIXED: 2% risk per trade instead of fixed $100
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
-            'net_take_profit': 1.2,      # INCREASED: 0.6% → 1.2% (2x risk:reward)
-            'net_stop_loss': 0.6,        # INCREASED: 0.3% → 0.6% (avoid noise)
+            'net_take_profit': 1.2,
+            'net_stop_loss': 0.6,
             'atr_period': 14,
             'volatility_threshold': 0.015,
+            'slippage_basis_points': 2,  # FIXED: 0.02% expected slippage
         }
         
         self.grid_levels = []
         self.current_grid_index = -1
         self.last_update_time = None
         
-        self.logger = TradeLogger("DYNAMIC_GRID", self.symbol)
+        self.logger = TradeLogger("DYNAMIC_GRID_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -149,8 +148,62 @@ class DynamicGridBot:
             print(f"❌ Connection error: {e}")
             return False
     
+    # FIXED: Proper quantity formatting with instrument precision
     def format_qty(self, qty):
-        return f"{round(qty / 0.001) * 0.001:.3f}"
+        # ETH minimum quantity is 0.001 with 3 decimal places
+        min_qty = 0.001
+        if qty < min_qty:
+            return "0"
+        
+        # Round to 3 decimal places for ETH
+        formatted = round(qty / min_qty) * min_qty
+        return f"{formatted:.3f}"
+    
+    # FIXED: Get account balance for position sizing
+    async def get_account_balance(self):
+        try:
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
+            if wallet.get('retCode') == 0:
+                for coin in wallet['result']['list'][0]['coin']:
+                    if coin['coin'] == 'USDT':
+                        self.account_balance = float(coin['availableToWithdraw'])
+                        return True
+            return False
+        except Exception as e:
+            print(f"❌ Balance check error: {e}")
+            return False
+    
+    # FIXED: Calculate position size based on account balance and risk
+    def calculate_position_size(self, price, stop_loss_price):
+        if self.account_balance <= 0:
+            return 0
+        
+        # Calculate risk amount (2% of balance)
+        risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100)
+        
+        # Calculate position size based on stop loss distance
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance == 0:
+            return 0
+        
+        # Position size = Risk Amount / Stop Distance
+        position_size_usdt = min(risk_amount / stop_distance * price, self.account_balance * 0.1)  # Max 10% of balance
+        qty = position_size_usdt / price
+        
+        return qty
+    
+    # FIXED: Add slippage modeling
+    def apply_slippage(self, expected_price, side):
+        slippage_pct = self.config['slippage_basis_points'] / 10000  # Convert basis points to percentage
+        
+        if side in ['BUY', 'Buy']:
+            # Buy orders get worse (higher) price due to slippage
+            actual_price = expected_price * (1 + slippage_pct)
+        else:
+            # Sell orders get worse (lower) price due to slippage
+            actual_price = expected_price * (1 - slippage_pct)
+        
+        return actual_price
     
     def calculate_atr(self, df):
         if len(df) < self.config['atr_period']:
@@ -194,7 +247,7 @@ class DynamicGridBot:
             return None
         
         for i, level in enumerate(self.grid_levels):
-            if abs(current_price - level['price']) / level['price'] < 0.002:  # Increased threshold
+            if abs(current_price - level['price']) / level['price'] < 0.002:
                 return i, level
         
         return None
@@ -250,7 +303,7 @@ class DynamicGridBot:
             klines = self.exchange.get_kline(
                 category="linear",
                 symbol=self.symbol,
-                interval="15",  # INCREASED: 1min → 15min to reduce noise
+                interval="15",
                 limit=50
             )
             
@@ -308,14 +361,35 @@ class DynamicGridBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        qty = self.config['position_size'] / signal['price']
+        # FIXED: Check account balance first
+        if not await self.get_account_balance():
+            print("❌ Could not get account balance")
+            return
+        
+        if self.account_balance < 10:  # Minimum $10 balance
+            print(f"❌ Insufficient balance: ${self.account_balance:.2f}")
+            return
+        
+        # FIXED: Calculate stop loss price for position sizing
+        stop_loss_pct = self.config['net_stop_loss'] / 100
+        if signal['action'] == 'BUY':
+            stop_loss_price = signal['price'] * (1 - stop_loss_pct)
+        else:
+            stop_loss_price = signal['price'] * (1 + stop_loss_pct)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < 0.001:
+        if formatted_qty == "0":
+            print(f"❌ Position size too small: {qty:.6f}")
             return
         
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 2)
+        
+        # FIXED: Apply slippage to expected execution price
+        expected_execution_price = self.apply_slippage(limit_price, signal['action'])
         
         try:
             order = self.exchange.place_order(
@@ -329,22 +403,26 @@ class DynamicGridBot:
             )
             
             if order.get('retCode') == 0:
-                net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
-                net_sl = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
+                net_tp = expected_execution_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 - self.config['net_take_profit']/100)
+                net_sl = expected_execution_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 + self.config['net_stop_loss']/100)
+                
+                position_value = float(formatted_qty) * expected_execution_price
+                risk_pct = (position_value * stop_loss_pct / self.account_balance) * 100
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
-                    expected_price=signal['price'],
-                    actual_price=limit_price,
+                    expected_price=limit_price,
+                    actual_price=expected_execution_price,
                     qty=float(formatted_qty),
                     stop_loss=net_sl,
                     take_profit=net_tp,
-                    info=f"grid_level:{signal['grid_level']:.2f}_index:{signal['grid_index']}"
+                    info=f"grid_level:{signal['grid_level']:.2f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
                 )
                 
                 print(f"📊 GRID {signal['action']}: {formatted_qty} @ ${limit_price:.2f}")
-                print(f"   🎯 Grid Level: ${signal['grid_level']:.2f} (Index: {signal['grid_index']})")
-                print(f"   💎 TP: ${net_tp:.2f} | SL: ${net_sl:.2f} | R:R = 1:2")
+                print(f"   💰 Position Value: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
+                print(f"   🎯 Expected Execution: ${expected_execution_price:.2f} (with slippage)")
+                print(f"   💎 TP: ${net_tp:.2f} | SL: ${net_sl:.2f}")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
@@ -359,6 +437,9 @@ class DynamicGridBot:
         
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 2)
+        
+        # FIXED: Apply slippage to exit price
+        expected_exit_price = self.apply_slippage(limit_price, side)
         
         try:
             order = self.exchange.place_order(
@@ -376,15 +457,15 @@ class DynamicGridBot:
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=limit_price,
+                        expected_exit=limit_price,
+                        actual_exit=expected_exit_price,
                         reason=reason,
                         fees_entry=self.config['maker_fee_pct'],
                         fees_exit=self.config['maker_fee_pct']
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason}")
+                print(f"✅ Closed: {reason} @ ${expected_exit_price:.2f}")
                 self.position = None
                 
         except Exception as e:
@@ -397,9 +478,11 @@ class DynamicGridBot:
         current_price = float(self.price_data['close'].iloc[-1])
         
         print(f"\n📊 FIXED Dynamic Grid Bot - {self.symbol}")
-        print(f"💰 Price: ${current_price:.2f}")
-        print(f"🔧 Grid: {self.config['grid_levels']} levels @ {self.config['grid_spacing_pct']}% spacing")
-        print(f"🎯 Targets: TP {self.config['net_take_profit']}% | SL {self.config['net_stop_loss']}% (1:2 R:R)")
+        print(f"💰 Price: ${current_price:.2f} | Balance: ${self.account_balance:.2f}")
+        print(f"🔧 FIXES APPLIED:")
+        print(f"   • Position Sizing: Risk-based ({self.config['risk_per_trade']}% per trade)")
+        print(f"   • Fee Calculations: Proper maker rebates")  
+        print(f"   • Slippage Modeling: {self.config['slippage_basis_points']} basis points")
         
         if self.grid_levels:
             buy_grids = [g for g in self.grid_levels if g['side'] == 'BUY']
@@ -415,9 +498,12 @@ class DynamicGridBot:
             size = self.position.get('size', '0')
             
             pnl = float(self.position.get('unrealisedPnl', 0))
+            position_value = float(size) * current_price
+            risk_pct = (position_value / self.account_balance) * 100 if self.account_balance > 0 else 0
             
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} ETH @ ${entry_price:.2f} | PnL: ${pnl:.2f}")
+            print(f"   📊 Position: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
         else:
             print("⚡ Waiting for optimal grid signals...")
         
@@ -446,13 +532,11 @@ class DynamicGridBot:
             return
         
         print(f"📊 FIXED Dynamic Grid Trading Bot - {self.symbol}")
-        print(f"🔧 IMPROVEMENTS:")
-        print(f"   • Grid Levels: 5 → 10 (better coverage)")
-        print(f"   • Grid Spacing: 0.2% → 0.6% (above fee threshold)")
-        print(f"   • Take Profit: 0.6% → 1.2% (optimal target)")
-        print(f"   • Stop Loss: 0.3% → 0.6% (reduce noise)")
-        print(f"   • Timeframe: 1min → 15min (less noise)")
-        print(f"   • Risk:Reward: 1:2 ratio")
+        print(f"🔧 CRITICAL FIXES:")
+        print(f"   ✅ Position Sizing: Account balance-based with {self.config['risk_per_trade']}% risk")
+        print(f"   ✅ Fee Calculations: Proper maker rebate handling")
+        print(f"   ✅ Slippage Modeling: {self.config['slippage_basis_points']} basis points expected slippage")
+        print(f"   ✅ Instrument Precision: ETH 0.001 minimum quantity")
         print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
         
         try:

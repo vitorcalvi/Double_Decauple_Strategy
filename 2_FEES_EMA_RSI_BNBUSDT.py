@@ -67,26 +67,18 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
+        # Calculate gross PnL
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
+        # FIXED: Simple fee calculation - maker rebates are positive
+        entry_fee = trade["entry_price"] * trade["qty"] * fees_entry / 100
+        exit_fee = actual_exit * trade["qty"] * fees_exit / 100
+        total_fees = entry_fee + exit_fee
         
-        if fees_entry < 0:
-            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        else:
-            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
-            
-        if fees_exit < 0:
-            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        else:
-            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
-        
-        total_fee_impact = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_fee_impact
+        net_pnl = gross_pnl - total_fees  # Subtract fees (negative fees become positive)
         
         log_entry = {
             "id": trade_id,
@@ -102,11 +94,7 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_impact": {
-                "entry": round(entry_rebate, 2), 
-                "exit": round(exit_rebate, 2), 
-                "total": round(total_fee_impact, 2)
-            },
+            "total_fees": round(total_fees, 2),
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -131,21 +119,27 @@ class EMARSIBot:
         self.position = None
         self.pending_order = None
         self.price_data = pd.DataFrame()
+        self.account_balance = 0
         
-        # FIXED CONFIG - CRITICAL RISK MANAGEMENT FIXES
+        # FIXED CONFIG
         self.config = {
             'ema_fast': 5,
             'ema_slow': 13,
             'rsi_period': 5,
-            'position_size': 100,
+            'risk_per_trade': 1.0,  # FIXED: 1% risk per trade
             'maker_offset_pct': 0.01,
-            'net_take_profit': 0.86,     # FIXED: Increased for 1:2 ratio
-            'net_stop_loss': 0.43,       # FIXED: was 0.12, now 0.43 (proper 1:2)
+            'slippage_pct': 0.02,  # FIXED: Expected slippage
+            'net_take_profit': 0.86,
+            'net_stop_loss': 0.43,
             'order_timeout': 180,
-            'qty_step': 0.01,
+            'min_notional': 5,  # FIXED: Minimum trade size
         }
         
-        self.logger = TradeLogger("2_FEES_EMA_RSI_FIXED", self.symbol)
+        # FIXED: Get instrument info
+        self.tick_size = 0.01
+        self.qty_step = 0.01
+        
+        self.logger = TradeLogger("EMA_RSI_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -154,6 +148,82 @@ class EMARSIBot:
             return self.exchange.get_server_time().get('retCode') == 0
         except:
             return False
+    
+    async def get_account_balance(self):
+        """FIXED: Get actual account balance"""
+        try:
+            result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if result.get('retCode') == 0:
+                balance_list = result['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            self.account_balance = float(coin['availableToWithdraw'])
+                            return True
+            return False
+        except:
+            self.account_balance = 1000  # Fallback
+            return False
+    
+    async def get_instrument_info(self):
+        """FIXED: Get proper instrument precision"""
+        try:
+            result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
+            if result.get('retCode') == 0:
+                info = result['result']['list'][0]
+                self.tick_size = float(info['priceFilter']['tickSize'])
+                self.qty_step = float(info['lotSizeFilter']['qtyStep'])
+                return True
+            return False
+        except:
+            return False
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """FIXED: Risk-based position sizing"""
+        if self.account_balance <= 0:
+            return 0
+        
+        # Calculate risk amount
+        risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
+        
+        # Calculate stop loss distance
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance == 0:
+            return 0
+        
+        # Calculate position size
+        position_size = risk_amount / stop_distance
+        
+        # Apply minimum notional check
+        notional = position_size * price
+        if notional < self.config['min_notional']:
+            return 0
+        
+        return position_size
+    
+    def format_price(self, price):
+        """FIXED: Format price with proper precision"""
+        return round(price / self.tick_size) * self.tick_size
+    
+    def format_qty(self, qty):
+        """FIXED: Format quantity with proper precision"""
+        formatted = round(qty / self.qty_step) * self.qty_step
+        return f"{formatted:.2f}"
+    
+    def estimate_execution_price(self, market_price, side, is_limit=True):
+        """FIXED: Realistic execution price with slippage"""
+        if is_limit:
+            # Limit orders with maker offset
+            if side == 'BUY':
+                return self.format_price(market_price * (1 - self.config['maker_offset_pct']/100))
+            else:
+                return self.format_price(market_price * (1 + self.config['maker_offset_pct']/100))
+        else:
+            # Market orders with slippage
+            if side == 'BUY':
+                return self.format_price(market_price * (1 + self.config['slippage_pct']/100))
+            else:
+                return self.format_price(market_price * (1 - self.config['slippage_pct']/100))
     
     async def check_pending_orders(self):
         try:
@@ -205,10 +275,9 @@ class EMARSIBot:
         
         price = float(df['close'].iloc[-1])
         
-        # More selective entry conditions for better risk:reward
-        if indicators['trend'] == 'UP' and indicators['rsi'] < 45:  # Changed from 50 to 45
+        if indicators['trend'] == 'UP' and indicators['rsi'] < 45:
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
-        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > 55:  # Changed from 50 to 55
+        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > 55:
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
@@ -249,38 +318,45 @@ class EMARSIBot:
             return False, ""
         
         is_long = self.position.get('side') == "Buy"
-        price_ratio = current_price / entry_price
         
         if is_long:
-            if price_ratio >= 1 + self.config['net_take_profit'] / 100:
-                return True, "take_profit"
-            if price_ratio <= 1 - self.config['net_stop_loss'] / 100:
-                return True, "stop_loss"
+            profit_pct = (current_price - entry_price) / entry_price * 100
         else:
-            if price_ratio <= 1 - self.config['net_take_profit'] / 100:
-                return True, "take_profit"
-            if price_ratio >= 1 + self.config['net_stop_loss'] / 100:
-                return True, "stop_loss"
+            profit_pct = (entry_price - current_price) / entry_price * 100
+        
+        if profit_pct >= self.config['net_take_profit']:
+            return True, "take_profit"
+        if profit_pct <= -self.config['net_stop_loss']:
+            return True, "stop_loss"
         
         return False, ""
-    
-    def format_qty(self, qty):
-        step = self.config['qty_step']
-        return f"{round(qty / step) * step:.2f}"
     
     async def execute_trade(self, signal):
         if await self.check_pending_orders() or self.position:
             return
         
-        qty = self.config['position_size'] / signal['price']
+        # FIXED: Update balance and instrument info
+        await self.get_account_balance()
+        
+        market_price = signal['price']
+        is_buy = signal['action'] == 'BUY'
+        
+        # Calculate stop loss price
+        if is_buy:
+            stop_loss_price = market_price * (1 - self.config['net_stop_loss']/100)
+        else:
+            stop_loss_price = market_price * (1 + self.config['net_stop_loss']/100)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(market_price, stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < self.config['qty_step']:
+        if float(formatted_qty) < self.qty_step:
+            print(f"⚠️ Position size too small: {formatted_qty}")
             return
         
-        is_buy = signal['action'] == 'BUY'
-        offset = 1 - self.config['maker_offset_pct']/100 if is_buy else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 2)
+        # FIXED: Realistic execution price
+        limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
         
         try:
             order = self.exchange.place_order(
@@ -296,22 +372,20 @@ class EMARSIBot:
             if order.get('retCode') == 0:
                 self.pending_order = order['result']
                 
-                stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if is_buy else limit_price * (1 + self.config['net_stop_loss']/100)
                 take_profit = limit_price * (1 + self.config['net_take_profit']/100) if is_buy else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
-                    expected_price=signal['price'],
+                    expected_price=market_price,
                     actual_price=limit_price,
                     qty=float(formatted_qty),
-                    stop_loss=stop_loss,
+                    stop_loss=stop_loss_price,
                     take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}_FIXED_RR"
+                    info=f"RSI:{signal['rsi']:.1f}_Risk:{self.config['risk_per_trade']}%_Balance:{self.account_balance:.0f}"
                 )
                 
-                print(f"✅ FIXED {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI:{signal['rsi']:.1f}")
-                print(f"   🔧 FIXED SL: 0.12% → {self.config['net_stop_loss']:.2f}% (1:2 ratio)")
-                print(f"   🎯 Risk:Reward = 1:2 (Risk: {self.config['net_stop_loss']:.2f}% | Reward: {self.config['net_take_profit']:.2f}%)")
+                print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | Risk: {self.config['risk_per_trade']}% | Balance: ${self.account_balance:.0f}")
+                
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -321,6 +395,10 @@ class EMARSIBot:
         
         qty = float(self.position['size'])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
+        current_price = float(self.price_data['close'].iloc[-1])
+        
+        # FIXED: Use market order for quick exit with realistic slippage
+        execution_price = self.estimate_execution_price(current_price, side, is_limit=False)
         
         try:
             order = self.exchange.place_order(
@@ -333,20 +411,18 @@ class EMARSIBot:
             )
             
             if order.get('retCode') == 0:
-                current = float(self.price_data['close'].iloc[-1])
-                
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=current,
-                        actual_exit=current,
+                        expected_exit=current_price,
+                        actual_exit=execution_price,
                         reason=reason,
-                        fees_entry=-0.04,
-                        fees_exit=0.1
+                        fees_entry=-0.04,  # Maker rebate
+                        fees_exit=0.1      # Taker fee
                     )
                     self.current_trade_id = None
                 
-                print(f"✅ Closed: {reason}")
+                print(f"✅ Closed: {reason} @ ${execution_price:.2f}")
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
@@ -355,12 +431,14 @@ class EMARSIBot:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
-        status_parts = [f"📊 BNB: ${current_price:.2f}"]
+        status_parts = [f"📊 BNB: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
-            status_parts.append(f"📍 {side} @ ${entry:.2f}")
+            size = float(self.position.get('size', 0))
+            pnl = float(self.position.get('unrealisedPnl', 0))
+            status_parts.append(f"📍 {side}: {size:.2f} @ ${entry:.2f} | PnL: ${pnl:.2f}")
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
@@ -396,9 +474,15 @@ class EMARSIBot:
             print("❌ Failed to connect")
             return
         
+        # FIXED: Initialize account and instrument info
+        await self.get_account_balance()
+        await self.get_instrument_info()
+        
         print(f"🔧 FIXED EMA + RSI bot for {self.symbol}")
-        print(f"✅ FIXED: Stop Loss 0.12% → {self.config['net_stop_loss']:.2f}%")
-        print(f"✅ FIXED: Risk:Reward → 1:2 ratio")
+        print(f"✅ FIXED: Risk-based position sizing ({self.config['risk_per_trade']}% per trade)")
+        print(f"✅ FIXED: Proper fee calculations")
+        print(f"✅ FIXED: Realistic slippage modeling ({self.config['slippage_pct']}%)")
+        print(f"💰 Account Balance: ${self.account_balance:.2f}")
         print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
         
         while True:

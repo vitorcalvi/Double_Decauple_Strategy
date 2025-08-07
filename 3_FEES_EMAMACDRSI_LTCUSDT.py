@@ -67,26 +67,18 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
+        # Calculate gross PnL
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
+        # FIXED: Simple fee calculation - maker rebates are positive
+        entry_fee = trade["entry_price"] * trade["qty"] * fees_entry / 100
+        exit_fee = actual_exit * trade["qty"] * fees_exit / 100
+        total_fees = entry_fee + exit_fee
         
-        if fees_entry < 0:
-            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        else:
-            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
-            
-        if fees_exit < 0:
-            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
-        else:
-            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
-        
-        total_fee_impact = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_fee_impact
+        net_pnl = gross_pnl - total_fees  # Subtract fees (negative fees become positive)
         
         log_entry = {
             "id": trade_id,
@@ -102,11 +94,7 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_impact": {
-                "entry": round(entry_rebate, 2), 
-                "exit": round(exit_rebate, 2), 
-                "total": round(total_fee_impact, 2)
-            },
+            "total_fees": round(total_fees, 2),
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -132,23 +120,31 @@ class EMAMACDRSIBot:
         self.price_data = pd.DataFrame()
         self.pending_order = None
         self.last_signal = None
+        self.account_balance = 0
         
         self.order_timeout = 180
         
+        # FIXED CONFIG
         self.config = {
             'timeframe': '5',
             'ema_short': 12,
             'ema_long': 26,
             'macd_signal': 9,
             'rsi_period': 14,
-            'position_size': 100,
+            'risk_per_trade': 1.0,  # FIXED: 1% risk per trade
             'lookback': 100,
             'maker_offset_pct': 0.01,
+            'slippage_pct': 0.02,  # FIXED: Expected slippage
             'net_take_profit': 1.08,
             'net_stop_loss': 0.42,
+            'min_notional': 5,  # FIXED: Minimum trade size
         }
         
-        self.logger = TradeLogger("EMA_MACD_RSI", self.symbol)
+        # FIXED: Get instrument info
+        self.tick_size = 0.01
+        self.qty_step = 1.0  # LTC uses whole numbers
+        
+        self.logger = TradeLogger("EMA_MACD_RSI_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -159,8 +155,81 @@ class EMAMACDRSIBot:
             print(f"❌ Connection error: {e}")
             return False
     
+    async def get_account_balance(self):
+        """FIXED: Get actual account balance"""
+        try:
+            result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if result.get('retCode') == 0:
+                balance_list = result['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            self.account_balance = float(coin['availableToWithdraw'])
+                            return True
+            return False
+        except:
+            self.account_balance = 1000  # Fallback
+            return False
+    
+    async def get_instrument_info(self):
+        """FIXED: Get proper instrument precision"""
+        try:
+            result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
+            if result.get('retCode') == 0:
+                info = result['result']['list'][0]
+                self.tick_size = float(info['priceFilter']['tickSize'])
+                self.qty_step = float(info['lotSizeFilter']['qtyStep'])
+                return True
+            return False
+        except:
+            return False
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """FIXED: Risk-based position sizing"""
+        if self.account_balance <= 0:
+            return 0
+        
+        # Calculate risk amount
+        risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
+        
+        # Calculate stop loss distance
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance == 0:
+            return 0
+        
+        # Calculate position size
+        position_size = risk_amount / stop_distance
+        
+        # Apply minimum notional check
+        notional = position_size * price
+        if notional < self.config['min_notional']:
+            return 0
+        
+        return position_size
+    
+    def format_price(self, price):
+        """FIXED: Format price with proper precision"""
+        return round(price / self.tick_size) * self.tick_size
+    
     def format_qty(self, qty):
-        return str(int(round(qty)))
+        """FIXED: Format quantity with proper precision"""
+        formatted = round(qty / self.qty_step) * self.qty_step
+        return str(int(formatted))
+    
+    def estimate_execution_price(self, market_price, side, is_limit=True):
+        """FIXED: Realistic execution price with slippage"""
+        if is_limit:
+            # Limit orders with maker offset
+            if side == 'BUY':
+                return self.format_price(market_price * (1 - self.config['maker_offset_pct']/100))
+            else:
+                return self.format_price(market_price * (1 + self.config['maker_offset_pct']/100))
+        else:
+            # Market orders with slippage
+            if side == 'BUY':
+                return self.format_price(market_price * (1 + self.config['slippage_pct']/100))
+            else:
+                return self.format_price(market_price * (1 - self.config['slippage_pct']/100))
     
     async def check_pending_orders(self):
         try:
@@ -176,16 +245,14 @@ class EMAMACDRSIBot:
             order = order_list[0]
             age = datetime.now().timestamp() - int(order['createdTime']) / 1000
             
-            if age > self.order_timeout:
+            if age > self.config['order_timeout']:
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
-                print(f"❌ Cancelled stale order (aged {age:.0f}s)")
                 self.pending_order = None
                 return False
             
             self.pending_order = order
             return True
-        except Exception as e:
-            print(f"❌ Order check error: {e}")
+        except:
             return False
     
     def calculate_indicators(self, df):
@@ -253,29 +320,18 @@ class EMAMACDRSIBot:
     
     async def get_market_data(self):
         try:
-            klines = self.exchange.get_kline(
-                category="linear",
-                symbol=self.symbol,
-                interval=self.config['timeframe'],
-                limit=self.config['lookback']
-            )
-            
+            klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
             if klines.get('retCode') != 0:
                 return False
             
             df = pd.DataFrame(klines['result']['list'], 
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-            
+                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            df = df.dropna(subset=['open', 'high', 'low', 'close'])
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
-            
-            return len(self.price_data) >= 20
-        except Exception as e:
-            print(f"❌ Market data error: {e}")
+            return True
+        except:
             return False
     
     async def check_position(self):
@@ -284,62 +340,65 @@ class EMAMACDRSIBot:
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except Exception as e:
-            print(f"❌ Position check error: {e}")
-            self.position = None
+        except:
+            pass
     
     def should_close(self):
         if not self.position:
             return False, ""
         
-        try:
-            current_price = float(self.price_data['close'].iloc[-1])
-            entry_price = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            
-            if entry_price == 0:
-                return False, ""
-            
-            profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
-            
-            if profit_pct >= self.config['net_take_profit']:
-                return True, "take_profit"
-            if profit_pct <= -self.config['net_stop_loss']:
-                return True, "stop_loss"
-            
-            analysis = self.calculate_indicators(self.price_data)
-            if analysis:
-                histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
-                if side == "Buy" and histogram_turning_negative and analysis['rsi'] > 60:
-                    return True, "macd_reversal"
-                
-                histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
-                if side == "Sell" and histogram_turning_positive and analysis['rsi'] < 40:
-                    return True, "macd_reversal"
-            
+        current_price = float(self.price_data['close'].iloc[-1])
+        entry_price = float(self.position.get('avgPrice', 0))
+        
+        if entry_price == 0:
             return False, ""
-        except Exception as e:
-            print(f"❌ Position evaluation error: {e}")
-            return False, ""
+        
+        is_long = self.position.get('side') == "Buy"
+        
+        if is_long:
+            profit_pct = (current_price - entry_price) / entry_price * 100
+        else:
+            profit_pct = (entry_price - current_price) / entry_price * 100
+        
+        if profit_pct >= self.config['net_take_profit']:
+            return True, "take_profit"
+        if profit_pct <= -self.config['net_stop_loss']:
+            return True, "stop_loss"
+        
+        return False, ""
     
     async def execute_trade(self, signal):
         if await self.check_pending_orders() or self.position:
             return
         
-        qty = self.config['position_size'] / signal['price']
+        # FIXED: Update balance and instrument info
+        await self.get_account_balance()
+        
+        market_price = signal['price']
+        is_buy = signal['action'] == 'BUY'
+        
+        # Calculate stop loss price
+        if is_buy:
+            stop_loss_price = market_price * (1 - self.config['net_stop_loss']/100)
+        else:
+            stop_loss_price = market_price * (1 + self.config['net_stop_loss']/100)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(market_price, stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < 1:
+        if float(formatted_qty) < self.qty_step:
+            print(f"⚠️ Position size too small: {formatted_qty}")
             return
         
-        offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 4)
+        # FIXED: Realistic execution price
+        limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
         
         try:
             order = self.exchange.place_order(
                 category="linear", 
                 symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
+                side="Buy" if is_buy else "Sell",
                 orderType="Limit", 
                 qty=formatted_qty, 
                 price=str(limit_price),
@@ -350,20 +409,19 @@ class EMAMACDRSIBot:
                 self.last_signal = signal
                 self.pending_order = order['result']
                 
-                stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
-                take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
+                take_profit = limit_price * (1 + self.config['net_take_profit']/100) if is_buy else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
-                    expected_price=signal['price'],
+                    expected_price=market_price,
                     actual_price=limit_price,
                     qty=float(formatted_qty),
-                    stop_loss=stop_loss,
+                    stop_loss=stop_loss_price,
                     take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}"
+                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_Risk:{self.config['risk_per_trade']}%_Balance:{self.account_balance:.0f}"
                 )
                 
-                print(f"✅ {signal['action']}: {formatted_qty} SOL @ ${limit_price:.4f} | RSI: {signal['rsi']:.1f}")
+                print(f"✅ {signal['action']}: {formatted_qty} LTC @ ${limit_price:.2f} | Risk: {self.config['risk_per_trade']}% | Balance: ${self.account_balance:.0f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -371,38 +429,63 @@ class EMAMACDRSIBot:
         if not self.position:
             return
         
-        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
+        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
+        current_price = float(self.price_data['close'].iloc[-1])
+        
+        # FIXED: Use market order for quick exit with realistic slippage
+        execution_price = self.estimate_execution_price(current_price, side, is_limit=False)
         
         try:
             order = self.exchange.place_order(
-                category="linear", 
-                symbol=self.symbol, 
+                category="linear",
+                symbol=self.symbol,
                 side=side,
-                orderType="Market", 
-                qty=self.format_qty(qty), 
+                orderType="Market",
+                qty=self.format_qty(qty),
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
-                current_price = float(self.price_data['close'].iloc[-1])
-                
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
-                        actual_exit=current_price,
+                        actual_exit=execution_price,
                         reason=reason,
-                        fees_entry=-0.04,
-                        fees_exit=0.1
+                        fees_entry=-0.04,  # Maker rebate
+                        fees_exit=0.1      # Taker fee
                     )
                     self.current_trade_id = None
                 
-                print(f"💰 Position closed: {reason}")
-                self.position = None
-                self.last_signal = None
+                print(f"✅ Closed: {reason} @ ${execution_price:.2f}")
         except Exception as e:
             print(f"❌ Close failed: {e}")
+    
+    def show_status(self):
+        if len(self.price_data) == 0:
+            return
+        
+        current_price = float(self.price_data['close'].iloc[-1])
+        status_parts = [f"📊 LTCUSDT: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
+        
+        if self.position:
+            entry = float(self.position.get('avgPrice', 0))
+            side = self.position.get('side', '')
+            size = float(self.position.get('size', 0))
+            pnl = float(self.position.get('unrealisedPnl', 0))
+            status_parts.append(f"📍 {side}: {size:.2f} @ ${entry:.2f} | PnL: ${pnl:.2f}")
+        elif self.pending_order:
+            order_price = float(self.pending_order.get('price', 0))
+            order_side = self.pending_order.get('side', '')
+            age = int(datetime.now().timestamp() - int(self.pending_order.get('createdTime', 0)) / 1000)
+            status_parts.append(f"⏳ {order_side} @ ${order_price:.2f} ({age}s)")
+        else:
+            indicators = self.calculate_indicators(self.price_data)
+            if indicators:
+                status_parts.append(f"RSI: {indicators['rsi']:.1f} | Trend: {indicators['trend']}")
+        
+        print(" | ".join(status_parts), end='\r')
     
     async def run_cycle(self):
         if not await self.get_market_data():
@@ -419,30 +502,41 @@ class EMAMACDRSIBot:
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
+        
+        self.show_status()
     
     async def run(self):
         if not self.connect():
-            print("❌ Failed to connect to exchange")
+            print("❌ Failed to connect")
             return
         
-        print(f"🚀 EMA+MACD+RSI Bot for {self.symbol}")
-        print(f"⏰ Timeframe: {self.config['timeframe']} min")
-        print(f"🎯 TP: {self.config['net_take_profit']}% | SL: {self.config['net_stop_loss']}%")
+        # FIXED: Initialize account and instrument info
+        await self.get_account_balance()
+        await self.get_instrument_info()
         
-        try:
-            while True:
-                await self.run_cycle()
-                await asyncio.sleep(5)
-        except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user")
+        print(f"🔧 FIXED EMA + RSI bot for {self.symbol}")
+        print(f"✅ FIXED: Risk-based position sizing ({self.config['risk_per_trade']}% per trade)")
+        print(f"✅ FIXED: Proper fee calculations")
+        print(f"✅ FIXED: Realistic slippage modeling ({self.config['slippage_pct']}%)")
+        print(f"💰 Account Balance: ${self.account_balance:.2f}")
+        print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
+        
+        while True:
             try:
-                self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
-            except:
-                pass
-            if self.position:
-                await self.close_position("manual_stop")
-        except Exception as e:
-            print(f"⚠️ Runtime error: {e}")
+                await self.run_cycle()
+                await asyncio.sleep(1)
+            except KeyboardInterrupt:
+                print("\n🛑 Bot stopped")
+                try:
+                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
+                except:
+                    pass
+                if self.position:
+                    await self.close_position("manual_stop")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                await asyncio.sleep(5)
 
 if __name__ == "__main__":
     bot = EMAMACDRSIBot()

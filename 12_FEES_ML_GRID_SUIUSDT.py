@@ -37,12 +37,12 @@ class TradeLogger:
             "side": "LONG" if side == "BUY" else "SHORT",
             "action": "OPEN",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "expected_price": round(expected_price, 4),
-            "actual_price": round(actual_price, 4),
-            "slippage": round(slippage, 4),
+            "expected_price": round(expected_price, 5),
+            "actual_price": round(actual_price, 5),
+            "slippage": round(slippage, 5),
             "qty": round(qty, 6),
-            "stop_loss": round(stop_loss, 4),
-            "take_profit": round(take_profit, 4),
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
             "currency": self.currency,
             "info": info
         }
@@ -66,16 +66,27 @@ class TradeLogger:
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
-        
+        # ✅ FIXED: Proper slippage calculation
         if trade["side"] == "BUY":
+            slippage = actual_exit - expected_exit  # Positive = better exit for long
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
+            slippage = expected_exit - actual_exit  # Positive = better exit for short
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
-        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
-        net_pnl = gross_pnl + entry_rebate + exit_rebate
+        # ✅ FIXED: Proper fee/rebate calculation
+        if fees_entry < 0:  # Maker rebate (negative fee)
+            entry_rebate = abs(fees_entry) / 100 * trade["entry_price"] * trade["qty"]
+        else:  # Taker fee (positive fee)
+            entry_rebate = -fees_entry / 100 * trade["entry_price"] * trade["qty"]
+            
+        if fees_exit < 0:  # Maker rebate (negative fee)
+            exit_rebate = abs(fees_exit) / 100 * actual_exit * trade["qty"]
+        else:  # Taker fee (positive fee)
+            exit_rebate = -fees_exit / 100 * actual_exit * trade["qty"]
+        
+        total_rebates = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_rebates
         
         log_entry = {
             "id": trade_id,
@@ -85,10 +96,10 @@ class TradeLogger:
             "action": "CLOSE",
             "ts": datetime.now(timezone.utc).isoformat(),
             "duration_sec": int(duration),
-            "entry_price": round(trade["entry_price"], 4),
-            "expected_exit": round(expected_exit, 4),
-            "actual_exit": round(actual_exit, 4),
-            "slippage": round(slippage, 4),
+            "entry_price": round(trade["entry_price"], 5),
+            "expected_exit": round(expected_exit, 5),
+            "actual_exit": round(actual_exit, 5),
+            "slippage": round(slippage, 5),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
             "net_pnl": round(net_pnl, 2),
@@ -104,7 +115,7 @@ class TradeLogger:
 
 class MLGridBot:
     def __init__(self):
-        self.symbol = 'EURUSDT'
+        self.symbol = 'SUIUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -114,17 +125,21 @@ class MLGridBot:
         
         self.position = None
         self.price_data = pd.DataFrame()
+        self.account_balance = 0
+        self.instrument_info = {}
         
+        # ✅ FIXED: Proper risk management
         self.config = {
             'timeframe': '5',
-            'base_grid_spacing': 0.5,  # 0.5% base spacing
+            'base_grid_spacing': 0.5,
             'grid_levels': 5,
-            'position_size': 100,
+            'risk_per_trade': 1.0,  # 1% of account per trade
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.75,
             'net_stop_loss': 0.3,
             'ml_threshold': 0.65,
-            'lookback': 100
+            'lookback': 100,
+            'slippage_bps': 5  # 0.5 bps slippage modeling
         }
         
         self.ml_model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
@@ -133,18 +148,98 @@ class MLGridBot:
         self.grid_levels = []
         self.last_grid_level = None
         
-        self.logger = TradeLogger("ML_GRID", self.symbol)
+        self.logger = TradeLogger("ML_GRID_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
-        except:
+        except Exception as e:
+            print(f"❌ Connection error: {e}")
             return False
     
+    async def get_account_balance(self):
+        """✅ FIXED: Get account balance for position sizing"""
+        try:
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if wallet.get('retCode') == 0:
+                balance_info = wallet['result']['list'][0]['coin'][0]
+                self.account_balance = float(balance_info['walletBalance'])
+                return True
+        except Exception as e:
+            print(f"❌ Balance error: {e}")
+            return False
+        return False
+    
+    async def get_instrument_info(self):
+        """✅ FIXED: Get instrument precision for proper formatting"""
+        try:
+            instruments = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
+            if instruments.get('retCode') == 0:
+                info = instruments['result']['list'][0]
+                self.instrument_info = {
+                    'qty_step': float(info['lotSizeFilter']['qtyStep']),
+                    'min_qty': float(info['lotSizeFilter']['minOrderQty']),
+                    'price_precision': len(info['priceFilter']['tickSize'].split('.')[-1])
+                }
+                return True
+        except Exception as e:
+            print(f"❌ Instrument info error: {e}")
+            return False
+        return False
+    
     def format_qty(self, qty):
-        return f"{round(qty / 0.01) * 0.01:.2f}"
+        """✅ FIXED: Proper quantity formatting with instrument precision"""
+        if not self.instrument_info:
+            return "0.01"  # Default fallback
+        
+        qty_step = self.instrument_info['qty_step']
+        min_qty = self.instrument_info['min_qty']
+        
+        if qty < min_qty:
+            return "0"
+        
+        # Round to proper step size
+        rounded_qty = round(qty / qty_step) * qty_step
+        
+        # Format with proper decimals
+        if qty_step >= 1:
+            return str(int(rounded_qty))
+        else:
+            decimals = len(str(qty_step).split('.')[-1])
+            return f"{rounded_qty:.{decimals}f}"
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """✅ FIXED: Risk-based position sizing"""
+        if self.account_balance == 0:
+            return 0
+        
+        risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100)
+        risk_per_unit = abs(price - stop_loss_price)
+        
+        if risk_per_unit == 0:
+            return 0
+        
+        position_size = risk_amount / risk_per_unit
+        return min(position_size, self.account_balance / price * 0.95)  # Max 95% of balance
+    
+    def apply_slippage(self, price, side, order_type="LIMIT"):
+        """✅ FIXED: Realistic slippage modeling"""
+        slippage_factor = self.config['slippage_bps'] / 10000  # Convert bps to decimal
+        
+        if order_type == "MARKET":
+            # Market orders get full slippage
+            if side in ["BUY", "Buy"]:
+                return price * (1 + slippage_factor)
+            else:
+                return price * (1 - slippage_factor)
+        else:
+            # Limit orders get partial fill slippage
+            if side in ["BUY", "Buy"]:
+                return price * (1 + slippage_factor * 0.3)  # 30% of full slippage
+            else:
+                return price * (1 - slippage_factor * 0.3)
     
     def prepare_features(self, df):
         if len(df) < 30:
@@ -153,22 +248,26 @@ class MLGridBot:
         features = []
         
         # Price features
-        features.append(df['close'].pct_change().iloc[-1])
+        features.append(df['close'].pct_change().iloc[-1] or 0)
         features.append((df['high'].iloc[-1] - df['low'].iloc[-1]) / df['close'].iloc[-1])
-        features.append((df['close'].iloc[-1] - df['close'].rolling(10).mean().iloc[-1]) / df['close'].iloc[-1])
+        
+        sma_10 = df['close'].rolling(10).mean().iloc[-1]
+        features.append((df['close'].iloc[-1] - sma_10) / df['close'].iloc[-1] if sma_10 > 0 else 0)
         
         # Volume features
-        features.append(df['volume'].iloc[-1] / df['volume'].rolling(20).mean().iloc[-1])
+        vol_sma = df['volume'].rolling(20).mean().iloc[-1]
+        features.append(df['volume'].iloc[-1] / vol_sma if vol_sma > 0 else 1)
         
         # RSI
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + gain / loss))
+        rsi = 100 - (100 / (1 + gain / (loss + 1e-10)))
         features.append(rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50)
         
         # Volatility
-        features.append(df['close'].rolling(20).std().iloc[-1] / df['close'].iloc[-1])
+        vol = df['close'].rolling(20).std().iloc[-1]
+        features.append(vol / df['close'].iloc[-1] if vol > 0 else 0.01)
         
         return np.array(features).reshape(1, -1)
     
@@ -234,7 +333,6 @@ class MLGridBot:
         if features is None:
             return 0.5
         
-        # Use model's prediction confidence
         features_scaled = self.scaler.transform(features)
         predictions = []
         
@@ -242,7 +340,7 @@ class MLGridBot:
             predictions.append(estimator.predict(features_scaled)[0])
         
         std_dev = np.std(predictions)
-        confidence = 1 - min(std_dev * 2, 1)
+        confidence = max(0, 1 - min(std_dev * 2, 1))
         
         return confidence
     
@@ -301,7 +399,8 @@ class MLGridBot:
             
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
-        except:
+        except Exception as e:
+            print(f"❌ Market data error: {e}")
             return False
     
     async def check_position(self):
@@ -310,7 +409,8 @@ class MLGridBot:
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except:
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
             pass
     
     def should_close(self):
@@ -340,14 +440,25 @@ class MLGridBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        qty = self.config['position_size'] / signal['price']
+        # Calculate stop loss price
+        stop_loss_distance = self.config['net_stop_loss'] / 100
+        if signal['action'] == 'BUY':
+            stop_loss_price = signal['price'] * (1 - stop_loss_distance)
+        else:
+            stop_loss_price = signal['price'] * (1 + stop_loss_distance)
+        
+        # ✅ FIXED: Risk-based position sizing
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < 0.01:
+        if formatted_qty == "0" or float(formatted_qty) == 0:
+            print("❌ Position size too small or zero balance")
             return
         
+        # ✅ FIXED: Apply realistic slippage
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
-        limit_price = round(signal['price'] * offset, 5)
+        limit_price = round(signal['price'] * offset, self.instrument_info.get('price_precision', 5))
+        expected_fill_price = self.apply_slippage(limit_price, signal['action'], "LIMIT")
         
         try:
             order = self.exchange.place_order(
@@ -361,22 +472,23 @@ class MLGridBot:
             )
             
             if order.get('retCode') == 0:
-                stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
+                stop_loss = stop_loss_price
                 take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
-                    actual_price=limit_price,
+                    actual_price=expected_fill_price,  # Use slippage-adjusted price
                     qty=float(formatted_qty),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    info=f"ml_conf:{signal['ml_confidence']:.2f}_spacing:{signal['grid_spacing']:.2f}%"
+                    info=f"ml_conf:{signal['ml_confidence']:.2f}_spacing:{signal['grid_spacing']:.2f}%_risk:{self.config['risk_per_trade']}%"
                 )
                 
                 print(f"🤖 ML GRID {signal['action']}: {formatted_qty} @ ${limit_price:.5f}")
                 print(f"   📊 ML Confidence: {signal['ml_confidence']:.2f}")
                 print(f"   📏 Grid Spacing: {signal['grid_spacing']:.2f}%")
+                print(f"   💰 Risk: {self.config['risk_per_trade']}% of ${self.account_balance:.0f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -387,6 +499,10 @@ class MLGridBot:
         current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
+        
+        # ✅ FIXED: Apply slippage to exit
+        expected_exit = current_price
+        actual_exit = self.apply_slippage(current_price, side, "MARKET")
         
         try:
             order = self.exchange.place_order(
@@ -402,16 +518,18 @@ class MLGridBot:
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=current_price,
-                        reason=reason
+                        expected_exit=expected_exit,
+                        actual_exit=actual_exit,
+                        reason=reason,
+                        fees_entry=-0.04,  # Maker rebate
+                        fees_exit=0.05     # Taker fee
                     )
                     self.current_trade_id = None
                 
                 print(f"✅ Closed: {reason}")
                 self.last_grid_level = None
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Close failed: {e}")
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -419,8 +537,10 @@ class MLGridBot:
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n🤖 ML Grid Trading - {self.symbol}")
+        print(f"\n🤖 FIXED ML Grid Trading - {self.symbol}")
         print(f"💰 Price: ${current_price:.5f}")
+        print(f"💳 Balance: ${self.account_balance:.2f}")
+        print(f"🎯 Risk per trade: {self.config['risk_per_trade']}%")
         
         if self.model_trained:
             ml_conf = self.get_ml_confidence(self.price_data)
@@ -462,10 +582,20 @@ class MLGridBot:
             print("❌ Failed to connect")
             return
         
-        print(f"🤖 ML-Optimized Grid Trading Bot - {self.symbol}")
+        # ✅ FIXED: Initialize account info
+        await self.get_account_balance()
+        await self.get_instrument_info()
+        
+        if self.account_balance == 0:
+            print("❌ No account balance found")
+            return
+        
+        print(f"🤖 FIXED ML-Optimized Grid Trading Bot - {self.symbol}")
         print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
-        print(f"🎯 Dynamic grid spacing with ML optimization")
-        print(f"💎 Target win rate: 73%")
+        print(f"💰 Account Balance: ${self.account_balance:.2f}")
+        print(f"🎯 Risk per trade: {self.config['risk_per_trade']}%")
+        print(f"📏 Slippage modeling: {self.config['slippage_bps']} bps")
+        print(f"✅ FIXES: Position sizing, fees, slippage")
         
         try:
             while True:

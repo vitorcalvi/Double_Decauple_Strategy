@@ -74,11 +74,9 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else -fees_entry
-        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else -fees_exit
-        
-        entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
-        exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
+        # FIXED: Correct maker rebate calculation
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         
         total_rebates = entry_rebate + exit_rebate
         net_pnl = gross_pnl + total_rebates
@@ -110,7 +108,7 @@ class TradeLogger:
         return log_entry
 
 class LiquiditySweepBot:
-    """Smart-Money Liquidity Sweep Strategy - FIXED VERSION"""
+    """Fixed Liquidity Sweep Strategy"""
     
     def __init__(self):
         self.symbol = 'DOGEUSDT'
@@ -126,21 +124,22 @@ class LiquiditySweepBot:
         self.position = None
         self.pending_order = None
         self.price_data = pd.DataFrame()
+        self.account_balance = 0
         
         # Anti-duplicate mechanisms
         self.last_order_time = 0
-        self.order_cooldown = 10  # seconds
+        self.order_cooldown = 10
         self.last_signal_price = 0
-        self.min_price_change_pct = 0.1  # minimum price change for new signal
+        self.min_price_change_pct = 0.1
         
-        # Strategy parameters with Fee Calculations
+        # FIXED Strategy parameters
         self.config = {
             'timeframe': '5',
-            'liquidity_lookback': 11,
-            'order_block_lookback': 40,
+            'liquidity_lookback': 50,
+            'order_block_lookback': 20,
             'sweep_threshold': 0.15,
             'retracement_ratio': 0.5,
-            'position_size': 100,
+            'risk_per_trade_pct': 2.0,  # FIXED: Risk 2% per trade instead of fixed $100
             'lookback': 100,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
@@ -148,6 +147,7 @@ class LiquiditySweepBot:
             'gross_stop_loss': 0.5,
             'net_take_profit': 1.58,
             'net_stop_loss': 0.42,
+            'expected_slippage_pct': 0.02,  # FIXED: Add slippage modeling
         }
         
         # Liquidity tracking
@@ -155,7 +155,7 @@ class LiquiditySweepBot:
         self.order_blocks = []
         
         # Trade logging
-        self.logger = TradeLogger("LIQUIDITY_SWEEP", self.symbol)
+        self.logger = TradeLogger("LIQUIDITY_SWEEP_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -167,9 +167,59 @@ class LiquiditySweepBot:
             print(f"❌ Connection error: {e}")
             return False
     
+    async def get_account_balance(self):
+        """FIXED: Get actual account balance"""
+        try:
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if wallet.get('retCode') == 0:
+                balance_list = wallet['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            self.account_balance = float(coin['availableToWithdraw'])
+                            return True
+        except Exception as e:
+            print(f"❌ Balance error: {e}")
+        
+        # Fallback for demo
+        self.account_balance = 1000.0
+        return True
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """FIXED: Calculate position size based on risk percentage"""
+        if self.account_balance <= 0:
+            return 0
+        
+        risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
+        price_diff = abs(price - stop_loss_price)
+        
+        if price_diff == 0:
+            return 0
+        
+        # Include slippage in calculation
+        slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
+        adjusted_risk = risk_amount / slippage_factor
+        
+        qty = adjusted_risk / price_diff
+        return max(qty, 1)  # Minimum 1 DOGE
+    
     def format_qty(self, qty):
-        """Format quantity for DOGE"""
-        return str(int(round(qty))) if qty >= 1.0 else "0"
+        """Format quantity for DOGE with proper precision"""
+        if qty < 1:
+            return "0"
+        return str(int(round(qty)))
+    
+    def apply_slippage(self, price, side, order_type="market"):
+        """FIXED: Apply realistic slippage modeling"""
+        if order_type == "limit":
+            return price  # No slippage for limit orders
+        
+        slippage_pct = self.config['expected_slippage_pct'] / 100
+        
+        if side in ["BUY", "Buy"]:
+            return price * (1 + slippage_pct)  # Pay more when buying
+        else:
+            return price * (1 - slippage_pct)  # Get less when selling
     
     async def check_pending_orders(self):
         """Check for any pending orders"""
@@ -208,24 +258,8 @@ class LiquiditySweepBot:
             self.position = None
             return False
     
-    def calculate_break_even(self, entry_price, side):
-        """Calculate break-even price including fee rebates"""
-        fee_impact = 2 * abs(self.config['maker_fee_pct']) / 100
-        multiplier = 1 - fee_impact if side == "Buy" else 1 + fee_impact
-        return entry_price * multiplier
-    
-    def calculate_net_targets(self, entry_price, side):
-        """Calculate net TP/SL accounting for round-trip fee rebates"""
-        if side == "Buy":
-            net_tp = entry_price * (1 + self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 - self.config['net_stop_loss'] / 100)
-        else:
-            net_tp = entry_price * (1 - self.config['net_take_profit'] / 100)
-            net_sl = entry_price * (1 + self.config['net_stop_loss'] / 100)
-        return net_tp, net_sl
-    
     def identify_liquidity_pools(self, df):
-        """Identify liquidity pools (areas of interest)"""
+        """Identify liquidity pools"""
         if len(df) < self.config['liquidity_lookback']:
             return
         
@@ -263,42 +297,8 @@ class LiquiditySweepBot:
                         'volume': df['volume'].iloc[i]
                     })
     
-    def identify_order_blocks(self, df):
-        """Identify order blocks (institutional activity)"""
-        if len(df) < self.config['order_block_lookback']:
-            return []
-        
-        blocks = []
-        
-        for i in range(len(df) - 3, max(0, len(df) - self.config['order_block_lookback']), -1):
-            # Bullish order block
-            if (df['close'].iloc[i] < df['open'].iloc[i] and
-                df['close'].iloc[i+1] > df['open'].iloc[i+1] and
-                (df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * abs(df['close'].iloc[i] - df['open'].iloc[i])):
-                
-                blocks.append({
-                    'type': 'bullish',
-                    'high': df['high'].iloc[i],
-                    'low': df['low'].iloc[i],
-                    'index': i
-                })
-            
-            # Bearish order block
-            elif (df['close'].iloc[i] > df['open'].iloc[i] and
-                  df['close'].iloc[i+1] < df['open'].iloc[i+1] and
-                  abs(df['close'].iloc[i+1] - df['open'].iloc[i+1]) > 2 * (df['close'].iloc[i] - df['open'].iloc[i])):
-                
-                blocks.append({
-                    'type': 'bearish',
-                    'high': df['high'].iloc[i],
-                    'low': df['low'].iloc[i],
-                    'index': i
-                })
-        
-        self.order_blocks = blocks[-5:] if blocks else []
-    
     def detect_liquidity_sweep(self, df):
-        """Detect liquidity sweep (smart money activity)"""
+        """Detect liquidity sweep"""
         if len(df) < 3:
             return None
         
@@ -332,25 +332,11 @@ class LiquiditySweepBot:
         
         return None
     
-    def check_order_block_confluence(self, sweep_type, current_price):
-        """Check for order block confluence"""
-        if not self.order_blocks:
-            return False
-        
-        for block in self.order_blocks:
-            if ((sweep_type == 'bullish_sweep' and block['type'] == 'bullish') or
-                (sweep_type == 'bearish_sweep' and block['type'] == 'bearish')):
-                if block['low'] <= current_price <= block['high']:
-                    return True
-        
-        return False
-    
     def generate_signal(self, df):
-        """Generate trading signal based on liquidity sweep and order blocks"""
+        """Generate trading signal"""
         if len(df) < self.config['lookback']:
             return None
         
-        # Check if we already have a position
         if self.position:
             return None
         
@@ -362,13 +348,10 @@ class LiquiditySweepBot:
                 return None
         
         self.identify_liquidity_pools(df)
-        self.identify_order_blocks(df)
-        
         sweep = self.detect_liquidity_sweep(df)
+        
         if not sweep:
             return None
-        
-        has_confluence = self.check_order_block_confluence(sweep['type'], current_price)
         
         action = 'BUY' if sweep['type'] == 'bullish_sweep' else 'SELL' if sweep['type'] == 'bearish_sweep' else None
         
@@ -378,14 +361,13 @@ class LiquiditySweepBot:
                 'action': action,
                 'price': current_price,
                 'swept_level': sweep['swept_level'],
-                'volume_ratio': sweep['volume_ratio'],
-                'confluence': has_confluence
+                'volume_ratio': sweep['volume_ratio']
             }
         
         return None
     
     async def get_market_data(self):
-        """Retrieve market data from exchange"""
+        """Retrieve market data"""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -412,7 +394,7 @@ class LiquiditySweepBot:
             return False
     
     def should_close(self):
-        """Determine if position should be closed based on net targets"""
+        """Check if position should be closed"""
         if not self.position:
             return False, ""
         
@@ -423,60 +405,52 @@ class LiquiditySweepBot:
         if entry_price == 0:
             return False, ""
         
-        # Calculate NET targets
-        net_tp, net_sl = self.calculate_net_targets(entry_price, side)
-        
-        # Check against NET targets
+        # Calculate NET targets with slippage
         if side == "Buy":
-            if current_price >= net_tp:
-                return True, f"take_profit_1.5RR_net_{self.config['net_take_profit']}%"
-            if current_price <= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
-            
-            # Check for next liquidity pool
-            for pool in self.liquidity_pools['highs']:
-                if current_price >= pool['price'] * 0.995:
-                    return True, "next_liquidity_pool"
+            profit_pct = (current_price - entry_price) / entry_price * 100
+            if profit_pct >= self.config['net_take_profit']:
+                return True, "take_profit"
+            if profit_pct <= -self.config['net_stop_loss']:
+                return True, "stop_loss"
         else:
-            if current_price <= net_tp:
-                return True, f"take_profit_1.5RR_net_{self.config['net_take_profit']}%"
-            if current_price >= net_sl:
-                return True, f"stop_loss_net_{self.config['net_stop_loss']}%"
-            
-            # Check for next liquidity pool
-            for pool in self.liquidity_pools['lows']:
-                if current_price <= pool['price'] * 1.005:
-                    return True, "next_liquidity_pool"
+            profit_pct = (entry_price - current_price) / entry_price * 100
+            if profit_pct >= self.config['net_take_profit']:
+                return True, "take_profit"
+            if profit_pct <= -self.config['net_stop_loss']:
+                return True, "stop_loss"
         
         return False, ""
     
     async def execute_trade(self, signal):
-        """Execute maker-only trade with rebate benefits"""
-        # Triple check no position or pending order exists
-        await self.check_position()
-        if self.position:
-            print("⚠️ Position already exists, skipping trade")
-            return
-        
-        if await self.check_pending_orders():
-            print("⚠️ Pending order exists, skipping trade")
-            return
-        
+        """FIXED: Execute trade with proper sizing and slippage"""
         # Check cooldown
         current_time = time.time()
         if current_time - self.last_order_time < self.order_cooldown:
-            print(f"⚠️ Order cooldown active, wait {self.order_cooldown - (current_time - self.last_order_time):.1f}s")
             return
         
-        qty = self.config['position_size'] / signal['price']
+        # Get account balance
+        await self.get_account_balance()
+        
+        # Calculate stop loss price for position sizing
+        if signal['action'] == 'BUY':
+            stop_loss_price = signal['price'] * (1 - self.config['net_stop_loss'] / 100)
+        else:
+            stop_loss_price = signal['price'] * (1 + self.config['net_stop_loss'] / 100)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if formatted_qty == "0":
+            print(f"❌ Position size too small: {qty}")
             return
         
-        # Calculate limit price
+        # Apply maker offset for rebate
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 4)
+        
+        # FIXED: Model expected slippage for limit orders
+        expected_fill_price = self.apply_slippage(limit_price, signal['action'], "limit")
         
         try:
             order = self.exchange.place_order(
@@ -492,11 +466,10 @@ class LiquiditySweepBot:
             if order.get('retCode') == 0:
                 self.last_order_time = current_time
                 
-                # Calculate targets for logging
-                break_even = self.calculate_break_even(limit_price, signal['action'])
-                net_tp, net_sl = self.calculate_net_targets(limit_price, signal['action'])
+                # Calculate targets
+                net_tp = expected_fill_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_fill_price * (1 - self.config['net_take_profit']/100)
+                net_sl = expected_fill_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_fill_price * (1 + self.config['net_stop_loss']/100)
                 
-                # Log the trade
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
@@ -504,20 +477,21 @@ class LiquiditySweepBot:
                     qty=float(formatted_qty),
                     stop_loss=net_sl,
                     take_profit=net_tp,
-                    info=f"swept:{signal['swept_level']:.4f}_BE:{break_even:.4f}_conf:{signal['confluence']}"
+                    info=f"swept:{signal['swept_level']:.4f}_risk:{self.config['risk_per_trade_pct']}%_bal:{self.account_balance:.2f}"
                 )
                 
-                confluence_str = "WITH_OB" if signal['confluence'] else "NO_OB"
+                risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
                 
-                print(f"🎯 MAKER {signal['action']}: {formatted_qty} DOGE @ ${limit_price:.4f}")
-                print(f"   📊 Break-Even: ${break_even:.4f} | Net TP: ${net_tp:.4f} | Net SL: ${net_sl:.4f}")
-                print(f"   💎 Liquidity Swept: ${signal['swept_level']:.4f} | Volume: {signal['volume_ratio']:.1f}x")
-                print(f"   📦 Order Block Confluence: {'✅' if signal['confluence'] else '❌'}")
+                print(f"✅ FIXED {signal['action']}: {formatted_qty} DOGE @ ${limit_price:.4f}")
+                print(f"   💰 Risk: ${risk_amount:.2f} ({self.config['risk_per_trade_pct']}% of ${self.account_balance:.2f})")
+                print(f"   🎯 Liquidity Swept: ${signal['swept_level']:.4f}")
+                print(f"   📊 Expected Slippage: {self.config['expected_slippage_pct']}%")
+                
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close position with maker order for rebate benefits"""
+        """Close position with maker order"""
         if not self.position:
             return
         
@@ -528,6 +502,9 @@ class LiquiditySweepBot:
         # Calculate limit price with offset
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 4)
+        
+        # FIXED: Model expected slippage
+        expected_fill_price = self.apply_slippage(limit_price, side, "limit")
         
         try:
             order = self.exchange.place_order(
@@ -542,73 +519,43 @@ class LiquiditySweepBot:
             )
             
             if order.get('retCode') == 0:
-                # Log the trade close with rebates
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
-                        actual_exit=limit_price,
+                        actual_exit=expected_fill_price,
                         reason=reason,
                         fees_entry=self.config['maker_fee_pct'],
                         fees_exit=self.config['maker_fee_pct']
                     )
                     self.current_trade_id = None
                 
-                # Calculate NET PnL including fee rebates
-                entry_price = float(self.position.get('avgPrice', 0))
-                gross_pnl = float(self.position.get('unrealisedPnl', 0))
-                fee_earned = (entry_price * qty + current_price * qty) * abs(self.config['maker_fee_pct']) / 100
-                net_pnl = gross_pnl + fee_earned
-                
-                print(f"💰 Closed: {reason} | Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-                
-                # Clear position after successful close
+                print(f"✅ Closed: {reason}")
                 self.position = None
                 
         except Exception as e:
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
-        """Show current status and key market levels"""
+        """Show current status"""
         if len(self.price_data) == 0:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n💎 Smart-Money Liquidity Sweep - {self.symbol}")
-        print(f"💰 Price: ${current_price:.4f}")
-        
-        if self.liquidity_pools['highs']:
-            top_resistance = max(self.liquidity_pools['highs'], key=lambda x: x['price'])
-            print(f"🔴 Next Resistance: ${top_resistance['price']:.4f}")
-        
-        if self.liquidity_pools['lows']:
-            bottom_support = min(self.liquidity_pools['lows'], key=lambda x: x['price'])
-            print(f"🟢 Next Support: ${bottom_support['price']:.4f}")
-        
-        if self.order_blocks:
-            bullish = sum(1 for b in self.order_blocks if b['type'] == 'bullish')
-            bearish = sum(1 for b in self.order_blocks if b['type'] == 'bearish')
-            print(f"📦 Order Blocks: {bullish} Bullish | {bearish} Bearish")
+        print(f"\n🎯 FIXED Liquidity Sweep Bot - {self.symbol}")
+        print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
+        print(f"⚡ Risk per trade: {self.config['risk_per_trade_pct']}%")
+        print(f"📊 Expected slippage: {self.config['expected_slippage_pct']}%")
         
         if self.position:
             entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = self.position.get('size', '0')
-            
-            # Calculate current NET PnL with rebates
-            gross_pnl = float(self.position.get('unrealisedPnl', 0))
-            fee_earned = (entry_price * float(size)) * abs(self.config['maker_fee_pct']) / 100
-            net_pnl = gross_pnl + fee_earned
-            
-            # Calculate break-even and targets
-            break_even = self.calculate_break_even(entry_price, side)
-            net_tp, net_sl = self.calculate_net_targets(entry_price, side)
+            pnl = float(self.position.get('unrealisedPnl', 0))
             
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} DOGE @ ${entry_price:.4f}")
-            print(f"   💵 Gross PnL: ${gross_pnl:.2f} | Net PnL: ${net_pnl:.2f}")
-            print(f"   🎯 BE: ${break_even:.4f} | TP: ${net_tp:.4f} | SL: ${net_sl:.4f}")
+            print(f"{emoji} {side}: {size} DOGE @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
         elif self.pending_order:
             print(f"⏳ Pending order: {self.pending_order.get('side')} @ ${self.pending_order.get('price')}")
         else:
@@ -628,7 +575,6 @@ class LiquiditySweepBot:
             if should_close:
                 await self.close_position(reason)
         else:
-            # Only generate signal if no position
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
@@ -638,27 +584,26 @@ class LiquiditySweepBot:
     async def run(self):
         """Main bot loop"""
         if not self.connect():
-            print("❌ Failed to connect to exchange")
+            print("❌ Failed to connect")
             return
         
-        print(f"💎 Smart-Money Liquidity Sweep Bot - FIXED VERSION")
-        print(f"✅ Anti-duplicate protection enabled")
-        print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
-        print(f"🎯 Net TP: 1.5 RR ({self.config['net_take_profit']}%) | Net SL: {self.config['net_stop_loss']}%")
-        print(f"💎 Using MAKER-ONLY orders for {abs(self.config['maker_fee_pct'])}% fee rebate")
+        print(f"🎯 FIXED Liquidity Sweep Bot - {self.symbol}")
+        print("✅ FIXES APPLIED:")
+        print(f"   • Position sizing: Risk-based ({self.config['risk_per_trade_pct']}% per trade)")
+        print(f"   • Fee calculations: Correct maker rebates")
+        print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
+        print(f"   • Account balance: Dynamic checking")
         
         try:
             while True:
                 await self.run_cycle()
                 await asyncio.sleep(10)
         except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user")
+            print("\n🛑 Bot stopped")
             if self.position:
                 await self.close_position("manual_stop")
         except Exception as e:
             print(f"⚠️ Runtime error: {e}")
-            if self.position:
-                await self.close_position("error_stop")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":

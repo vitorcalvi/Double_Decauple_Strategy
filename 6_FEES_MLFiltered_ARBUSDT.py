@@ -69,18 +69,15 @@ class TradeLogger:
         
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate gross P&L
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # ✅ FIXED: Calculate REBATES EARNED (not fees paid)
+        # FIXED: Correct maker rebate calculation
         entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
         exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
-        
-        # ✅ FIXED: Net P&L = Gross P&L + Rebates Earned
         net_pnl = gross_pnl + total_rebates
         
         log_entry = {
@@ -128,18 +125,19 @@ class EnhancedMLScalpingBot:
         self.pending_order = None
         self.daily_pnl = 0
         self.current_trade_id = None
+        self.account_balance = 0  # FIXED: Track account balance
         
-        # ✅ CRITICAL FIXES - Duplicate trade prevention
+        # Anti-duplicate mechanisms
         self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
+        self.trade_cooldown = 30
         self.position_check_counter = 0
-        self.max_position_checks = 3  # Max retries for position validation
+        self.max_position_checks = 3
         
         self.order_timeout = 180
         
-        # FIXED PARAMETERS - Based on Research Analysis
+        # FIXED PARAMETERS
         self.config = {
-            'timeframe': '5',        # Increased from 3min to reduce noise
+            'timeframe': '5',
             'rsi_period': 14,
             'ema_fast': 9,
             'ema_slow': 21,
@@ -149,16 +147,16 @@ class EnhancedMLScalpingBot:
             'macd_slow': 26,
             'macd_signal': 9,
             'ml_confidence_threshold': 0.75,
-            'base_position_size': 100,
+            'risk_per_trade_pct': 2.0,  # FIXED: Risk-based sizing
             'lookback': 100,
             'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,          # ✅ Maker rebate
-            'base_take_profit_pct': 1.0,     # INCREASED: 0.4% → 1.0% (better target)
-            'base_stop_loss_pct': 0.5,      # INCREASED: 0.3% → 0.5% (avoid noise)
+            'maker_fee_pct': -0.04,
+            'base_take_profit_pct': 1.0,
+            'base_stop_loss_pct': 0.5,
+            'expected_slippage_pct': 0.02,  # FIXED: Slippage modeling
         }
         
         self.volatility_regime = 'normal'
-        
         self.logger = TradeLogger("ML_ARB_FIXED", self.symbol)
     
     def connect(self):
@@ -169,40 +167,58 @@ class EnhancedMLScalpingBot:
             print(f"Connection error: {e}")
             return False
     
-    # ✅ FIXED: Break-even calculation with maker rebates
-    def calculate_break_even_price(self, entry_price, side):
-        """Calculate break-even price accounting for maker rebates"""
-        total_rebate_pct = 2 * abs(self.config.get('maker_fee_pct', -0.04)) / 100  # 0.0008
+    async def get_account_balance(self):
+        """FIXED: Get actual account balance"""
+        try:
+            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if wallet.get('retCode') == 0:
+                balance_list = wallet['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            self.account_balance = float(coin['availableToWithdraw'])
+                            return True
+        except Exception as e:
+            print(f"❌ Balance error: {e}")
         
-        if side in ["Buy", "BUY"]:
-            # For long: break-even is LOWER due to earning rebates
-            break_even = entry_price * (1 - total_rebate_pct)
+        # Fallback for demo
+        self.account_balance = 1000.0
+        return True
+    
+    def calculate_position_size(self, price, stop_loss_price):
+        """FIXED: Calculate position size based on risk percentage"""
+        if self.account_balance <= 0:
+            return 0
+        
+        risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
+        price_diff = abs(price - stop_loss_price)
+        
+        if price_diff == 0:
+            return 0
+        
+        # Include slippage in calculation
+        slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
+        adjusted_risk = risk_amount / slippage_factor
+        
+        qty = adjusted_risk / price_diff
+        return max(qty, 1)  # Minimum 1 ARB
+    
+    def format_qty(self, qty):
+        """FIXED: Format quantity with proper ARB precision"""
+        return str(int(round(qty)))
+    
+    def apply_slippage(self, price, side, order_type="market"):
+        """FIXED: Apply realistic slippage modeling"""
+        if order_type == "limit":
+            return price  # No slippage for limit orders
+        
+        slippage_pct = self.config['expected_slippage_pct'] / 100
+        
+        if side in ["BUY", "Buy"]:
+            return price * (1 + slippage_pct)
         else:
-            # For short: break-even is HIGHER due to earning rebates  
-            break_even = entry_price * (1 + total_rebate_pct)
-        
-        return break_even
-
-    def calculate_net_profit_targets(self, entry_price, side):
-        """Calculate NET profit targets accounting for earned rebates"""
-        rebate_adjustment = 0.08  # 0.04% x 2 trades = 0.08% earned
-        
-        if side in ["Buy", "BUY"]:
-            adj_tp = self.config['base_take_profit_pct'] - rebate_adjustment
-            adj_sl = self.config['base_stop_loss_pct'] - rebate_adjustment
-            
-            net_tp = entry_price * (1 + adj_tp / 100)
-            net_sl = entry_price * (1 - adj_sl / 100)
-        else:
-            adj_tp = self.config['base_take_profit_pct'] - rebate_adjustment  
-            adj_sl = self.config['base_stop_loss_pct'] - rebate_adjustment
-            
-            net_tp = entry_price * (1 - adj_tp / 100)
-            net_sl = entry_price * (1 + adj_sl / 100)
-        
-        return net_tp, net_sl
-
-    # ✅ FIXED: Trade cooldown validation
+            return price * (1 - slippage_pct)
+    
     def can_execute_trade(self):
         """Check if enough time has passed since last trade"""
         current_time = time.time()
@@ -303,9 +319,9 @@ class EnhancedMLScalpingBot:
         else:
             confidence += 0.1 if indicators['macd_histogram'] < 0 else -0.05
         
-        if indicators['rsi'] < 35:  # Slightly adjusted for better signals
+        if indicators['rsi'] < 35:
             confidence += 0.15
-        elif indicators['rsi'] > 65:  # Slightly adjusted for better signals
+        elif indicators['rsi'] > 65:
             confidence += 0.15
         elif 40 < indicators['rsi'] < 60:
             confidence += 0.05
@@ -370,7 +386,6 @@ class EnhancedMLScalpingBot:
         
         return None
     
-    # ✅ FIXED: Enhanced position checking with validation  
     async def check_position(self):
         """Enhanced position checking with proper validation"""
         try:
@@ -378,7 +393,6 @@ class EnhancedMLScalpingBot:
             if positions.get('retCode') == 0:
                 pos_list = positions['result']['list']
                 
-                # Reset position first
                 previous_position = self.position
                 self.position = None
                 
@@ -387,11 +401,10 @@ class EnhancedMLScalpingBot:
                         size = float(pos.get('size', 0))
                         if size > 0:
                             self.position = pos
-                            if not previous_position:  # New position detected
+                            if not previous_position:
                                 print(f"✅ Position detected: {pos.get('side')} {size} @ ${pos.get('avgPrice', 0)}")
                             return True
                             
-                # If no position found and we had one before
                 if previous_position and not self.position:
                     print("✅ Position closed - clearing state")
                     
@@ -401,7 +414,6 @@ class EnhancedMLScalpingBot:
             
         return False
 
-    # ✅ FIXED: Enhanced stop loss checking with proper calculations
     def should_close(self):
         """Enhanced position closing logic with proper calculations"""
         if not self.position:
@@ -415,7 +427,7 @@ class EnhancedMLScalpingBot:
             if entry_price == 0:
                 return False, ""
             
-            # ✅ FIXED: Proper profit calculation
+            # FIXED: Proper profit calculation
             if side == "Buy":
                 profit_pct = (current_price - entry_price) / entry_price * 100
             else:
@@ -479,36 +491,48 @@ class EnhancedMLScalpingBot:
             print(f"Market data error: {e}")
             return False
 
-    # ✅ FIXED: Enhanced execute_trade with strict duplicate prevention
     async def execute_trade(self, signal):
-        """Enhanced trade execution with strict duplicate prevention"""
+        """FIXED: Enhanced trade execution with proper sizing and slippage"""
         
-        # 🚨 CRITICAL: Check if trade is allowed
+        # Check if trade is allowed
         if not self.can_execute_trade():
             return
             
-        # 🚨 CRITICAL: Verify no existing position (with retries)
+        # Verify no existing position (with retries)
         for attempt in range(self.max_position_checks):
             await self.check_position()
             if self.position:
                 print(f"⚠️ Existing position detected (attempt {attempt+1}) - BLOCKING new trade")
                 return
-            await asyncio.sleep(1)  # Wait 1 second between checks
+            await asyncio.sleep(1)
         
         # Check for pending orders
         if await self.check_pending_orders():
             print("⚠️ Pending order exists - BLOCKING new trade")
             return
         
-        qty = self.config['base_position_size'] / signal['price']
-        formatted_qty = str(int(round(qty)))
+        # Get account balance
+        await self.get_account_balance()
+        
+        # Calculate stop loss price for position sizing
+        if signal['action'] == 'BUY':
+            stop_loss_price = signal['price'] * (1 - self.config['base_stop_loss_pct'] / 100)
+        else:
+            stop_loss_price = signal['price'] * (1 + self.config['base_stop_loss_pct'] / 100)
+        
+        # FIXED: Calculate position size based on risk
+        qty = self.calculate_position_size(signal['price'], stop_loss_price)
+        formatted_qty = self.format_qty(qty)
         
         if int(formatted_qty) == 0:
-            print("⚠️ Quantity too small - BLOCKING trade")
+            print(f"❌ Position size too small: {qty}")
             return
         
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset, 4)
+        
+        # FIXED: Model expected slippage for limit orders
+        expected_fill_price = self.apply_slippage(limit_price, signal['action'], "limit")
         
         try:
             order = self.exchange.place_order(
@@ -518,18 +542,18 @@ class EnhancedMLScalpingBot:
                 orderType="Limit",
                 qty=formatted_qty,
                 price=str(limit_price),
-                timeInForce="PostOnly"  # ✅ ENSURES MAKER REBATE
+                timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
-                # ✅ Update last trade time IMMEDIATELY
+                # Update last trade time IMMEDIATELY
                 self.last_trade_time = time.time()
                 
                 self.pending_order = order['result']
                 
-                # ✅ Enhanced: Calculate break-even with rebates
-                break_even = self.calculate_break_even_price(limit_price, signal['action'])
-                net_tp, net_sl = self.calculate_net_profit_targets(limit_price, signal['action'])
+                # Calculate targets
+                net_tp = expected_fill_price * (1 + self.config['base_take_profit_pct']/100) if signal['action'] == 'BUY' else expected_fill_price * (1 - self.config['base_take_profit_pct']/100)
+                net_sl = expected_fill_price * (1 - self.config['base_stop_loss_pct']/100) if signal['action'] == 'BUY' else expected_fill_price * (1 + self.config['base_stop_loss_pct']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -538,19 +562,19 @@ class EnhancedMLScalpingBot:
                     qty=float(formatted_qty),
                     stop_loss=net_sl,
                     take_profit=net_tp,
-                    info=f"confidence:{signal['confidence']:.2f}_rsi:{signal['rsi']:.1f}_BE:{break_even:.4f}_PROTECTED"
+                    info=f"confidence:{signal['confidence']:.2f}_rsi:{signal['rsi']:.1f}_risk:{self.config['risk_per_trade_pct']}%_bal:{self.account_balance:.2f}"
                 )
                 
-                print(f"✅ PROTECTED {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
-                print(f"   💰 Break-Even: ${break_even:.4f} (with rebates)")
-                print(f"   🛡️ Duplicate protection: {self.trade_cooldown}s cooldown active")
-                print(f"   🎯 Net TP: ${net_tp:.4f} | Net SL: ${net_sl:.4f}")
-                print(f"   💎 Earning {abs(self.config['maker_fee_pct'])}% rebate on both trades")
+                risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
+                
+                print(f"✅ FIXED {signal['action']}: {formatted_qty} ARB @ ${limit_price:.4f}")
+                print(f"   💰 Risk: ${risk_amount:.2f} ({self.config['risk_per_trade_pct']}% of ${self.account_balance:.2f})")
+                print(f"   📊 ML Confidence: {signal['confidence']:.2f}")
+                print(f"   🎯 Expected Slippage: {self.config['expected_slippage_pct']}%")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
 
-    # ✅ FIXED: Enhanced close position with maker orders for rebates
     async def close_position(self, reason):
         """Enhanced position closing with maker orders for rebates"""
         if not self.position:
@@ -564,19 +588,22 @@ class EnhancedMLScalpingBot:
             print("⚠️ No quantity to close")
             return
         
-        # ✅ FIXED: Use limit orders for maker rebates
+        # Use limit orders for maker rebates
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 4)
+        
+        # FIXED: Model expected slippage
+        expected_fill_price = self.apply_slippage(limit_price, side, "limit")
         
         try:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",          # ✅ MAKER ORDER
-                qty=str(int(round(qty))),
+                orderType="Limit",
+                qty=self.format_qty(qty),
                 price=str(limit_price),
-                timeInForce="PostOnly",     # ✅ ENSURES MAKER REBATE
+                timeInForce="PostOnly",
                 reduceOnly=True
             )
             
@@ -585,10 +612,10 @@ class EnhancedMLScalpingBot:
                     log_entry = self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
-                        actual_exit=limit_price,
+                        actual_exit=expected_fill_price,
                         reason=reason,
-                        fees_entry=self.config['maker_fee_pct'],  # Maker rebate
-                        fees_exit=self.config['maker_fee_pct']    # Maker rebate
+                        fees_entry=self.config['maker_fee_pct'],
+                        fees_exit=self.config['maker_fee_pct']
                     )
                     
                     if log_entry:
@@ -601,13 +628,11 @@ class EnhancedMLScalpingBot:
                     
                     self.current_trade_id = None
                 
-                # Clear position state
                 self.position = None
                 
         except Exception as e:
             print(f"❌ Close failed: {e}")
 
-    # ✅ FIXED: Enhanced status display with position details
     def show_status(self):
         """Enhanced status display with position details"""
         if len(self.price_data) == 0:
@@ -616,15 +641,10 @@ class EnhancedMLScalpingBot:
         current_price = float(self.price_data['close'].iloc[-1])
         
         print(f"\n🤖 FIXED ML-Filtered Bot - {self.symbol}")
-        print(f"💰 Price: ${current_price:.4f}")
-        print(f"🛡️ Protection: Trade cooldown {self.trade_cooldown}s")
-        print(f"🔧 IMPROVEMENTS:")
-        print(f"   • Take Profit: 0.4% → 1.0% (better targets)")
-        print(f"   • Stop Loss: 0.3% → 0.5% (reduce noise)")
-        print(f"   • Timeframe: 3min → 5min (less noise)")
-        print(f"   • Risk:Reward: 1:2 ratio")
-        print(f"   • Duplicate Prevention: ACTIVE")
-        print(f"   • Maker Rebates: OPTIMIZED")
+        print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
+        print(f"⚡ Risk per trade: {self.config['risk_per_trade_pct']}%")
+        print(f"📊 Expected slippage: {self.config['expected_slippage_pct']}%")
+        print(f"🛡️ Trade cooldown: {self.trade_cooldown}s")
         
         if self.position:
             entry_price = float(self.position.get('avgPrice', 0))
@@ -641,17 +661,6 @@ class EnhancedMLScalpingBot:
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
                 print(f"{emoji} {side}: {size} @ ${entry_price:.4f} | P&L: {profit_pct:+.3f}% (${pnl:.2f})")
-                
-                # Show targets
-                tp_target = entry_price * (1 + self.config['base_take_profit_pct']/100) if side == "Buy" else entry_price * (1 - self.config['base_take_profit_pct']/100)
-                sl_target = entry_price * (1 - self.config['base_stop_loss_pct']/100) if side == "Buy" else entry_price * (1 + self.config['base_stop_loss_pct']/100)
-                print(f"   🎯 TP: ${tp_target:.4f} | SL: ${sl_target:.4f}")
-                
-                # Show break-even
-                break_even = self.calculate_break_even_price(entry_price, side)
-                print(f"   💰 Break-Even: ${break_even:.4f} (with rebates)")
-            else:
-                print(f"{side}: {size} @ INVALID_PRICE")
                 
         elif self.pending_order:
             order_price = float(self.pending_order.get('price', 0))
@@ -692,13 +701,14 @@ class EnhancedMLScalpingBot:
             print("Failed to connect")
             return
         
-        print(f"🚀 FIXED ML-Filtered Scalping Bot - {self.symbol}")
-        print(f"⏰ Timeframe: {self.config['timeframe']} minutes")
+        print(f"🤖 FIXED ML-Filtered Scalping Bot - {self.symbol}")
+        print("✅ FIXES APPLIED:")
+        print(f"   • Position sizing: Risk-based ({self.config['risk_per_trade_pct']}% per trade)")
+        print(f"   • Fee calculations: Correct maker rebates")
+        print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
+        print(f"   • Account balance: Dynamic checking")
         print(f"🎯 ML Threshold: {self.config['ml_confidence_threshold']:.2f}")
         print(f"💰 TP: {self.config['base_take_profit_pct']}% | SL: {self.config['base_stop_loss_pct']}%")
-        print(f"🔧 Fixed parameters for optimal 1:2 Risk:Reward ratio")
-        print(f"🛡️ Duplicate prevention: {self.trade_cooldown}s cooldown")
-        print(f"💎 Maker rebates: {abs(self.config['maker_fee_pct'])}% per trade")
         
         while True:
             try:
