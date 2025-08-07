@@ -51,8 +51,10 @@ class UnifiedLogger:
         }
         
         return trade_id, log_entry
-    
+
+
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
+        """Log position closing with slippage and PnL calculation"""
         if trade_id not in self.open_trades:
             return None
             
@@ -66,6 +68,10 @@ class UnifiedLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
+        # FIX: Calculate fees as percentage of trade value
+        fee_rate = 0.001  # 0.1% fee rate
+        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
+        fees_exit = actual_exit * trade["qty"] * fee_rate
         total_fees = fees_entry + fees_exit
         net_pnl = gross_pnl - total_fees
         
@@ -83,7 +89,7 @@ class UnifiedLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": {"entry": fees_entry, "exit": fees_exit, "total": total_fees},
+            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
