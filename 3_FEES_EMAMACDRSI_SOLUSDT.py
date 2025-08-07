@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Integrated Trade Logger
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -17,7 +16,6 @@ class TradeLogger:
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Ensure logs directory exists
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
         
@@ -26,7 +24,6 @@ class TradeLogger:
         return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
-        """Log position opening with slippage"""
         trade_id = self.generate_trade_id()
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
@@ -60,9 +57,8 @@ class TradeLogger:
             f.write(json.dumps(log_entry) + "\n")
         
         return trade_id, log_entry
-
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
-        """Log position closing with slippage and PnL calculation"""
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
             return None
             
@@ -76,12 +72,21 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # FIX: Calculate fees as percentage of trade value
-        fee_rate = 0.001  # 0.1% fee rate
-        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
-        fees_exit = actual_exit * trade["qty"] * fee_rate
-        total_fees = fees_entry + fees_exit
-        net_pnl = gross_pnl - total_fees
+        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
+        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
+        
+        if fees_entry < 0:
+            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
+        else:
+            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
+            
+        if fees_exit < 0:
+            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
+        else:
+            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
+        
+        total_fee_impact = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_fee_impact
         
         log_entry = {
             "id": trade_id,
@@ -97,7 +102,11 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
+            "fee_impact": {
+                "entry": round(entry_rebate, 2), 
+                "exit": round(exit_rebate, 2), 
+                "total": round(total_fee_impact, 2)
+            },
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -114,22 +123,18 @@ class EMAMACDRSIBot:
         self.symbol = 'SOLUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API Setup
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
-        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
         self.pending_order = None
         self.last_signal = None
         
-        # Order management
-        self.order_timeout = 180  # seconds
+        self.order_timeout = 180
         
-        # Trading configuration
         self.config = {
             'timeframe': '5',
             'ema_short': 12,
@@ -143,12 +148,10 @@ class EMAMACDRSIBot:
             'net_stop_loss': 0.42,
         }
         
-        # Trade logging
         self.logger = TradeLogger("EMA_MACD_RSI", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
-        """Connect to exchange API"""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
@@ -157,11 +160,9 @@ class EMAMACDRSIBot:
             return False
     
     def format_qty(self, qty):
-        """Format quantity according to exchange requirements"""
         return str(int(round(qty)))
     
     async def check_pending_orders(self):
-        """Check for pending orders and cancel if timed out"""
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
@@ -188,23 +189,19 @@ class EMAMACDRSIBot:
             return False
     
     def calculate_indicators(self, df):
-        """Calculate technical indicators for trading signals"""
         if len(df) < self.config['lookback']:
             return None
         
         try:
             close = df['close']
             
-            # Calculate EMA values
             ema_short = close.ewm(span=self.config['ema_short']).mean()
             ema_long = close.ewm(span=self.config['ema_long']).mean()
             
-            # Calculate MACD
             macd_line = ema_short - ema_long
             signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
             histogram = macd_line - signal_line
             
-            # Calculate RSI
             delta = close.diff()
             gain = delta.clip(lower=0).rolling(window=self.config['rsi_period']).mean()
             loss = -delta.clip(upper=0).rolling(window=self.config['rsi_period']).mean()
@@ -223,23 +220,19 @@ class EMAMACDRSIBot:
             return None
     
     def generate_signal(self, df):
-        """Generate trading signal based on indicators"""
         analysis = self.calculate_indicators(df)
         if not analysis:
             return None
         
-        # Avoid duplicate signals
         if self.last_signal:
             price_change = abs(analysis['price'] - self.last_signal['price']) / self.last_signal['price']
             if price_change < 0.002:
                 return None
         
-        # MACD conditions
         histogram_positive = analysis['histogram'] > 0
         histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
         histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
         
-        # Generate BUY signal
         if (histogram_positive and analysis['rsi'] < 60) or (histogram_turning_positive and analysis['rsi'] < 70):
             return {
                 'action': 'BUY', 
@@ -248,7 +241,6 @@ class EMAMACDRSIBot:
                 'reason': 'macd_bullish'
             }
         
-        # Generate SELL signal
         if (not histogram_positive and analysis['rsi'] > 40) or (histogram_turning_negative and analysis['rsi'] > 30):
             return {
                 'action': 'SELL', 
@@ -260,7 +252,6 @@ class EMAMACDRSIBot:
         return None
     
     async def get_market_data(self):
-        """Retrieve market data from exchange"""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -275,12 +266,10 @@ class EMAMACDRSIBot:
             df = pd.DataFrame(klines['result']['list'], 
                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             
-            # Convert data types
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            # Clean data and sort by time
             df = df.dropna(subset=['open', 'high', 'low', 'close'])
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             
@@ -290,7 +279,6 @@ class EMAMACDRSIBot:
             return False
     
     async def check_position(self):
-        """Check current position status"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
@@ -301,7 +289,6 @@ class EMAMACDRSIBot:
             self.position = None
     
     def should_close(self):
-        """Determine if position should be closed"""
         if not self.position:
             return False, ""
         
@@ -313,24 +300,19 @@ class EMAMACDRSIBot:
             if entry_price == 0:
                 return False, ""
             
-            # Calculate profit percentage
             profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
             
-            # Take profit or stop loss
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
                 return True, "stop_loss"
             
-            # Check for technical reversal signals
             analysis = self.calculate_indicators(self.price_data)
             if analysis:
-                # Exit long on MACD bearish reversal
                 histogram_turning_negative = analysis['histogram_prev'] >= 0 and analysis['histogram'] < 0
                 if side == "Buy" and histogram_turning_negative and analysis['rsi'] > 60:
                     return True, "macd_reversal"
                 
-                # Exit short on MACD bullish reversal
                 histogram_turning_positive = analysis['histogram_prev'] <= 0 and analysis['histogram'] > 0
                 if side == "Sell" and histogram_turning_positive and analysis['rsi'] < 40:
                     return True, "macd_reversal"
@@ -341,7 +323,6 @@ class EMAMACDRSIBot:
             return False, ""
     
     async def execute_trade(self, signal):
-        """Execute a trade based on the signal"""
         if await self.check_pending_orders() or self.position:
             return
         
@@ -351,7 +332,6 @@ class EMAMACDRSIBot:
         if float(formatted_qty) < 1:
             return
         
-        # Calculate limit price with maker offset
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset, 4)
         
@@ -370,11 +350,9 @@ class EMAMACDRSIBot:
                 self.last_signal = signal
                 self.pending_order = order['result']
                 
-                # Calculate stop loss and take profit levels
                 stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
                 take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 
-                # Log the trade
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
@@ -390,7 +368,6 @@ class EMAMACDRSIBot:
             print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close the current position"""
         if not self.position:
             return
         
@@ -410,13 +387,14 @@ class EMAMACDRSIBot:
             if order.get('retCode') == 0:
                 current_price = float(self.price_data['close'].iloc[-1])
                 
-                # Log the trade close
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
                         actual_exit=current_price,
-                        reason=reason
+                        reason=reason,
+                        fees_entry=-0.04,
+                        fees_exit=0.1
                     )
                     self.current_trade_id = None
                 
@@ -427,7 +405,6 @@ class EMAMACDRSIBot:
             print(f"❌ Close failed: {e}")
     
     async def run_cycle(self):
-        """Run one trading cycle"""
         if not await self.get_market_data():
             return
         
@@ -444,7 +421,6 @@ class EMAMACDRSIBot:
                 await self.execute_trade(signal)
     
     async def run(self):
-        """Main bot loop"""
         if not self.connect():
             print("❌ Failed to connect to exchange")
             return

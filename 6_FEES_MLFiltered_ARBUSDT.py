@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Fixed TradeLogger to match other files
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
@@ -18,7 +17,6 @@ class TradeLogger:
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Ensure logs directory exists
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
         
@@ -27,7 +25,6 @@ class TradeLogger:
         return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
-        """Log position opening with slippage"""
         trade_id = self.generate_trade_id()
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
@@ -61,9 +58,8 @@ class TradeLogger:
             f.write(json.dumps(log_entry) + "\n")
         
         return trade_id, log_entry
-
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
-        """Log position closing with slippage and PnL calculation"""
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
             return None
             
@@ -77,12 +73,21 @@ class TradeLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # FIX: Calculate fees as percentage of trade value
-        fee_rate = 0.001  # 0.1% fee rate
-        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
-        fees_exit = actual_exit * trade["qty"] * fee_rate
-        total_fees = fees_entry + fees_exit
-        net_pnl = gross_pnl - total_fees
+        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
+        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
+        
+        if fees_entry < 0:
+            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
+        else:
+            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
+            
+        if fees_exit < 0:
+            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
+        else:
+            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
+        
+        total_fee_impact = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_fee_impact
         
         log_entry = {
             "id": trade_id,
@@ -98,7 +103,11 @@ class TradeLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
+            "fee_impact": {
+                "entry": round(entry_rebate, 2), 
+                "exit": round(exit_rebate, 2), 
+                "total": round(total_fee_impact, 2)
+            },
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -115,23 +124,19 @@ class EnhancedMLScalpingBot:
         self.symbol = 'ARBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
-        # API Setup
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
-        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
         self.pending_order = None
         self.daily_pnl = 0
-        self.current_trade_id = None  # Add this to track current trade
+        self.current_trade_id = None
         
-        # Order management
-        self.order_timeout = 180  # seconds
+        self.order_timeout = 180
         
-        # Trading config
         self.config = {
             'timeframe': '3',
             'rsi_period': 14,
@@ -150,14 +155,11 @@ class EnhancedMLScalpingBot:
             'base_stop_loss_pct': 0.3,
         }
         
-        # Status tracking
         self.volatility_regime = 'normal'
         
-        # Logging - Fixed to match other files
         self.logger = TradeLogger("ML_ARB", self.symbol)
     
     def connect(self):
-        """Connect to Bybit exchange."""
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
@@ -166,7 +168,6 @@ class EnhancedMLScalpingBot:
             return False
     
     async def check_pending_orders(self):
-        """Check for pending orders and cancel if timed out."""
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
@@ -193,46 +194,38 @@ class EnhancedMLScalpingBot:
             return False
     
     def calculate_indicators(self, df):
-        """Calculate technical indicators for trading signals."""
         if len(df) < self.config['lookback']:
             return None
         
         try:
             close = df['close']
             
-            # RSI
             delta = close.diff()
             gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
             rs = gain / (loss + 1e-10)
             rsi = 100 - (100 / (1 + rs))
             
-            # EMAs
             ema_fast = close.ewm(span=self.config['ema_fast']).mean()
             ema_slow = close.ewm(span=self.config['ema_slow']).mean()
             
-            # Bollinger Bands
             bb_middle = close.rolling(window=self.config['bb_period']).mean()
             bb_std = close.rolling(window=self.config['bb_period']).std()
             bb_upper = bb_middle + (bb_std * self.config['bb_std'])
             bb_lower = bb_middle - (bb_std * self.config['bb_std'])
             
-            # MACD
             exp1 = close.ewm(span=self.config['macd_fast']).mean()
             exp2 = close.ewm(span=self.config['macd_slow']).mean()
             macd = exp1 - exp2
             signal = macd.ewm(span=self.config['macd_signal']).mean()
             macd_histogram = macd - signal
             
-            # Bollinger Band position
             bb_range = bb_upper.iloc[-1] - bb_lower.iloc[-1]
             bb_pos = (close.iloc[-1] - bb_lower.iloc[-1]) / bb_range if bb_range != 0 else 0.5
             
-            # Volatility
             returns = close.pct_change().dropna()
             volatility = returns.rolling(window=20).std().iloc[-1] if len(returns) >= 20 else 0.01
             
-            # Set volatility regime
             if volatility > 0.025:
                 self.volatility_regime = 'high'
             elif volatility < 0.01:
@@ -253,19 +246,16 @@ class EnhancedMLScalpingBot:
             return None
     
     def ml_filter_confidence(self, indicators):
-        """Calculate trade confidence score using ML-like rules."""
         if not indicators:
             return 0
         
-        confidence = 0.5  # Base confidence
+        confidence = 0.5
         
-        # Trend alignment
         if indicators['ema_trend']:
             confidence += 0.1 if indicators['macd_histogram'] > 0 else -0.05
         else:
             confidence += 0.1 if indicators['macd_histogram'] < 0 else -0.05
         
-        # RSI extremes
         if indicators['rsi'] < 30:
             confidence += 0.15
         elif indicators['rsi'] > 70:
@@ -273,11 +263,9 @@ class EnhancedMLScalpingBot:
         elif 40 < indicators['rsi'] < 60:
             confidence += 0.05
         
-        # Bollinger Bands position
         if indicators['bb_position'] < 0.2 or indicators['bb_position'] > 0.8:
             confidence += 0.15
         
-        # Volatility adjustment
         if self.volatility_regime == 'normal':
             confidence += 0.1
         elif self.volatility_regime == 'high':
@@ -286,7 +274,6 @@ class EnhancedMLScalpingBot:
         return min(max(confidence, 0), 1)
     
     def generate_signal(self, df):
-        """Generate trading signals."""
         indicators = self.calculate_indicators(df)
         if not indicators:
             return None
@@ -296,35 +283,29 @@ class EnhancedMLScalpingBot:
         if confidence < self.config['ml_confidence_threshold']:
             return None
         
-        # Signal scoring
         buy_score = 0
         sell_score = 0
         
-        # Trend
         if indicators['ema_trend']:
             buy_score += 1
         else:
             sell_score += 1
         
-        # RSI
         if indicators['rsi'] < 40:
             buy_score += 2
         elif indicators['rsi'] > 60:
             sell_score += 2
         
-        # Bollinger Bands
         if indicators['bb_position'] < 0.3:
             buy_score += 1
         elif indicators['bb_position'] > 0.7:
             sell_score += 1
         
-        # MACD
         if indicators['macd_histogram'] > 0:
             buy_score += 1
         else:
             sell_score += 1
         
-        # Generate signal
         if buy_score >= 3:
             return {
                 'action': 'BUY',
@@ -343,7 +324,6 @@ class EnhancedMLScalpingBot:
         return None
     
     def should_close(self):
-        """Check if position should be closed."""
         if not self.position:
             return False, ""
         
@@ -355,11 +335,9 @@ class EnhancedMLScalpingBot:
             if entry_price == 0:
                 return False, ""
             
-            # Get targets
             take_profit_pct = self.config['base_take_profit_pct']
             stop_loss_pct = self.config['base_stop_loss_pct']
             
-            # Calculate profit percentage
             profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
             
             if profit_pct >= take_profit_pct:
@@ -367,7 +345,6 @@ class EnhancedMLScalpingBot:
             if profit_pct <= -stop_loss_pct:
                 return True, "stop_loss"
             
-            # Reversal detection
             indicators = self.calculate_indicators(self.price_data)
             if indicators:
                 if side == "Buy" and indicators['rsi'] > 75 and not indicators['ema_trend']:
@@ -381,7 +358,6 @@ class EnhancedMLScalpingBot:
             return False, ""
     
     async def get_market_data(self):
-        """Get market kline data."""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -415,7 +391,6 @@ class EnhancedMLScalpingBot:
             return False
     
     async def check_position(self):
-        """Check current position."""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
@@ -430,7 +405,6 @@ class EnhancedMLScalpingBot:
             self.position = None
     
     async def execute_trade(self, signal):
-        """Execute trade based on signal."""
         if await self.check_pending_orders() or self.position:
             return
         
@@ -457,11 +431,9 @@ class EnhancedMLScalpingBot:
             if order.get('retCode') == 0:
                 self.pending_order = order['result']
                 
-                # Calculate stop loss and take profit
                 stop_loss = limit_price * (1 - self.config['base_stop_loss_pct']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['base_stop_loss_pct']/100)
                 take_profit = limit_price * (1 + self.config['base_take_profit_pct']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['base_take_profit_pct']/100)
                 
-                # Log trade using the correct method
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
@@ -479,7 +451,6 @@ class EnhancedMLScalpingBot:
             print(f"Trade failed: {e}")
     
     async def close_position(self, reason):
-        """Close current position."""
         if not self.position:
             return
         
@@ -502,13 +473,14 @@ class EnhancedMLScalpingBot:
             )
             
             if order.get('retCode') == 0:
-                # Log trade close using the correct method
                 if self.current_trade_id:
                     log_entry = self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
                         actual_exit=current_price,
-                        reason=reason
+                        reason=reason,
+                        fees_entry=-0.04,
+                        fees_exit=0.1
                     )
                     
                     if log_entry:
@@ -522,7 +494,6 @@ class EnhancedMLScalpingBot:
             print(f"Close failed: {e}")
     
     async def run_cycle(self):
-        """Run one trading cycle."""
         if not await self.get_market_data():
             return
         
@@ -539,7 +510,6 @@ class EnhancedMLScalpingBot:
                 await self.execute_trade(signal)
     
     async def run(self):
-        """Main bot loop."""
         if not self.connect():
             print("Failed to connect")
             return

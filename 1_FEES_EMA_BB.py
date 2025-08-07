@@ -2,23 +2,26 @@ import os
 import asyncio
 import pandas as pd
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class UnifiedLogger:
+class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
-        self.trade_counter = 1000
+        self.trade_id = 1000
+        
+        os.makedirs("logs", exist_ok=True)
+        self.log_file = f"logs/{bot_name}_{symbol}.log"
         
     def generate_trade_id(self):
-        self.trade_counter += 1
-        return self.trade_counter
+        self.trade_id += 1
+        return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
@@ -30,7 +33,7 @@ class UnifiedLogger:
             "symbol": self.symbol,
             "side": "LONG" if side == "BUY" else "SHORT",
             "action": "OPEN",
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "expected_price": round(expected_price, 4),
             "actual_price": round(actual_price, 4),
             "slippage": round(slippage, 4),
@@ -50,11 +53,12 @@ class UnifiedLogger:
             "take_profit": take_profit
         }
         
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+        
         return trade_id, log_entry
-
-
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=0.1, fees_exit=0.25):
-        """Log position closing with slippage and PnL calculation"""
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
             return None
             
@@ -68,12 +72,21 @@ class UnifiedLogger:
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # FIX: Calculate fees as percentage of trade value
-        fee_rate = 0.001  # 0.1% fee rate
-        fees_entry = trade["entry_price"] * trade["qty"] * fee_rate
-        fees_exit = actual_exit * trade["qty"] * fee_rate
-        total_fees = fees_entry + fees_exit
-        net_pnl = gross_pnl - total_fees
+        entry_fee_pct = abs(fees_entry) if fees_entry < 0 else fees_entry
+        exit_fee_pct = abs(fees_exit) if fees_exit < 0 else fees_exit
+        
+        if fees_entry < 0:
+            entry_rebate = trade["entry_price"] * trade["qty"] * entry_fee_pct / 100
+        else:
+            entry_rebate = -(trade["entry_price"] * trade["qty"] * entry_fee_pct / 100)
+            
+        if fees_exit < 0:
+            exit_rebate = actual_exit * trade["qty"] * exit_fee_pct / 100
+        else:
+            exit_rebate = -(actual_exit * trade["qty"] * exit_fee_pct / 100)
+        
+        total_fee_impact = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_fee_impact
         
         log_entry = {
             "id": trade_id,
@@ -81,7 +94,7 @@ class UnifiedLogger:
             "symbol": self.symbol,
             "side": "LONG" if trade["side"] == "BUY" else "SHORT",
             "action": "CLOSE",
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "duration_sec": int(duration),
             "entry_price": round(trade["entry_price"], 4),
             "expected_exit": round(expected_exit, 4),
@@ -89,18 +102,21 @@ class UnifiedLogger:
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": {"entry": round(fees_entry, 4), "exit": round(fees_exit, 4), "total": round(total_fees, 4)},
+            "fee_impact": {
+                "entry": round(entry_rebate, 2), 
+                "exit": round(exit_rebate, 2), 
+                "total": round(total_fee_impact, 2)
+            },
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
         }
         
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+        
         del self.open_trades[trade_id]
         return log_entry
-    
-    def write_log(self, log_entry, log_file):
-        with open(log_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
 
 class ETHScalpingBot:
     def __init__(self):
@@ -131,9 +147,7 @@ class ETHScalpingBot:
             'net_stop_loss': 0.45,
         }
         
-        os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/1_FEES_EMA_BB_ETHUSDT.log"
-        self.unified_logger = UnifiedLogger("1_FEES_EMA_BB", self.symbol)
+        self.logger = TradeLogger("1_FEES_EMA_BB", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
@@ -273,37 +287,6 @@ class ETHScalpingBot:
         
         return False, ""
     
-    def log_trade(self, action, price, info=""):
-        if action in ["BUY", "SELL"] and not self.current_trade_id:
-            qty = self.config['position_size'] / price
-            stop_loss = price * (1 - self.config['net_stop_loss']/100) if action == "BUY" else price * (1 + self.config['net_stop_loss']/100)
-            take_profit = price * (1 + self.config['net_take_profit']/100) if action == "BUY" else price * (1 - self.config['net_take_profit']/100)
-            
-            self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
-                side=action,
-                expected_price=price,
-                actual_price=price,
-                qty=qty,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                info=info
-            )
-            
-            self.unified_logger.write_log(log_entry, self.log_file)
-            
-        elif action == "CLOSE" and self.current_trade_id:
-            log_entry = self.unified_logger.log_trade_close(
-                trade_id=self.current_trade_id,
-                expected_exit=price,
-                actual_exit=price,
-                reason=info.split("_")[0] if "_" in info else info
-            )
-            
-            if log_entry:
-                self.unified_logger.write_log(log_entry, self.log_file)
-            
-            self.current_trade_id = None
-    
     async def execute_trade(self, signal):
         if await self.check_pending_orders() or self.position or not self.is_valid_signal(signal):
             return
@@ -333,8 +316,20 @@ class ETHScalpingBot:
                 self.last_order_time = datetime.now()
                 self.pending_order = order['result']
                 
+                stop_loss = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
+                take_profit = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
+                
+                self.current_trade_id, _ = self.logger.log_trade_open(
+                    side=signal['action'],
+                    expected_price=signal['price'],
+                    actual_price=limit_price,
+                    qty=float(formatted_qty),
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    info=f"BB:{signal['bb_pos']:.2f}"
+                )
+                
                 print(f"✅ {signal['action']}: {formatted_qty} ETH @ ${limit_price:.2f} | BB: {signal['bb_pos']:.2f}")
-                self.log_trade(signal['action'], limit_price, f"BB:{signal['bb_pos']:.2f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
     
@@ -358,8 +353,19 @@ class ETHScalpingBot:
             
             if order.get('retCode') == 0:
                 current = float(self.price_data['close'].iloc[-1])
+                
+                if self.current_trade_id:
+                    self.logger.log_trade_close(
+                        trade_id=self.current_trade_id,
+                        expected_exit=current,
+                        actual_exit=current,
+                        reason=reason,
+                        fees_entry=-0.04,
+                        fees_exit=0.1
+                    )
+                    self.current_trade_id = None
+                
                 print(f"💰 Position Closed: {reason}")
-                self.log_trade("CLOSE", current, reason)
                 self.position = None
                 self.last_signal = None
         except Exception as e:
