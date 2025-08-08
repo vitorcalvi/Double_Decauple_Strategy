@@ -142,10 +142,10 @@ class PivotReversalBot:
             'timeframe': '3',
             'rsi_period': 14,
             'mfi_period': 14,
-            'rsi_oversold': 25,
-            'rsi_overbought': 75,
-            'mfi_oversold': 25,
-            'mfi_overbought': 75,
+            'rsi_oversold': 30,
+            'rsi_overbought': 70,
+            'mfi_oversold': 30,
+            'mfi_overbought': 70,
             'risk_pct': 2.0,
             'maker_offset_pct': 0.02,
             'maker_fee': -0.01,
@@ -153,7 +153,7 @@ class PivotReversalBot:
             'net_stop_loss': 0.3,
             'min_notional': 5,
             'qty_precision': 1,
-            'pivot_distance_pct': 0.3,
+            'pivot_distance_pct': 0.25,
             'order_timeout': 30,
             'limit_order_retries': 3
         }
@@ -173,7 +173,7 @@ class PivotReversalBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")

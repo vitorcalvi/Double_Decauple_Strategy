@@ -127,7 +127,7 @@ class VWAPRSIDivergenceBot:
         self.config = {
             'timeframe': '5',
             'rsi_period': 9,
-            'divergence_lookback': 5,
+            'divergence_lookback': 4,
             'ema_period': 50,
             'risk_per_trade': 2.0,
             'maker_offset_pct': 0.01,
@@ -149,7 +149,7 @@ class VWAPRSIDivergenceBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")

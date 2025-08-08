@@ -257,7 +257,7 @@ class RMISupertrendBot:
                 df = pd.DataFrame(kline['result']['list'],
                                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
                 df = df.astype(float)
-                df = df.sort_values('timestamp')
+                df = df.sort_values('timestamp').reset_index(drop=True)
                 self.price_data = df
                 
         except Exception as e:

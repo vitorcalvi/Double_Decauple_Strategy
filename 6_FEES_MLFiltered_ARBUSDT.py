@@ -147,7 +147,7 @@ class EnhancedMLScalpingBot:
             'macd_fast': 12,
             'macd_slow': 26,
             'macd_signal': 9,
-            'ml_confidence_threshold': 0.75,
+            'ml_confidence_threshold': 0.70,
             'risk_per_trade_pct': 2.0,  # FIXED: Risk-based sizing
             'lookback': 100,
             'maker_offset_pct': 0.01,
@@ -162,7 +162,7 @@ class EnhancedMLScalpingBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"Connection error: {e}")

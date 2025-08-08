@@ -111,7 +111,7 @@ class TradeLogger:
 
 class LSTMXGBoostBot:
     def __init__(self):
-        self.symbol = 'JPYUSDT'
+        self.symbol = 'GBPUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -125,13 +125,13 @@ class LSTMXGBoostBot:
         self.instrument_info = {}
         
         self.config = {
-            'timeframe': '30',
+            'timeframe': '5',
             'risk_percent': 1.0,
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.9,
             'net_stop_loss': 0.45,
             'lstm_lookback': 60,
-            'prediction_threshold': 0.6,
+            'prediction_threshold': 0.55,
             'lookback': 200,
             'slippage_pct': 0.02,
             'maker_fee': -0.01,
@@ -152,7 +152,7 @@ class LSTMXGBoostBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             if self.exchange.get_server_time().get('retCode') == 0:
                 self.get_instrument_info()
                 self.update_account_balance()

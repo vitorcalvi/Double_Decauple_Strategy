@@ -137,7 +137,7 @@ class MLGridBot:
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.75,
             'net_stop_loss': 0.3,
-            'ml_threshold': 0.65,
+            'ml_threshold': 0.60,
             'lookback': 100,
             'slippage_bps': 5
         }
@@ -157,7 +157,7 @@ class MLGridBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")
