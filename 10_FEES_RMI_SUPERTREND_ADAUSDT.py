@@ -88,12 +88,15 @@ class RMISupertrendBot:
         self.symbol = self.config['symbol']
         self.logger = TradeLogger("RMI_SUPERTREND_FIXED", self.symbol)
         
+        prefix = "TESTNET_" if not self.LIVE_TRADING else "LIVE_"
+        api_key = os.getenv(f"{prefix}BYBIT_API_KEY", "")
+        api_secret = os.getenv(f"{prefix}BYBIT_API_SECRET", "")
+    
         self.exchange = HTTP(
-            testnet=False,
-            api_key=os.getenv('BYBIT_API_KEY'),
-            api_secret=os.getenv('BYBIT_API_SECRET')
+        testnet=(not self.LIVE_TRADING),  # Use testnet if not live
+        api_key=api_key,
+        api_secret=api_secret
         )
-        
         self.position = None
         self.current_trade_id = None
         self.account_balance = 10000
