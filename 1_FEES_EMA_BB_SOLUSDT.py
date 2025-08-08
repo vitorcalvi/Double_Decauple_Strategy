@@ -2,22 +2,12 @@
 """
 EMA + BB Trend-Following Bot (Bybit TESTNET, linear futures) with Terminal Monitor
 
-Entry logic (trend-following):
-  • BUY (trend-pullback):   ema_fast > ema_slow, close > ema_trend,
-                            price between ema_slow and ema_fast (pullback),
-                            MACD hist rising, RSI >= 45, volume/volatility pass
-  • SELL (trend-pullback):  ema_fast < ema_slow, close < ema_trend,
-                            price between ema_fast and ema_slow (pullback),
-                            MACD hist falling, RSI <= 55, volume/volatility pass
-  • BUY (breakout):         trend_bullish and close > 20-bar high * (1+0.0005)
-  • SELL (breakout):        trend_bearish and close < 20-bar low  * (1-0.0005)
-
-Notes:
-  • Signals run in demo/paper too (no LIVE_TRADING gate).
-  • Uses Bybit instrument specs (tickSize, qtyStep, minOrderQty).
-  • PostOnly maker with 0.08% offset by default.
-  • Percent TP/SL exits (configurable). Simple, robust.
-  • Terminal monitor shows live status and why it’s not trading yet.
+Fixes & updates:
+  • Strong-trend override lets signals through even when vol filters fail (no more '–' blocking steady grind-ups).
+  • Breakout levels computed from prior 20 bars (exclude current) and smaller breakout buffer (0.02%).
+  • Adds trend continuation entry (above EMA fast, momentum rising, RSI>=60).
+  • Tighter price debounce (0.1%).
+  • Monitor shows signal REASON.
 
 .env required:
   TESTNET_BYBIT_API_KEY=xxx
@@ -178,19 +168,21 @@ class EMABBTrendBot:
             "maker_offset_pct": 0.08,  # 0.08%
             "stop_loss_pct": 0.50,     # %
             "take_profit_pct": 1.00,   # %
-            # Trend-breakout sensitivity (relative to last 20-bar high/low)
-            "breakout_buffer": 0.0005,  # 0.05%
-            # Filters (relaxed vs reversal version)
-            "vol_std_min": 0.003,
-            "vol_std_max": 0.060,
-            "vol_sma_mult": 0.60,
+
+            # Breakout sensitivity (relative to prior 20-bar high/low)
+            "breakout_buffer": 0.0002,  # 0.02%
+
+            # Filters (relaxed + override)
+            "vol_std_min": 0.0015,  # only check lower bound
+            "vol_sma_mult": 0.60,   # volume > 0.6 × 20-SMA(volume)
+
             # Debounce to avoid duplicate signals on tiny moves
-            "price_debounce": 0.002,  # 0.2%
+            "price_debounce": 0.001,  # 0.1%
         }
 
         # instrument steps — loaded from exchange
-        self.min_qty = 0.001
-        self.qty_step = 0.001
+        self.min_qty = 0.1
+        self.qty_step = 0.1
         self.price_step = 0.01
 
         # terminal monitor
@@ -300,7 +292,7 @@ class EMABBTrendBot:
         vol_ok = True
         if len(rets) >= 20:
             v = rets.rolling(20).std().iloc[-1]
-            vol_ok = self.config["vol_std_min"] < v < self.config["vol_std_max"]
+            vol_ok = v > self.config["vol_std_min"]  # only lower bound; allow grind-ups
 
         vol_avg = df["volume"].rolling(20).mean()
         vol_pass = True
@@ -336,9 +328,14 @@ class EMABBTrendBot:
                 rs = gain.iloc[-1] / loss.iloc[-1]
                 rsi_val = 100 - (100 / (1 + rs))
 
-            # Recent swing levels (exclude current bar for breakout buffer)
-            recent_high = high.rolling(20).max().iloc[-2]
-            recent_low  = low.rolling(20).min().iloc[-2]
+            # Prior 20 bars (exclude current) for breakout levels
+            window_ok = len(high) >= 21
+            if window_ok:
+                recent_high = high.iloc[-21:-1].max()
+                recent_low  = low.iloc[-21:-1].min()
+            else:
+                recent_high = float(high.max())
+                recent_low  = float(low.min())
 
             return {
                 "price": float(close.iloc[-1]),
@@ -358,12 +355,10 @@ class EMABBTrendBot:
             return None
 
     def _in_pullback_band_long(self, price, ema_fast, ema_slow):
-        # Price between EMA slow and EMA fast (pullback to value)
         lo, hi = sorted([ema_slow, ema_fast])
         return lo <= price <= hi
 
     def _in_pullback_band_short(self, price, ema_fast, ema_slow):
-        # For bearish trend (ema_fast < ema_slow): still between the two EMAs
         lo, hi = sorted([ema_fast, ema_slow])
         return lo <= price <= hi
 
@@ -375,7 +370,12 @@ class EMABBTrendBot:
 
         trend_up, vol_normal, vol_ok = self.enhanced_filters(df)
         self._last_filters = (trend_up, vol_normal, vol_ok)
-        if not (vol_normal and vol_ok):
+
+        # Strong-trend override: allow if bullish momentum is clearly building
+        strong_bull = ind["trend_bullish"] and ind["rsi"] >= 60 and ind["hist"] > ind["hist_prev"]
+        strong_bear = ind["trend_bearish"] and ind["rsi"] <= 40 and ind["hist"] < ind["hist_prev"]
+
+        if not (vol_normal and vol_ok) and not (strong_bull or strong_bear):
             return None
 
         # Debounce duplicate signals on tiny price changes
@@ -393,26 +393,27 @@ class EMABBTrendBot:
         bof = self.config["breakout_buffer"]
 
         # --- Primary: Trend Pullback Entries ---
-        # BUY pullback in bullish trend
         if ind["trend_bullish"] and trend_up:
             if self._in_pullback_band_long(p, ef, es) and (h > hp) and (rsi >= 45):
                 return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_pullback"}
 
-        # SELL pullback in bearish trend
         if ind["trend_bearish"] and (not trend_up):
             if self._in_pullback_band_short(p, ef, es) and (h < hp) and (rsi <= 55):
                 return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_pullback"}
 
-        # --- Secondary: Trend Breakout Continuation ---
-        # BUY breakout above recent high (with bullish trend context)
-        if ind["trend_bullish"] and p > ind["recent_high"] * (1 + bof):
-            if (h >= hp) and (rsi >= 50):  # mild confirmation
-                return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_breakout"}
+        # --- Secondary: Trend Continuation (works in grind-ups/downs) ---
+        if ind["trend_bullish"] and p > ef and (h > hp) and rsi >= 60:
+            return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_continuation"}
 
-        # SELL breakdown below recent low (with bearish trend context)
-        if ind["trend_bearish"] and p < ind["recent_low"] * (1 - bof):
-            if (h <= hp) and (rsi <= 50):
-                return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_breakout"}
+        if ind["trend_bearish"] and p < ef and (h < hp) and rsi <= 40:
+            return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_continuation"}
+
+        # --- Tertiary: Breakout continuation ---
+        if ind["trend_bullish"] and p > ind["recent_high"] * (1 + bof) and (h >= hp) and (rsi >= 50):
+            return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_breakout"}
+
+        if ind["trend_bearish"] and p < ind["recent_low"] * (1 - bof) and (h <= hp) and (rsi <= 50):
+            return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_breakout"}
 
         return None
 
@@ -633,8 +634,11 @@ class EMABBTrendBot:
             ord_str = "OPEN ORDERS: 0"
 
         cooldown = max(0, int(self.trade_cooldown - (time.time() - self.last_trade_time)))
-        preview = f"{self.preview_signal['action']}@{self.preview_signal['price']:.4f}" if self.preview_signal else "—"
-        last_sig = f"{self.last_signal['action']} {self.last_signal['price']:.4f}" if self.last_signal else "—"
+        if self.preview_signal:
+            preview = f"{self.preview_signal['action']}@{self.preview_signal['price']:.4f} [{self.preview_signal.get('reason','')}]"
+        else:
+            preview = "—"
+        last_sig = f"{self.last_signal['action']} {self.last_signal['price']:.4f} [{self.last_signal.get('reason','')}]" if self.last_signal else "—"
 
         self._clear_screen()
         print(f"{spin} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  |  {self.symbol}  |  TF {self.config['timeframe']}m  |  DEMO:{self.demo_mode}  |  MakerOff {self.config['maker_offset_pct']}%".ljust(cols))
