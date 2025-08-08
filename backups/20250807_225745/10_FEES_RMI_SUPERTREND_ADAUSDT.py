@@ -27,7 +27,7 @@ class TradeLogger:
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,

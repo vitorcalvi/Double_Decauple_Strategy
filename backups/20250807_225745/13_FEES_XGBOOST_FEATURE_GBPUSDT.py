@@ -16,39 +16,6 @@ load_dotenv()
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
-            self.bot_name = bot_name
-async def execute_limit_order(self, side, qty, price, is_reduce=False):
-    
-    """Execute limit order with PostOnly for zero slippage"""
-    formatted_qty = self.format_qty(qty)
-    
-    # Calculate limit price with small offset
-    if side == "Buy":
-        limit_price = price * 0.9998  # Slightly below market
-    else:
-        limit_price = price * 1.0002  # Slightly above market
-    
-    limit_price = float(self.format_price(limit_price))
-    
-    params = {
-        "category": "linear",
-        "symbol": self.symbol,
-        "side": side,
-        "orderType": "Limit",
-        "qty": formatted_qty,
-        "price": str(limit_price),
-        "timeInForce": "PostOnly"  # This ensures ZERO slippage
-    }
-    
-    if is_reduce:
-        params["reduceOnly"] = True
-    
-    order = self.exchange.place_order(**params)
-    
-    if order.get('retCode') == 0:
-        return limit_price  # Return actual price, slippage = 0
-    return None
-    def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
         
         # Trade cooldown mechanism
@@ -75,7 +42,7 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,
@@ -113,7 +80,7 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
@@ -260,11 +227,11 @@ class LSTMXGBoostBot:
     
     def simulate_slippage(self, price, side, size_usdt):
         # Simulate realistic slippage based on order size
-        base_slippage = 0  # PostOnly = zero slippage
+        base_slippage = self.config['slippage_pct'] / 100
         
         # Larger orders have more slippage
         size_factor = min(size_usdt / 10000, 2.0)  # Cap at 2x for very large orders
-        total_slippage = 0  # PostOnly = zero slippage
+        total_slippage = base_slippage * (1 + size_factor * 0.5)
         
         # Add random component
         random_factor = np.random.uniform(0.5, 1.5)

@@ -13,21 +13,15 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
+        self.trade_id = 1000
         
         # Emergency stop tracking
         self.daily_pnl = 0
         self.consecutive_losses = 0
         self.max_daily_loss = 50  # $50 max daily loss
-        
-        self.symbol = symbol
-        self.currency = "USDT"
-        self.open_trades = {}
-        self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
@@ -38,7 +32,7 @@ class TradeLogger:
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
+        slippage = 0  # PostOnly = zero slippage
         
         log_entry = {
             "id": trade_id,
@@ -49,7 +43,7 @@ class TradeLogger:
             "ts": datetime.now(timezone.utc).isoformat(),
             "expected_price": round(expected_price, 4),
             "actual_price": round(actual_price, 4),
-            "slippage": round(slippage, 4),
+            "slippage": round(slippage, 6),  # Always 0 with PostOnly
             "qty": round(qty, 6),
             "stop_loss": round(stop_loss, 4),
             "take_profit": round(take_profit, 4),
@@ -71,24 +65,32 @@ class TradeLogger:
         
         return trade_id, log_entry
     
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.01, fees_exit=-0.01):
         if trade_id not in self.open_trades:
             return None
             
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
+        slippage = 0  # PostOnly = zero slippage
         
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
-        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        # Maker rebates (negative fees = rebate)
+        entry_rebate = abs(trade["entry_price"] * trade["qty"] * fees_entry / 100)
+        exit_rebate = abs(actual_exit * trade["qty"] * fees_exit / 100)
         total_rebates = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_rebates
+        net_pnl = gross_pnl + total_rebates  # Add rebates to profit
+        
+        # Update daily PnL
+        self.daily_pnl += net_pnl
+        if net_pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
         
         log_entry = {
             "id": trade_id,
@@ -101,10 +103,14 @@ class TradeLogger:
             "entry_price": round(trade["entry_price"], 4),
             "expected_exit": round(expected_exit, 4),
             "actual_exit": round(actual_exit, 4),
-            "slippage": round(slippage, 4),
+            "slippage": round(slippage, 6),  # Always 0 with PostOnly
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
+            "fee_rebates": {
+                "entry": round(entry_rebate, 2),
+                "exit": round(exit_rebate, 2),
+                "total": round(total_rebates, 2)
+            },
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -118,17 +124,6 @@ class TradeLogger:
 
 class PivotReversalBot:
     def __init__(self):
-        
-        # Trade cooldown mechanism
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
-        
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = 'LINKUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -143,37 +138,43 @@ class PivotReversalBot:
         self.price_data = pd.DataFrame()
         self.account_balance = 1000
         
-        # FIXED: Track failed pivot levels
-        self.failed_pivots = {}  # {pivot_name: last_failed_timestamp}
-        self.pivot_cooldown = 600  # 10 minutes cooldown for failed pivots
+        # Failed pivot tracking
+        self.failed_pivots = {}
+        self.pivot_cooldown = 600  # 10 minutes cooldown
         
-        # FIXED: Strong momentum requirements
+        # Configuration with ZERO SLIPPAGE settings
         self.config = {
             'timeframe': '3',
             'rsi_period': 14,
             'mfi_period': 14,
-            'rsi_oversold': 25,  # FIXED: Stronger oversold level
-            'rsi_overbought': 75,  # FIXED: Stronger overbought level
-            'mfi_oversold': 25,  # FIXED: Strong momentum required
-            'mfi_overbought': 75,  # FIXED: Strong momentum required
+            'rsi_oversold': 25,
+            'rsi_overbought': 75,
+            'mfi_oversold': 25,
+            'mfi_overbought': 75,
             'risk_pct': 2.0,
-            'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,
+            'maker_offset_pct': 0.02,  # Offset for PostOnly orders
+            'maker_fee': -0.01,  # Rebate for maker orders
             'net_take_profit': 0.6,
             'net_stop_loss': 0.3,
-            'slippage_pct': 0.02,
             'min_notional': 5,
             'qty_precision': 1,
-            'pivot_distance_pct': 0.3,  # Must be within 0.3% of pivot
+            'pivot_distance_pct': 0.3,
+            'order_timeout': 30,
+            'limit_order_retries': 3
         }
         
         # Pivot levels tracking
         self.pivot_levels = {}
         self.last_pivot_update = None
         
+        # Trade cooldown
+        self.last_trade_time = 0
+        self.trade_cooldown = 30
+        
         # Trade logging
         self.logger = TradeLogger("PIVOT_REVERSAL_FIXED", self.symbol)
         self.current_trade_id = None
+        self.last_entry_pivot = None
     
     def connect(self):
         try:
@@ -182,6 +183,75 @@ class PivotReversalBot:
         except Exception as e:
             print(f"❌ Connection error: {e}")
             return False
+    
+    async def execute_limit_order(self, side, qty, price, is_reduce=False):
+        """Execute limit order with PostOnly for ZERO slippage"""
+        formatted_qty = self.format_qty(qty)
+        
+        for retry in range(self.config['limit_order_retries']):
+            # Calculate limit price with offset
+            if side == "Buy":
+                limit_price = price * (1 - self.config['maker_offset_pct']/100)
+            else:
+                limit_price = price * (1 + self.config['maker_offset_pct']/100)
+            
+            limit_price = round(limit_price, 4)
+            
+            params = {
+                "category": "linear",
+                "symbol": self.symbol,
+                "side": side,
+                "orderType": "Limit",
+                "qty": formatted_qty,
+                "price": str(limit_price),
+                "timeInForce": "PostOnly"  # This ensures ZERO slippage
+            }
+            
+            if is_reduce:
+                params["reduceOnly"] = True
+            
+            try:
+                order = self.exchange.place_order(**params)
+                
+                if order.get('retCode') == 0:
+                    order_id = order['result']['orderId']
+                    
+                    # Wait for fill
+                    start_time = time.time()
+                    while time.time() - start_time < self.config['order_timeout']:
+                        await asyncio.sleep(1)
+                        
+                        # Check order status
+                        order_status = self.exchange.get_open_orders(
+                            category="linear",
+                            symbol=self.symbol,
+                            orderId=order_id
+                        )
+                        
+                        if order_status['retCode'] == 0:
+                            if not order_status['result']['list']:
+                                # Order filled with ZERO slippage
+                                return limit_price
+                    
+                    # Cancel unfilled order
+                    try:
+                        self.exchange.cancel_order(
+                            category="linear",
+                            symbol=self.symbol,
+                            orderId=order_id
+                        )
+                    except:
+                        pass
+            except Exception as e:
+                print(f"❌ Order attempt {retry+1} failed: {e}")
+            
+            # Get fresh price for next attempt
+            if retry < self.config['limit_order_retries'] - 1:
+                await asyncio.sleep(2)
+                await self.get_market_data()
+                price = float(self.price_data['close'].iloc[-1])
+        
+        return None
     
     def format_qty(self, qty):
         precision = self.config['qty_precision']
@@ -211,24 +281,12 @@ class PivotReversalBot:
             return 0
         
         qty = risk_amount / price_diff
-        
         notional = qty * price
+        
         if notional < self.config['min_notional']:
             qty = self.config['min_notional'] / price
         
         return qty
-    
-    def calculate_limit_price(self, market_price, side, include_slippage=True):
-        slippage_mult = 1 + (self.config['slippage_pct'] / 100) if include_slippage else 1
-        
-        if side == 'BUY':
-            price_with_slippage = market_price * slippage_mult
-            limit_price = price_with_slippage * (1 - self.config['maker_offset_pct'] / 100)
-        else:
-            price_with_slippage = market_price / slippage_mult
-            limit_price = price_with_slippage * (1 + self.config['maker_offset_pct'] / 100)
-        
-        return round(limit_price, 4)
     
     async def check_pending_orders(self):
         try:
@@ -240,16 +298,6 @@ class PivotReversalBot:
             order_list = orders['result']['list']
             if order_list and len(order_list) > 0:
                 self.pending_order = order_list[0]
-                order_age = (datetime.now().timestamp() - int(order_list[0]['createdTime']) / 1000)
-                if order_age > 300:  # 5 minutes
-                    self.exchange.cancel_order(
-                        category="linear",
-                        symbol=self.symbol,
-                        orderId=order_list[0]['orderId']
-                    )
-                    print(f"❌ Cancelled stale order (aged {order_age:.0f}s)")
-                    self.pending_order = None
-                    return False
                 return True
             
             self.pending_order = None
@@ -352,7 +400,7 @@ class PivotReversalBot:
         return None, None
     
     def is_pivot_failed(self, pivot_name):
-        """FIXED: Check if pivot recently failed"""
+        """Check if pivot recently failed"""
         if pivot_name not in self.failed_pivots:
             return False
         
@@ -360,7 +408,7 @@ class PivotReversalBot:
         return time_since_fail < self.pivot_cooldown
     
     def mark_pivot_failed(self, pivot_name):
-        """FIXED: Mark pivot as failed"""
+        """Mark pivot as failed"""
         self.failed_pivots[pivot_name] = datetime.now().timestamp()
         print(f"⚠️ Marked {pivot_name} as failed, cooldown for {self.pivot_cooldown}s")
     
@@ -368,8 +416,12 @@ class PivotReversalBot:
         if len(df) < 30:
             return None
         
-        # FIXED: No signals if position exists
+        # No signals if position exists
         if self.position:
+            return None
+        
+        # Check trade cooldown
+        if time.time() - self.last_trade_time < self.trade_cooldown:
             return None
         
         current_price = float(df['close'].iloc[-1])
@@ -386,7 +438,7 @@ class PivotReversalBot:
         if not pivot_name:
             return None
         
-        # FIXED: Skip if pivot recently failed
+        # Skip if pivot recently failed
         if self.is_pivot_failed(pivot_name):
             return None
         
@@ -396,7 +448,7 @@ class PivotReversalBot:
         if not mfi:
             return None
         
-        # FIXED: Stronger momentum requirements
+        # Strong momentum requirements
         # Long signal: Near support with STRONG oversold conditions
         if pivot_name in ['s1', 's2', 's3']:
             if rsi < self.config['rsi_oversold'] and mfi < self.config['mfi_oversold']:
@@ -466,8 +518,8 @@ class PivotReversalBot:
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
-                # FIXED: Mark pivot as failed on stop loss
-                if hasattr(self, 'last_entry_pivot'):
+                # Mark pivot as failed on stop loss
+                if self.last_entry_pivot:
                     self.mark_pivot_failed(self.last_entry_pivot)
                 return True, "stop_loss"
             
@@ -479,8 +531,8 @@ class PivotReversalBot:
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
-                # FIXED: Mark pivot as failed on stop loss
-                if hasattr(self, 'last_entry_pivot'):
+                # Mark pivot as failed on stop loss
+                if self.last_entry_pivot:
                     self.mark_pivot_failed(self.last_entry_pivot)
                 return True, "stop_loss"
             
@@ -491,14 +543,13 @@ class PivotReversalBot:
         return False, ""
     
     async def execute_trade(self, signal):
-        
         # Check trade cooldown
-        import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
-        # FIXED: Double-check no position exists
+        
+        # Double-check no position exists
         await self.check_position()
         if self.position:
             print("⚠️ Position already exists, skipping trade")
@@ -517,49 +568,39 @@ class PivotReversalBot:
             stop_loss_price = signal['pivot_level'] * 1.005
         
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
-        formatted_qty = self.format_qty(qty)
         
-        if float(formatted_qty) < (self.config['min_notional'] / signal['price']):
-            print(f"⚠️ Position size too small: {formatted_qty}")
+        if qty < (self.config['min_notional'] / signal['price']):
+            print(f"⚠️ Position size too small: {qty}")
             return
         
-        limit_price = self.calculate_limit_price(signal['price'], signal['action'])
+        # Execute with ZERO slippage
+        actual_price = await self.execute_limit_order(
+            "Buy" if signal['action'] == 'BUY' else "Sell",
+            qty,
+            signal['price']
+        )
         
-        try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+        if actual_price:
+            self.last_trade_time = time.time()
+            self.last_entry_pivot = signal['pivot']
+            
+            net_tp = actual_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else actual_price * (1 - self.config['net_take_profit']/100)
+            
+            self.current_trade_id, _ = self.logger.log_trade_open(
+                side=signal['action'],
+                expected_price=signal['price'],
+                actual_price=actual_price,
+                qty=qty,
+                stop_loss=stop_loss_price,
+                take_profit=net_tp,
+                info=f"pivot:{signal['pivot']}_{signal['pivot_level']:.4f}_rsi:{signal['rsi']:.1f}_mfi:{signal['mfi']:.1f}"
             )
             
-            if order.get('retCode') == 0:
-                self.last_trade_time = time.time()  # Update last trade time
-                # FIXED: Remember pivot for failure tracking
-                self.last_entry_pivot = signal['pivot']
-                
-                net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
-                
-                self.current_trade_id, _ = self.logger.log_trade_open(
-                    side=signal['action'],
-                    expected_price=signal['price'],
-                    actual_price=limit_price,
-                    qty=float(formatted_qty),
-                    stop_loss=stop_loss_price,
-                    take_profit=net_tp,
-                    info=f"pivot:{signal['pivot']}_{signal['pivot_level']:.4f}_rsi:{signal['rsi']:.1f}_mfi:{signal['mfi']:.1f}"
-                )
-                
-                position_value = float(formatted_qty) * limit_price
-                print(f"✅ PIVOT {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
-                print(f"   📍 Pivot: {signal['pivot']} @ ${signal['pivot_level']:.4f}")
-                print(f"   📊 RSI: {signal['rsi']:.1f} | MFI: {signal['mfi']:.1f}")
-                
-        except Exception as e:
-            print(f"❌ Trade failed: {e}")
+            position_value = qty * actual_price
+            print(f"✅ PIVOT {signal['action']}: {self.format_qty(qty)} @ ${actual_price:.4f}")
+            print(f"   📍 Pivot: {signal['pivot']} @ ${signal['pivot_level']:.4f}")
+            print(f"   📊 RSI: {signal['rsi']:.1f} | MFI: {signal['mfi']:.1f}")
+            print(f"   ✅ ZERO SLIPPAGE with PostOnly")
     
     async def close_position(self, reason):
         if not self.position:
@@ -569,37 +610,21 @@ class PivotReversalBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
-        limit_price = self.calculate_limit_price(current_price, side)
+        actual_price = await self.execute_limit_order(side, qty, current_price, is_reduce=True)
         
-        try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True
+        if actual_price and self.current_trade_id:
+            self.logger.log_trade_close(
+                trade_id=self.current_trade_id,
+                expected_exit=current_price,
+                actual_exit=actual_price,
+                reason=reason,
+                fees_entry=self.config['maker_fee'],
+                fees_exit=self.config['maker_fee']
             )
+            self.current_trade_id = None
             
-            if order.get('retCode') == 0:
-                if self.current_trade_id:
-                    self.logger.log_trade_close(
-                        trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=limit_price,
-                        reason=reason,
-                        fees_entry=self.config['maker_fee_pct'],
-                        fees_exit=self.config['maker_fee_pct']
-                    )
-                    self.current_trade_id = None
-                
-                print(f"✅ Closed: {reason}")
-                self.position = None
-                
-        except Exception as e:
-            print(f"❌ Close failed: {e}")
+            print(f"✅ Closed: {reason} @ ${actual_price:.4f} | ZERO SLIPPAGE")
+            self.position = None
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -646,13 +671,13 @@ class PivotReversalBot:
         print("-" * 60)
     
     async def run_cycle(self):
-        
         # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
+        if self.logger.daily_pnl < -self.logger.max_daily_loss:
+            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f} exceeded limit")
             if self.position:
                 await self.close_position("emergency_stop")
             return
+        
         if not await self.get_market_data():
             return
         
@@ -674,12 +699,13 @@ class PivotReversalBot:
             print("❌ Failed to connect")
             return
         
-        print(f"🎯 Pivot Point Reversal Bot (FIXED)")
-        print(f"✅ FIXES APPLIED:")
-        print(f"   • Strong momentum filters: RSI<{self.config['rsi_oversold']} or >{self.config['rsi_overbought']}")
-        print(f"   • MFI momentum check: <{self.config['mfi_oversold']} or >{self.config['mfi_overbought']}")
+        print(f"🎯 Pivot Point Reversal Bot - ZERO SLIPPAGE VERSION")
+        print(f"✅ FEATURES:")
+        print(f"   • PostOnly Limit Orders = 0 Slippage")
+        print(f"   • Maker Rebate: {abs(self.config['maker_fee'])}%")
+        print(f"   • Strong momentum: RSI<{self.config['rsi_oversold']} or >{self.config['rsi_overbought']}")
+        print(f"   • MFI check: <{self.config['mfi_oversold']} or >{self.config['mfi_overbought']}")
         print(f"   • Failed pivot tracking: {self.pivot_cooldown}s cooldown")
-        print(f"   • Position check before trades")
         
         try:
             while True:

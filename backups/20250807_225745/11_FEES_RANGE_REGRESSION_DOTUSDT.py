@@ -6,10 +6,8 @@ import json
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
-import time
 
 load_dotenv()
-
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
@@ -18,6 +16,7 @@ class TradeLogger:
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
+        
         
         # Emergency stop tracking
         self.daily_pnl = 0
@@ -29,64 +28,16 @@ class TradeLogger:
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Add exchange reference
-        self.exchange = None
-        
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
-    
-    def format_qty(self, qty):
-        """Format quantity to appropriate precision"""
-        precision = 1  # Default precision for DOT
-        step = 10 ** (-precision)
-        rounded_qty = round(qty / step) * step
-        return f"{rounded_qty:.{precision}f}"
-    
-    def format_price(self, price):
-        """Format price to 4 decimal places"""
-        return f"{price:.4f}"
-    
-    async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for zero slippage"""
-        if not self.exchange:
-            return None
-            
-        formatted_qty = self.format_qty(qty)
         
-        # Calculate limit price with small offset
-        if side == "Buy":
-            limit_price = price * 0.9998  # Slightly below market
-        else:
-            limit_price = price * 1.0002  # Slightly above market
-        
-        limit_price = float(self.format_price(limit_price))
-        
-        params = {
-            "category": "linear",
-            "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"  # This ensures ZERO slippage
-        }
-        
-        if is_reduce:
-            params["reduceOnly"] = True
-        
-        order = self.exchange.place_order(**params)
-        
-        if order.get('retCode') == 0:
-            return limit_price  # Return actual price, slippage = 0
-        return None
-    
     def generate_trade_id(self):
         self.trade_id += 1
         return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,
@@ -119,52 +70,40 @@ class TradeLogger:
         
         return trade_id, log_entry
     
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry, fees_exit):
-        """Log trade closing with PnL calculation"""
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
             return None
+            
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        trade_info = self.open_trades[trade_id]
-        entry_price = trade_info['entry_price']
-        qty = trade_info['qty']
-        side = trade_info['side']
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate PnL
-        if side == "BUY":
-            gross_pnl = (actual_exit - entry_price) * qty
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
-            gross_pnl = (entry_price - actual_exit) * qty
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # Calculate fees
-        entry_fee = abs(entry_price * qty * fees_entry / 100)
-        exit_fee = abs(actual_exit * qty * fees_exit / 100)
-        total_fees = entry_fee + exit_fee
-        
-        net_pnl = gross_pnl - total_fees
-        
-        # Update daily PnL
-        self.daily_pnl += net_pnl
-        
-        # Track consecutive losses
-        if net_pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        total_rebates = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_rebates
         
         log_entry = {
             "id": trade_id,
             "bot": self.bot_name,
             "symbol": self.symbol,
-            "side": "LONG" if side == "BUY" else "SHORT",
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
             "action": "CLOSE",
             "ts": datetime.now(timezone.utc).isoformat(),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
             "expected_exit": round(expected_exit, 4),
             "actual_exit": round(actual_exit, 4),
-            "slippage": 0,  # PostOnly = zero slippage
-            "qty": round(qty, 6),
-            "entry_price": round(entry_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": round(total_fees, 2),
+            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -173,18 +112,16 @@ class TradeLogger:
         with open(self.log_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
         
-        # Remove from open trades
         del self.open_trades[trade_id]
-        
         return log_entry
-    
-    
+
 class RangeBalancingBot:
     def __init__(self):
         
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
+        
         
         # Emergency stop tracking
         self.daily_pnl = 0
@@ -203,7 +140,7 @@ class RangeBalancingBot:
         self.price_data = pd.DataFrame()
         self.account_balance = 1000
         
-        # Order management state
+        # 🔴 CRITICAL FIX: Order management state
         self.pending_order = False
         self.last_order_time = None
         self.active_order_id = None
@@ -234,8 +171,6 @@ class RangeBalancingBot:
     def connect(self):
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            # Share exchange with logger
-            self.logger.exchange = self.exchange
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")
@@ -275,9 +210,8 @@ class RangeBalancingBot:
             qty = self.config['min_notional'] / price
         
         return qty
-
-    def calculate_limit_price(self, market_price, side, include_slippage=False):
-        """Calculate limit price with maker offset"""
+    
+    def calculate_limit_price(self, market_price, side, include_slippage=True):
         slippage_mult = 1 + (self.config['slippage_pct'] / 100) if include_slippage else 1
         
         if side == 'BUY':
@@ -289,6 +223,7 @@ class RangeBalancingBot:
         
         return round(limit_price, 4)
     
+    # 🔴 CRITICAL FIX: Check and cancel pending orders
     async def check_pending_orders(self):
         """Check for any unfilled orders and cancel old ones"""
         try:
@@ -383,11 +318,11 @@ class RangeBalancingBot:
         }
     
     def generate_signal(self, df):
-        # Don't generate signals if we have pending orders or position
+        # 🔴 CRITICAL FIX: Don't generate signals if we have pending orders or position
         if self.pending_order or self.position:
             return None
         
-        # Check minimum time between orders
+        # 🔴 CRITICAL FIX: Check minimum time between orders
         if self.last_order_time:
             time_since_last = (datetime.now() - self.last_order_time).total_seconds()
             if time_since_last < self.min_order_interval:
@@ -509,17 +444,17 @@ class RangeBalancingBot:
     async def execute_trade(self, signal):
         
         # Check trade cooldown
+        import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
-        
-        # Double-check no pending orders
+        # 🔴 CRITICAL FIX: Double-check no pending orders
         if self.pending_order:
             print("⚠️ Order already pending, skipping signal")
             return
         
-        # Set pending flag immediately
+        # 🔴 CRITICAL FIX: Set pending flag immediately
         self.pending_order = True
         self.last_order_time = datetime.now()
         
@@ -555,9 +490,6 @@ class RangeBalancingBot:
                 self.last_trade_time = time.time()  # Update last trade time
                 self.active_order_id = order['result']['orderId']
                 
-                # Update logger's tracking
-                self.logger.last_trade_time = self.last_trade_time
-                
                 net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
                 net_sl = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
                 
@@ -587,7 +519,7 @@ class RangeBalancingBot:
         if not self.position:
             return
         
-        # Set pending flag for close orders too
+        # 🔴 CRITICAL FIX: Set pending flag for close orders too
         self.pending_order = True
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -610,7 +542,7 @@ class RangeBalancingBot:
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
-                    log_entry = self.logger.log_trade_close(
+                    self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
                         actual_exit=limit_price,
@@ -618,11 +550,6 @@ class RangeBalancingBot:
                         fees_entry=self.config['maker_fee_pct'],
                         fees_exit=self.config['maker_fee_pct']
                     )
-                    
-                    # Update bot's daily PnL and consecutive losses from logger
-                    self.daily_pnl = self.logger.daily_pnl
-                    self.consecutive_losses = self.logger.consecutive_losses
-                    
                     self.current_trade_id = None
                 
                 print(f"✅ CLOSE ORDER PLACED: {reason}")
@@ -644,7 +571,7 @@ class RangeBalancingBot:
         print(f"\n📊 Range Balancing Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
         
-        # Show order status
+        # 🔴 CRITICAL FIX: Show order status
         if self.pending_order:
             print(f"⏳ PENDING ORDER: {self.active_order_id}")
         
@@ -673,11 +600,10 @@ class RangeBalancingBot:
             if self.position:
                 await self.close_position("emergency_stop")
             return
-        
         if not await self.get_market_data():
             return
         
-        # Check pending orders first
+        # 🔴 CRITICAL FIX: Check pending orders first
         await self.check_pending_orders()
         
         await self.check_position()

@@ -3,13 +3,12 @@ import asyncio
 import pandas as pd
 import numpy as np
 import json
+import time
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
-import time
 
 load_dotenv()
-
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
@@ -18,6 +17,7 @@ class TradeLogger:
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
+        
         
         # Emergency stop tracking
         self.daily_pnl = 0
@@ -29,64 +29,16 @@ class TradeLogger:
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Add exchange reference
-        self.exchange = None
-        
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
-    
-    def format_qty(self, qty):
-        """Format quantity to appropriate precision"""
-        precision = 1  # Default precision for DOT
-        step = 10 ** (-precision)
-        rounded_qty = round(qty / step) * step
-        return f"{rounded_qty:.{precision}f}"
-    
-    def format_price(self, price):
-        """Format price to 4 decimal places"""
-        return f"{price:.4f}"
-    
-    async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for zero slippage"""
-        if not self.exchange:
-            return None
-            
-        formatted_qty = self.format_qty(qty)
         
-        # Calculate limit price with small offset
-        if side == "Buy":
-            limit_price = price * 0.9998  # Slightly below market
-        else:
-            limit_price = price * 1.0002  # Slightly above market
-        
-        limit_price = float(self.format_price(limit_price))
-        
-        params = {
-            "category": "linear",
-            "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"  # This ensures ZERO slippage
-        }
-        
-        if is_reduce:
-            params["reduceOnly"] = True
-        
-        order = self.exchange.place_order(**params)
-        
-        if order.get('retCode') == 0:
-            return limit_price  # Return actual price, slippage = 0
-        return None
-    
     def generate_trade_id(self):
         self.trade_id += 1
         return self.trade_id
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,
@@ -119,52 +71,40 @@ class TradeLogger:
         
         return trade_id, log_entry
     
-    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry, fees_exit):
-        """Log trade closing with PnL calculation"""
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
             return None
+            
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        trade_info = self.open_trades[trade_id]
-        entry_price = trade_info['entry_price']
-        qty = trade_info['qty']
-        side = trade_info['side']
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        # Calculate PnL
-        if side == "BUY":
-            gross_pnl = (actual_exit - entry_price) * qty
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
         else:
-            gross_pnl = (entry_price - actual_exit) * qty
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
-        # Calculate fees
-        entry_fee = abs(entry_price * qty * fees_entry / 100)
-        exit_fee = abs(actual_exit * qty * fees_exit / 100)
-        total_fees = entry_fee + exit_fee
-        
-        net_pnl = gross_pnl - total_fees
-        
-        # Update daily PnL
-        self.daily_pnl += net_pnl
-        
-        # Track consecutive losses
-        if net_pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        total_rebates = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_rebates
         
         log_entry = {
             "id": trade_id,
             "bot": self.bot_name,
             "symbol": self.symbol,
-            "side": "LONG" if side == "BUY" else "SHORT",
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
             "action": "CLOSE",
             "ts": datetime.now(timezone.utc).isoformat(),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
             "expected_exit": round(expected_exit, 4),
             "actual_exit": round(actual_exit, 4),
-            "slippage": 0,  # PostOnly = zero slippage
-            "qty": round(qty, 6),
-            "entry_price": round(entry_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fees": round(total_fees, 2),
+            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -173,25 +113,23 @@ class TradeLogger:
         with open(self.log_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
         
-        # Remove from open trades
         del self.open_trades[trade_id]
-        
         return log_entry
-    
-    
-class RangeBalancingBot:
+
+class PivotReversalBot:
     def __init__(self):
         
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
         
+        
         # Emergency stop tracking
         self.daily_pnl = 0
         self.consecutive_losses = 0
         self.max_daily_loss = 50  # $50 max daily loss
         
-        self.symbol = 'DOTUSDT'
+        self.symbol = 'LINKUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -199,22 +137,25 @@ class RangeBalancingBot:
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
+        # Trading state
         self.position = None
+        self.pending_order = None
         self.price_data = pd.DataFrame()
         self.account_balance = 1000
         
-        # Order management state
-        self.pending_order = False
-        self.last_order_time = None
-        self.active_order_id = None
-        self.min_order_interval = 30  # Minimum seconds between orders
+        # FIXED: Track failed pivot levels
+        self.failed_pivots = {}  # {pivot_name: last_failed_timestamp}
+        self.pivot_cooldown = 600  # 10 minutes cooldown for failed pivots
         
+        # FIXED: Strong momentum requirements
         self.config = {
-            'timeframe': '5',
-            'regression_period': 50,
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'channel_width_pct': 1.5,
+            'timeframe': '3',
+            'rsi_period': 14,
+            'mfi_period': 14,
+            'rsi_oversold': 25,  # FIXED: Stronger oversold level
+            'rsi_overbought': 75,  # FIXED: Stronger overbought level
+            'mfi_oversold': 25,  # FIXED: Strong momentum required
+            'mfi_overbought': 75,  # FIXED: Strong momentum required
             'risk_pct': 2.0,
             'maker_offset_pct': 0.01,
             'maker_fee_pct': -0.04,
@@ -223,19 +164,20 @@ class RangeBalancingBot:
             'slippage_pct': 0.02,
             'min_notional': 5,
             'qty_precision': 1,
+            'pivot_distance_pct': 0.3,  # Must be within 0.3% of pivot
         }
         
-        self.regression_channel = None
-        self.last_channel_update = None
+        # Pivot levels tracking
+        self.pivot_levels = {}
+        self.last_pivot_update = None
         
-        self.logger = TradeLogger("RANGE_REGRESSION_FIXED", self.symbol)
+        # Trade logging
+        self.logger = TradeLogger("PIVOT_REVERSAL_FIXED", self.symbol)
         self.current_trade_id = None
     
     def connect(self):
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            # Share exchange with logger
-            self.logger.exchange = self.exchange
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")
@@ -275,9 +217,8 @@ class RangeBalancingBot:
             qty = self.config['min_notional'] / price
         
         return qty
-
-    def calculate_limit_price(self, market_price, side, include_slippage=False):
-        """Calculate limit price with maker offset"""
+    
+    def calculate_limit_price(self, market_price, side, include_slippage=True):
         slippage_mult = 1 + (self.config['slippage_pct'] / 100) if include_slippage else 1
         
         if side == 'BUY':
@@ -290,144 +231,195 @@ class RangeBalancingBot:
         return round(limit_price, 4)
     
     async def check_pending_orders(self):
-        """Check for any unfilled orders and cancel old ones"""
         try:
-            orders = self.exchange.get_open_orders(
-                category="linear",
-                symbol=self.symbol,
-                limit=50
-            )
-            
-            if orders.get('retCode') == 0:
-                open_orders = orders['result']['list']
-                
-                for order in open_orders:
-                    order_time = datetime.fromtimestamp(int(order['createdTime'])/1000, tz=timezone.utc)
-                    time_diff = (datetime.now(timezone.utc) - order_time).total_seconds()
-                    
-                    # Cancel orders older than 60 seconds
-                    if time_diff > 60:
-                        try:
-                            self.exchange.cancel_order(
-                                category="linear",
-                                symbol=self.symbol,
-                                orderId=order['orderId']
-                            )
-                            print(f"❌ Cancelled stale order: {order['orderId']}")
-                            self.pending_order = False
-                            self.active_order_id = None
-                        except:
-                            pass
-                    else:
-                        # We have a pending order
-                        self.pending_order = True
-                        self.active_order_id = order['orderId']
-                        return True
-                
-                # No pending orders
-                self.pending_order = False
-                self.active_order_id = None
+            orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
+            if orders.get('retCode') != 0:
+                self.pending_order = None
                 return False
+            
+            order_list = orders['result']['list']
+            if order_list and len(order_list) > 0:
+                self.pending_order = order_list[0]
+                order_age = (datetime.now().timestamp() - int(order_list[0]['createdTime']) / 1000)
+                if order_age > 300:  # 5 minutes
+                    self.exchange.cancel_order(
+                        category="linear",
+                        symbol=self.symbol,
+                        orderId=order_list[0]['orderId']
+                    )
+                    print(f"❌ Cancelled stale order (aged {order_age:.0f}s)")
+                    self.pending_order = None
+                    return False
+                return True
+            
+            self.pending_order = None
+            return False
         except Exception as e:
-            print(f"⚠️ Order check error: {e}")
+            print(f"❌ Order check error: {e}")
             return False
     
-    def calculate_linear_regression(self, prices):
-        if len(prices) < self.config['regression_period']:
+    async def check_position(self):
+        try:
+            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
+                if pos_list:
+                    for pos in pos_list:
+                        if float(pos.get('size', 0)) > 0:
+                            self.position = pos
+                            return True
+            self.position = None
+            return False
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
+            self.position = None
+            return False
+    
+    def calculate_pivot_points(self, df):
+        if len(df) < 2:
             return None
         
-        recent_prices = prices.tail(self.config['regression_period'])
-        x = np.arange(len(recent_prices))
-        y = recent_prices.values
+        prev_high = df['high'].iloc[-2]
+        prev_low = df['low'].iloc[-2]
+        prev_close = df['close'].iloc[-2]
         
-        coefficients = np.polyfit(x, y, 1)
-        slope = coefficients[0]
-        intercept = coefficients[1]
+        pivot = (prev_high + prev_low + prev_close) / 3
         
-        regression_line = slope * x + intercept
+        r1 = 2 * pivot - prev_low
+        r2 = pivot + (prev_high - prev_low)
+        r3 = r1 + (prev_high - prev_low)
         
-        residuals = y - regression_line
-        std_dev = np.std(residuals)
-        
-        channel_width = std_dev * self.config['channel_width_pct']
-        upper_channel = regression_line[-1] + channel_width
-        lower_channel = regression_line[-1] - channel_width
-        midline = regression_line[-1]
-        
-        angle = np.degrees(np.arctan(slope))
+        s1 = 2 * pivot - prev_high
+        s2 = pivot - (prev_high - prev_low)
+        s3 = s1 - (prev_high - prev_low)
         
         return {
-            'upper': upper_channel,
-            'lower': lower_channel,
-            'midline': midline,
-            'slope': slope,
-            'angle': angle,
-            'std_dev': std_dev
+            'pivot': pivot,
+            'r1': r1, 'r2': r2, 'r3': r3,
+            's1': s1, 's2': s2, 's3': s3
         }
     
-    def calculate_bollinger_bands(self, prices):
-        if len(prices) < self.config['bb_period']:
+    def calculate_rsi(self, prices):
+        delta = prices.diff()
+        gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
+        rs = gain / (loss + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    def calculate_mfi(self, df):
+        if len(df) < self.config['mfi_period'] + 1:
             return None
         
-        sma = prices.rolling(window=self.config['bb_period']).mean()
-        std = prices.rolling(window=self.config['bb_period']).std()
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        money_flow = typical_price * df['volume']
         
-        upper_band = sma + (std * self.config['bb_std'])
-        lower_band = sma - (std * self.config['bb_std'])
+        positive_flow = []
+        negative_flow = []
         
-        return {
-            'upper': upper_band.iloc[-1],
-            'lower': lower_band.iloc[-1],
-            'middle': sma.iloc[-1],
-            'bandwidth': (upper_band.iloc[-1] - lower_band.iloc[-1]) / sma.iloc[-1] * 100
-        }
+        for i in range(1, len(typical_price)):
+            if typical_price.iloc[i] > typical_price.iloc[i-1]:
+                positive_flow.append(money_flow.iloc[i])
+                negative_flow.append(0)
+            elif typical_price.iloc[i] < typical_price.iloc[i-1]:
+                positive_flow.append(0)
+                negative_flow.append(money_flow.iloc[i])
+            else:
+                positive_flow.append(0)
+                negative_flow.append(0)
+        
+        positive_mf = pd.Series(positive_flow).rolling(window=self.config['mfi_period']).sum()
+        negative_mf = pd.Series(negative_flow).rolling(window=self.config['mfi_period']).sum()
+        
+        mfi = 100 - (100 / (1 + positive_mf / (negative_mf + 1e-10)))
+        return mfi.iloc[-1] if not pd.isna(mfi.iloc[-1]) else 50
+    
+    def find_nearest_pivot(self, price, pivots):
+        if not pivots:
+            return None, None
+        
+        levels = [
+            ('pivot', pivots['pivot']),
+            ('s1', pivots['s1']), ('s2', pivots['s2']), ('s3', pivots['s3']),
+            ('r1', pivots['r1']), ('r2', pivots['r2']), ('r3', pivots['r3'])
+        ]
+        
+        for name, level in levels:
+            distance_pct = abs(price - level) / level * 100
+            if distance_pct < self.config['pivot_distance_pct']:
+                return name, level
+        
+        return None, None
+    
+    def is_pivot_failed(self, pivot_name):
+        """FIXED: Check if pivot recently failed"""
+        if pivot_name not in self.failed_pivots:
+            return False
+        
+        time_since_fail = datetime.now().timestamp() - self.failed_pivots[pivot_name]
+        return time_since_fail < self.pivot_cooldown
+    
+    def mark_pivot_failed(self, pivot_name):
+        """FIXED: Mark pivot as failed"""
+        self.failed_pivots[pivot_name] = datetime.now().timestamp()
+        print(f"⚠️ Marked {pivot_name} as failed, cooldown for {self.pivot_cooldown}s")
     
     def generate_signal(self, df):
-        # Don't generate signals if we have pending orders or position
-        if self.pending_order or self.position:
+        if len(df) < 30:
             return None
         
-        # Check minimum time between orders
-        if self.last_order_time:
-            time_since_last = (datetime.now() - self.last_order_time).total_seconds()
-            if time_since_last < self.min_order_interval:
-                return None
-        
-        if len(df) < self.config['regression_period']:
+        # FIXED: No signals if position exists
+        if self.position:
             return None
         
         current_price = float(df['close'].iloc[-1])
         
-        if not self.last_channel_update or (datetime.now() - self.last_channel_update).total_seconds() > 600:
-            self.regression_channel = self.calculate_linear_regression(df['close'])
-            self.last_channel_update = datetime.now()
+        # Update pivot points every hour
+        if not self.last_pivot_update or (datetime.now() - self.last_pivot_update).total_seconds() > 3600:
+            self.pivot_levels = self.calculate_pivot_points(df)
+            self.last_pivot_update = datetime.now()
         
-        if not self.regression_channel:
+        if not self.pivot_levels:
             return None
         
-        bb = self.calculate_bollinger_bands(df['close'])
-        if not bb:
+        pivot_name, pivot_level = self.find_nearest_pivot(current_price, self.pivot_levels)
+        if not pivot_name:
             return None
         
-        reg_position = (current_price - self.regression_channel['lower']) / (self.regression_channel['upper'] - self.regression_channel['lower'])
-        bb_position = (current_price - bb['lower']) / (bb['upper'] - bb['lower'])
+        # FIXED: Skip if pivot recently failed
+        if self.is_pivot_failed(pivot_name):
+            return None
         
-        if reg_position <= 0.1 and bb_position <= 0.2:
-            return {
-                'action': 'BUY',
-                'price': current_price,
-                'reg_channel': self.regression_channel['lower'],
-                'bb_band': bb['lower'],
-                'trend_angle': self.regression_channel['angle']
-            }
-        elif reg_position >= 0.9 and bb_position >= 0.8:
-            return {
-                'action': 'SELL',
-                'price': current_price,
-                'reg_channel': self.regression_channel['upper'],
-                'bb_band': bb['upper'],
-                'trend_angle': self.regression_channel['angle']
-            }
+        rsi = self.calculate_rsi(df['close']).iloc[-1]
+        mfi = self.calculate_mfi(df)
+        
+        if not mfi:
+            return None
+        
+        # FIXED: Stronger momentum requirements
+        # Long signal: Near support with STRONG oversold conditions
+        if pivot_name in ['s1', 's2', 's3']:
+            if rsi < self.config['rsi_oversold'] and mfi < self.config['mfi_oversold']:
+                return {
+                    'action': 'BUY',
+                    'price': current_price,
+                    'pivot': pivot_name,
+                    'pivot_level': pivot_level,
+                    'rsi': rsi,
+                    'mfi': mfi
+                }
+        
+        # Short signal: Near resistance with STRONG overbought conditions
+        elif pivot_name in ['r1', 'r2', 'r3']:
+            if rsi > self.config['rsi_overbought'] and mfi > self.config['mfi_overbought']:
+                return {
+                    'action': 'SELL',
+                    'price': current_price,
+                    'pivot': pivot_name,
+                    'pivot_level': pivot_level,
+                    'rsi': rsi,
+                    'mfi': mfi
+                }
         
         return None
     
@@ -457,18 +449,8 @@ class RangeBalancingBot:
             print(f"❌ Market data error: {e}")
             return False
     
-    async def check_position(self):
-        try:
-            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
-        except Exception as e:
-            print(f"❌ Position check error: {e}")
-            pass
-    
     def should_close(self):
-        if not self.position or not self.regression_channel:
+        if not self.position or not self.pivot_levels:
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -478,64 +460,67 @@ class RangeBalancingBot:
         if entry_price == 0:
             return False, ""
         
+        # Check profit/loss
         if side == "Buy":
             profit_pct = (current_price - entry_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
+                # FIXED: Mark pivot as failed on stop loss
+                if hasattr(self, 'last_entry_pivot'):
+                    self.mark_pivot_failed(self.last_entry_pivot)
                 return True, "stop_loss"
             
-            if current_price >= self.regression_channel['midline']:
-                return True, "channel_midline"
+            # Exit at next resistance pivot
+            if current_price >= self.pivot_levels['r1']:
+                return True, "next_pivot_r1"
         else:
             profit_pct = (entry_price - current_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
+                # FIXED: Mark pivot as failed on stop loss
+                if hasattr(self, 'last_entry_pivot'):
+                    self.mark_pivot_failed(self.last_entry_pivot)
                 return True, "stop_loss"
             
-            if current_price <= self.regression_channel['midline']:
-                return True, "channel_midline"
-        
-        bb = self.calculate_bollinger_bands(self.price_data['close'])
-        if bb:
-            if side == "Buy" and current_price >= bb['upper']:
-                return True, "opposite_bb_band"
-            elif side == "Sell" and current_price <= bb['lower']:
-                return True, "opposite_bb_band"
+            # Exit at next support pivot
+            if current_price <= self.pivot_levels['s1']:
+                return True, "next_pivot_s1"
         
         return False, ""
     
     async def execute_trade(self, signal):
         
         # Check trade cooldown
+        import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
-        
-        # Double-check no pending orders
-        if self.pending_order:
-            print("⚠️ Order already pending, skipping signal")
+        # FIXED: Double-check no position exists
+        await self.check_position()
+        if self.position:
+            print("⚠️ Position already exists, skipping trade")
             return
         
-        # Set pending flag immediately
-        self.pending_order = True
-        self.last_order_time = datetime.now()
+        if await self.check_pending_orders():
+            print("⚠️ Pending order exists, skipping trade")
+            return
         
         await self.update_account_balance()
         
+        # Calculate stop loss beyond pivot level
         if signal['action'] == 'BUY':
-            stop_loss_price = signal['reg_channel'] * 0.995
+            stop_loss_price = signal['pivot_level'] * 0.995
         else:
-            stop_loss_price = signal['reg_channel'] * 1.005
+            stop_loss_price = signal['pivot_level'] * 1.005
         
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if float(formatted_qty) < (self.config['min_notional'] / signal['price']):
             print(f"⚠️ Position size too small: {formatted_qty}")
-            self.pending_order = False  # Reset flag
             return
         
         limit_price = self.calculate_limit_price(signal['price'], signal['action'])
@@ -553,13 +538,10 @@ class RangeBalancingBot:
             
             if order.get('retCode') == 0:
                 self.last_trade_time = time.time()  # Update last trade time
-                self.active_order_id = order['result']['orderId']
-                
-                # Update logger's tracking
-                self.logger.last_trade_time = self.last_trade_time
+                # FIXED: Remember pivot for failure tracking
+                self.last_entry_pivot = signal['pivot']
                 
                 net_tp = limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else limit_price * (1 - self.config['net_take_profit']/100)
-                net_sl = limit_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else limit_price * (1 + self.config['net_stop_loss']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -568,27 +550,20 @@ class RangeBalancingBot:
                     qty=float(formatted_qty),
                     stop_loss=stop_loss_price,
                     take_profit=net_tp,
-                    info=f"reg:{signal['reg_channel']:.4f}_bb:{signal['bb_band']:.4f}_angle:{signal['trend_angle']:.1f}_risk:{self.config['risk_pct']}%"
+                    info=f"pivot:{signal['pivot']}_{signal['pivot_level']:.4f}_rsi:{signal['rsi']:.1f}_mfi:{signal['mfi']:.1f}"
                 )
                 
                 position_value = float(formatted_qty) * limit_price
-                print(f"✅ ORDER PLACED {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
-                print(f"   💰 Position Value: ${position_value:.2f}")
-                print(f"   🆔 Order ID: {self.active_order_id}")
-            else:
-                print(f"❌ Order failed: {order.get('retMsg')}")
-                self.pending_order = False  # Reset flag on failure
+                print(f"✅ PIVOT {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
+                print(f"   📍 Pivot: {signal['pivot']} @ ${signal['pivot_level']:.4f}")
+                print(f"   📊 RSI: {signal['rsi']:.1f} | MFI: {signal['mfi']:.1f}")
                 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
-            self.pending_order = False  # Reset flag on error
     
     async def close_position(self, reason):
         if not self.position:
             return
-        
-        # Set pending flag for close orders too
-        self.pending_order = True
         
         current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
@@ -610,7 +585,7 @@ class RangeBalancingBot:
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
-                    log_entry = self.logger.log_trade_close(
+                    self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
                         actual_exit=limit_price,
@@ -618,22 +593,13 @@ class RangeBalancingBot:
                         fees_entry=self.config['maker_fee_pct'],
                         fees_exit=self.config['maker_fee_pct']
                     )
-                    
-                    # Update bot's daily PnL and consecutive losses from logger
-                    self.daily_pnl = self.logger.daily_pnl
-                    self.consecutive_losses = self.logger.consecutive_losses
-                    
                     self.current_trade_id = None
                 
-                print(f"✅ CLOSE ORDER PLACED: {reason}")
+                print(f"✅ Closed: {reason}")
                 self.position = None
-            else:
-                print(f"❌ Close failed: {order.get('retMsg')}")
-                self.pending_order = False  # Reset on failure
                 
         except Exception as e:
             print(f"❌ Close failed: {e}")
-            self.pending_order = False  # Reset on error
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -641,27 +607,41 @@ class RangeBalancingBot:
         
         current_price = float(self.price_data['close'].iloc[-1])
         
-        print(f"\n📊 Range Balancing Bot - {self.symbol}")
+        print(f"\n🎯 Pivot Reversal Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
         
-        # Show order status
-        if self.pending_order:
-            print(f"⏳ PENDING ORDER: {self.active_order_id}")
-        
-        if self.regression_channel:
-            print(f"📈 Regression: L:${self.regression_channel['lower']:.4f} | M:${self.regression_channel['midline']:.4f} | U:${self.regression_channel['upper']:.4f}")
+        if self.pivot_levels:
+            print(f"📊 Pivots: S1:${self.pivot_levels['s1']:.4f} | P:${self.pivot_levels['pivot']:.4f} | R1:${self.pivot_levels['r1']:.4f}")
+            
+            rsi = self.calculate_rsi(self.price_data['close']).iloc[-1] if len(self.price_data) > 14 else 50
+            mfi = self.calculate_mfi(self.price_data)
+            if mfi:
+                status = "🟢" if (rsi < self.config['rsi_oversold'] and mfi < self.config['mfi_oversold']) else "🔴" if (rsi > self.config['rsi_overbought'] and mfi > self.config['mfi_overbought']) else "⚪"
+                print(f"📈 RSI: {rsi:.1f} | MFI: {mfi:.1f} {status}")
         
         if self.position:
             entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = self.position.get('size', '0')
-            
             pnl = float(self.position.get('unrealisedPnl', 0))
             
             emoji = "🟢" if side == "Buy" else "🔴"
-            print(f"{emoji} {side}: {size} DOT @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+            print(f"{emoji} {side}: {size} LINK @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
+        elif self.pending_order:
+            print(f"⏳ Pending order: {self.pending_order.get('side')} @ ${self.pending_order.get('price')}")
         else:
-            print("🔍 Scanning...")
+            print("🔍 Waiting for strong pivot reversal signals...")
+        
+        # Show failed pivots
+        if self.failed_pivots:
+            active_fails = []
+            current_time = datetime.now().timestamp()
+            for pivot, fail_time in self.failed_pivots.items():
+                remaining = self.pivot_cooldown - (current_time - fail_time)
+                if remaining > 0:
+                    active_fails.append(f"{pivot}({int(remaining)}s)")
+            if active_fails:
+                print(f"❌ Failed pivots on cooldown: {', '.join(active_fails)}")
         
         print("-" * 60)
     
@@ -673,24 +653,19 @@ class RangeBalancingBot:
             if self.position:
                 await self.close_position("emergency_stop")
             return
-        
         if not await self.get_market_data():
             return
-        
-        # Check pending orders first
-        await self.check_pending_orders()
         
         await self.check_position()
         
         if self.position:
             should_close, reason = self.should_close()
-            if should_close and not self.pending_order:
+            if should_close:
                 await self.close_position(reason)
         else:
-            if not self.pending_order:
-                signal = self.generate_signal(self.price_data)
-                if signal:
-                    await self.execute_trade(signal)
+            signal = self.generate_signal(self.price_data)
+            if signal:
+                await self.execute_trade(signal)
         
         self.show_status()
     
@@ -699,12 +674,12 @@ class RangeBalancingBot:
             print("❌ Failed to connect")
             return
         
-        print(f"📊 Range Balancing Bot - ORDER MANAGEMENT FIXED")
-        print(f"✅ CRITICAL FIXES:")
-        print(f"   • Pending order tracking")
-        print(f"   • Minimum {self.min_order_interval}s between orders")
-        print(f"   • Stale order cancellation")
-        print(f"   • Race condition prevention")
+        print(f"🎯 Pivot Point Reversal Bot (FIXED)")
+        print(f"✅ FIXES APPLIED:")
+        print(f"   • Strong momentum filters: RSI<{self.config['rsi_oversold']} or >{self.config['rsi_overbought']}")
+        print(f"   • MFI momentum check: <{self.config['mfi_oversold']} or >{self.config['mfi_overbought']}")
+        print(f"   • Failed pivot tracking: {self.pivot_cooldown}s cooldown")
+        print(f"   • Position check before trades")
         
         try:
             while True:
@@ -719,5 +694,5 @@ class RangeBalancingBot:
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = RangeBalancingBot()
+    bot = PivotReversalBot()
     asyncio.run(bot.run())

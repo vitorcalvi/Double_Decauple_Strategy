@@ -10,38 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class TradeLogger:
- def __init__(self, bot_name, symbol):
-        self.bot_name = bot_name
-async def execute_limit_order(self, side, qty, price, is_reduce=False):
-    """Execute limit order with PostOnly for zero slippage"""
-    formatted_qty = self.format_qty(qty)
-    
-    # Calculate limit price with small offset
-    if side == "Buy":
-        limit_price = price * 0.9998  # Slightly below market
-    else:
-        limit_price = price * 1.0002  # Slightly above market
-    
-    limit_price = float(self.format_price(limit_price))
-    
-    params = {
-        "category": "linear",
-        "symbol": self.symbol,
-        "side": side,
-        "orderType": "Limit",
-        "qty": formatted_qty,
-        "price": str(limit_price),
-        "timeInForce": "PostOnly"  # This ensures ZERO slippage
-    }
-    
-    if is_reduce:
-        params["reduceOnly"] = True
-    
-    order = self.exchange.place_order(**params)
-    
-    if order.get('retCode') == 0:
-        return limit_price  # Return actual price, slippage = 0
-    return None
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
         
@@ -69,7 +37,7 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,
@@ -109,7 +77,7 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         if trade["side"] == "BUY":
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]

@@ -13,142 +13,110 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-    async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for zero slippage"""
-        formatted_qty = self.format_qty(qty)
         
-        # Calculate limit price with small offset
-        if side == "Buy":
-            limit_price = price * 0.9998  # Slightly below market
-        else:
-            limit_price = price * 1.0002  # Slightly above market
+        # Trade cooldown mechanism
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         
-        limit_price = float(self.format_price(limit_price))
         
-        params = {
-            "category": "linear",
+        # Emergency stop tracking
+        self.daily_pnl = 0
+        self.consecutive_losses = 0
+        self.max_daily_loss = 50  # $50 max daily loss
+        
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
+        self.trade_id = 1000
+        
+        os.makedirs("logs", exist_ok=True)
+        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        
+    def generate_trade_id(self):
+        self.trade_id += 1
+        return self.trade_id
+    
+    def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
+        trade_id = self.generate_trade_id()
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
             "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"  # This ensures ZERO slippage
+            "side": "LONG" if side == "BUY" else "SHORT",
+            "action": "OPEN",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "expected_price": round(expected_price, 4),
+            "actual_price": round(actual_price, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(qty, 6),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit": round(take_profit, 4),
+            "currency": self.currency,
+            "info": info
         }
         
-        if is_reduce:
-            params["reduceOnly"] = True
+        self.open_trades[trade_id] = {
+            "entry_time": datetime.now(),
+            "entry_price": actual_price,
+            "side": side,
+            "qty": qty,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
+        }
         
-        order = self.exchange.place_order(**params)
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
         
-        if order.get('retCode') == 0:
-            return limit_price  # Return actual price, slippage = 0
-        return None
-        def __init__(self, bot_name, symbol):
-            self.bot_name = bot_name
+        return trade_id, log_entry
+    
+    def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
+        if trade_id not in self.open_trades:
+            return None
             
-            # Trade cooldown mechanism
-            self.last_trade_time = 0
-            self.trade_cooldown = 30  # 30 seconds between trades
-            
-            
-            # Emergency stop tracking
-            self.daily_pnl = 0
-            self.consecutive_losses = 0
-            self.max_daily_loss = 50  # $50 max daily loss
-            
-            self.symbol = symbol
-            self.currency = "USDT"
-            self.open_trades = {}
-            self.trade_id = 1000
-            
-            os.makedirs("logs", exist_ok=True)
-            self.log_file = f"logs/{bot_name}_{symbol}.log"
-            
-        def generate_trade_id(self):
-            self.trade_id += 1
-            return self.trade_id
+        trade = self.open_trades[trade_id]
+        duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
-        def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
-            trade_id = self.generate_trade_id()
-            slippage = 0  # PostOnly = zero slippage
-            
-            log_entry = {
-                "id": trade_id,
-                "bot": self.bot_name,
-                "symbol": self.symbol,
-                "side": "LONG" if side == "BUY" else "SHORT",
-                "action": "OPEN",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "expected_price": round(expected_price, 4),
-                "actual_price": round(actual_price, 4),
-                "slippage": round(slippage, 4),
-                "qty": round(qty, 6),
-                "stop_loss": round(stop_loss, 4),
-                "take_profit": round(take_profit, 4),
-                "currency": self.currency,
-                "info": info
-            }
-            
-            self.open_trades[trade_id] = {
-                "entry_time": datetime.now(),
-                "entry_price": actual_price,
-                "side": side,
-                "qty": qty,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit
-            }
-            
-            with open(self.log_file, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
-            
-            return trade_id, log_entry
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
-        def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
-            if trade_id not in self.open_trades:
-                return None
-                
-            trade = self.open_trades[trade_id]
-            duration = (datetime.now() - trade["entry_time"]).total_seconds()
-            
-            slippage = 0  # PostOnly = zero slippage
-            
-            if trade["side"] == "BUY":
-                gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
-            else:
-                gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
-            
-            # FIXED: Correct maker rebate calculation
-            entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
-            exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
-            
-            total_rebates = entry_rebate + exit_rebate
-            net_pnl = gross_pnl + total_rebates
-            
-            log_entry = {
-                "id": trade_id,
-                "bot": self.bot_name,
-                "symbol": self.symbol,
-                "side": "LONG" if trade["side"] == "BUY" else "SHORT",
-                "action": "CLOSE",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "duration_sec": int(duration),
-                "entry_price": round(trade["entry_price"], 4),
-                "expected_exit": round(expected_exit, 4),
-                "actual_exit": round(actual_exit, 4),
-                "slippage": round(slippage, 4),
-                "qty": round(trade["qty"], 6),
-                "gross_pnl": round(gross_pnl, 2),
-                "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
-                "net_pnl": round(net_pnl, 2),
-                "reason": reason,
-                "currency": self.currency
-            }
-            
-            with open(self.log_file, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
-            
-            del self.open_trades[trade_id]
-            return log_entry
+        if trade["side"] == "BUY":
+            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
+        else:
+            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
+        
+        # FIXED: Correct maker rebate calculation
+        entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
+        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        
+        total_rebates = entry_rebate + exit_rebate
+        net_pnl = gross_pnl + total_rebates
+        
+        log_entry = {
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+            "action": "CLOSE",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
+            "expected_exit": round(expected_exit, 4),
+            "actual_exit": round(actual_exit, 4),
+            "slippage": round(slippage, 4),
+            "qty": round(trade["qty"], 6),
+            "gross_pnl": round(gross_pnl, 2),
+            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
+            "net_pnl": round(net_pnl, 2),
+            "reason": reason,
+            "currency": self.currency
+        }
+        
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+        
+        del self.open_trades[trade_id]
+        return log_entry
 
 class LiquiditySweepBot:
     """Fixed Liquidity Sweep Strategy"""

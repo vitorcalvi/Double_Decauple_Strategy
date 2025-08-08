@@ -2,7 +2,6 @@ import os
 import asyncio
 import pandas as pd
 import json
-import time
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
@@ -12,12 +11,6 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
@@ -113,12 +106,6 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
-        
-        # Emergency stop tracking
-        self.daily_pnl = 0
-        self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
-        
         self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -440,7 +427,7 @@ class EMARSIBot:
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Limit",
+                orderType="Market",
                 qty=self.format_qty(qty),
                 reduceOnly=True
             )
@@ -502,13 +489,6 @@ class EMARSIBot:
         print(" | ".join(status_parts), end='\r')
     
     async def run_cycle(self):
-        
-        # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         if not await self.get_market_data():
             return
         

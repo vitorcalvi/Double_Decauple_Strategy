@@ -11,19 +11,21 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.bot_name = bot_name
-        self.symbol = symbol
-        self.currency = "USDT"
-        self.open_trades = {}
-        self.trade_id = 1000
         
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
         
+        
         # Emergency stop tracking
         self.daily_pnl = 0
         self.consecutive_losses = 0
         self.max_daily_loss = 50  # $50 max daily loss
+        
+        self.symbol = symbol
+        self.currency = "USDT"
+        self.open_trades = {}
+        self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
@@ -34,7 +36,7 @@ class TradeLogger:
     
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
             "id": trade_id,
@@ -75,7 +77,7 @@ class TradeLogger:
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
         
         # FIXED: Proper slippage calculation
-        slippage = 0  # PostOnly = zero slippage
+        slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         # FIXED: Proper PnL calculation
         if trade["side"] == "BUY":
@@ -119,9 +121,11 @@ class TradeLogger:
 
 class EMABBFixedBot:
     def __init__(self):
+        
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
+        
         
         # Emergency stop tracking
         self.daily_pnl = 0
@@ -173,44 +177,6 @@ class EMABBFixedBot:
         except:
             return False
     
-    def format_price(self, price):
-        """Format price according to exchange requirements"""
-        return str(round(price, 2))
-    
-    def format_qty(self, qty):
-        return str(int(round(qty)))
-    
-    async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for zero slippage"""
-        formatted_qty = self.format_qty(qty)
-        
-        # Calculate limit price with small offset
-        if side == "Buy":
-            limit_price = price * 0.9998  # Slightly below market
-        else:
-            limit_price = price * 1.0002  # Slightly above market
-        
-        limit_price = float(self.format_price(limit_price))
-        
-        params = {
-            "category": "linear",
-            "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"  # This ensures ZERO slippage
-        }
-        
-        if is_reduce:
-            params["reduceOnly"] = True
-        
-        order = self.exchange.place_order(**params)
-        
-        if order.get('retCode') == 0:
-            return limit_price  # Return actual price, slippage = 0
-        return None
-    
     # FIXED: Dynamic position sizing
     def calculate_position_size(self, price, stop_loss_price):
         try:
@@ -240,14 +206,17 @@ class EMABBFixedBot:
             else:
                 volatility = 0.01
         
-        base_slippage = 0  # PostOnly = zero slippage
+        base_slippage = self.config['base_slippage'] / 100
         vol_multiplier = min(volatility * 100, 3)  # Cap at 3x
-        total_slippage = 0  # PostOnly = zero slippage
+        total_slippage = base_slippage * (1 + vol_multiplier)
         
         if side in ["Buy", "BUY"]:
             return price * (1 + total_slippage)
         else:
             return price * (1 - total_slippage)
+    
+    def format_qty(self, qty):
+        return str(int(round(qty)))
     
     async def check_pending_orders(self):
         try:
@@ -452,13 +421,13 @@ class EMABBFixedBot:
             return False, ""
     
     async def execute_trade(self, signal):
+        
         # Check trade cooldown
         import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
-        
         if await self.check_pending_orders() or self.position:
             return
         
@@ -534,7 +503,6 @@ class EMABBFixedBot:
                 side=side,
                 orderType="Limit",
                 qty=self.format_qty(qty),
-                price=str(actual_exit_price),
                 reduceOnly=True
             )
             
@@ -555,13 +523,13 @@ class EMABBFixedBot:
             pass
     
     async def run_cycle(self):
+        
         # Emergency stop check
         if self.daily_pnl < -self.max_daily_loss:
             print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
             if self.position:
                 await self.close_position("emergency_stop")
             return
-        
         if not await self.get_market_data():
             return
         
