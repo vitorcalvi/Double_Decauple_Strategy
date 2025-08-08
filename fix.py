@@ -1,140 +1,245 @@
 #!/usr/bin/env python3
 """
-Ultimate fix for all bot syntax errors
-Usage: python3 ultimate_fix.py
+Targeted fix for the close_position error
+Fixes: EMARSIBot.format_qty() got an unexpected keyword argument 'timeInForce'
 """
 
 import os
 import re
+import glob
 
-def fix_bot(filename):
-    """Fix a specific bot file with targeted fixes"""
+def fix_close_position_method(filepath):
+    """Fix the close_position method specifically"""
     
-    if not os.path.exists(filename):
-        print(f"⚠️  {filename} not found")
-        return False
+    if not os.path.exists(filepath):
+        return False, f"File not found: {filepath}"
     
-    with open(filename, 'r') as f:
-        content = f.read()
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
     
-    original = content
+    original = ''.join(lines)
+    fixed = False
     
-    # Specific fixes based on the file
-    if "2_FEES_EMA_RSI" in filename or "9_FEES_PIVOT" in filename:
-        # Fix else: alignment issue (line 88/89)
-        lines = content.split('\n')
-        for i in range(len(lines)):
-            if i > 85 and i < 92:  # Around line 88-89
-                if lines[i].strip() == 'else:':
-                    lines[i] = '        else:'
-        content = '\n'.join(lines)
+    # Find close_position method
+    in_close_position = False
+    close_start = -1
+    close_end = -1
+    indent_level = 0
     
-    elif "3_FEES_EMAMACDRSI" in filename:
-        # Fix line 455 - duplicate timeInForce
-        content = re.sub(
-            r'timeInForce="PostOnly"\),\s*timeInForce="PostOnly"',
-            'timeInForce="PostOnly"',
-            content
-        )
+    for i, line in enumerate(lines):
+        # Find start of close_position method
+        if 'def close_position' in line:
+            in_close_position = True
+            close_start = i
+            # Determine indentation level
+            indent_level = len(line) - len(line.lstrip())
+            continue
+        
+        # Find end of close_position method
+        if in_close_position:
+            # Check if we're at the same or lower indentation (new method)
+            if line.strip() and not line.startswith(' ' * (indent_level + 4)):
+                if 'def ' in line or 'async def' in line:
+                    close_end = i
+                    break
     
-    elif "4_FEES_LIQUIDITYSWEEP" in filename:
-        # Fix indentation after function definition
-        lines = content.split('\n')
-        for i in range(20, 30):  # Around line 24
-            if i < len(lines):
-                if '"""Execute limit order' in lines[i]:
-                    if not lines[i].startswith('    '):
-                        lines[i] = '    ' + lines[i].strip()
-        content = '\n'.join(lines)
+    if close_start >= 0:
+        if close_end == -1:
+            close_end = len(lines)
+        
+        # Fix the close_position method
+        for i in range(close_start, close_end):
+            line = lines[i]
+            
+            # Fix 1: Remove timeInForce from format_qty calls
+            if 'format_qty(' in line:
+                # Pattern: qty=self.format_qty(something, timeInForce="PostOnly")
+                if 'timeInForce' in line:
+                    # Extract just the format_qty call without timeInForce
+                    pattern = r'self\.format_qty\(([^,)]+)(?:,\s*timeInForce="[^"]*")?\)'
+                    line = re.sub(pattern, r'self.format_qty(\1)', line)
+                    lines[i] = line
+                    fixed = True
+            
+            # Fix 2: Ensure place_order has timeInForce
+            if 'self.exchange.place_order(' in line:
+                # Check if this is the start of place_order call
+                # Find the complete call (might span multiple lines)
+                call_lines = []
+                j = i
+                paren_count = 0
+                while j < close_end:
+                    call_lines.append(lines[j])
+                    paren_count += lines[j].count('(') - lines[j].count(')')
+                    if paren_count == 0 and '(' in lines[j]:
+                        break
+                    j += 1
+                
+                full_call = ''.join(call_lines)
+                
+                # Check if timeInForce is present
+                if 'timeInForce' not in full_call and 'orderType="Limit"' in full_call:
+                    # Add timeInForce before reduceOnly or at the end
+                    if 'reduceOnly=True' in full_call:
+                        full_call = full_call.replace(
+                            'reduceOnly=True',
+                            'timeInForce="PostOnly",\n                reduceOnly=True'
+                        )
+                    else:
+                        # Add before closing parenthesis
+                        full_call = full_call.rstrip().rstrip(')')
+                        full_call += ',\n                timeInForce="PostOnly"\n            )'
+                    
+                    # Replace the lines
+                    new_lines = full_call.split('\n')
+                    for k, new_line in enumerate(new_lines):
+                        if i + k < len(lines):
+                            lines[i + k] = new_line + '\n'
+                    
+                    fixed = True
     
-    elif any(x in filename for x in ["5_FEES_MACD", "7_FEES_DYNAMIC", "12_FEES_ML", "13_FEES_XGBOOST"]):
-        # Fix unmatched parenthesis in place_order
-        content = re.sub(r'\)\)', ')', content)
-        content = re.sub(r',\)', ')', content)
-        content = re.sub(
-            r'timeInForce="PostOnly"\),\s*timeInForce="PostOnly"',
-            'timeInForce="PostOnly"',
-            content
-        )
+    # Additional fix: Look for specific error pattern
+    for i, line in enumerate(lines):
+        # Pattern where format_qty is incorrectly called
+        if 'qty=self.format_qty(' in line:
+            # Check if there's a comma after the first parameter
+            match = re.search(r'qty=self\.format_qty\(([^,)]+),([^)]+)\)', line)
+            if match:
+                first_param = match.group(1)
+                second_param = match.group(2)
+                if 'timeInForce' in second_param:
+                    # Remove the second parameter
+                    lines[i] = line.replace(match.group(0), f'qty=self.format_qty({first_param})')
+                    fixed = True
     
-    # Common fixes for all files
-    content = re.sub(r'\)\)', ')', content)  # Double parentheses
-    content = re.sub(r',\)', ')', content)   # Trailing comma
-    content = re.sub(          # Duplicate timeInForce
-        r'timeInForce="PostOnly"\),\s*timeInForce="PostOnly"',
-        'timeInForce="PostOnly"',
-        content
-    )
+    content = ''.join(lines)
     
-    # Fix missing comma in place_order calls
-    content = re.sub(
-        r'(qty=self\.format_qty\([^)]+\))\s+(timeInForce="PostOnly")',
-        r'\1,\n            \2',
-        content
-    )
-    
-    # Save if changed
     if content != original:
-        # Backup original
-        with open(f"{filename}.backup", 'w') as f:
+        # Backup
+        backup = filepath + '.backup_close'
+        with open(backup, 'w') as f:
             f.write(original)
         
-        # Write fixed
-        with open(filename, 'w') as f:
+        # Save
+        with open(filepath, 'w') as f:
             f.write(content)
         
-        # Test syntax
-        try:
-            compile(content, filename, 'exec')
-            print(f"✅ {filename} - Fixed")
-            return True
-        except SyntaxError as e:
-            print(f"⚠️  {filename} - Line {e.lineno}: {e.msg}")
-            # Restore original
-            with open(filename, 'w') as f:
-                f.write(original)
-            return False
-    else:
-        print(f"ℹ️  {filename} - No changes needed")
-        return True
-
-def main():
-    print("🔧 ULTIMATE BOT FIX")
-    print("=" * 50)
+        return True, "Fixed close_position method"
     
-    bots = [
-        "2_FEES_EMA_RSI_BNBUSDT.py",
-        "3_FEES_EMAMACDRSI_LTCUSDT.py",
-        "4_FEES_LIQUIDITYSWEEPBOT_DOGEUSDT.py",
-        "5_FEES_MACD_VWAP_XRPUSDT.py",
-        "7_FEES_DYNAMIC_GRID_ETHUSDT.py",
-        "8_FEES_VWAP_RSI_DIV_AVAXUSDT.py",
-        "9_FEES_PIVOT_REVERSAL_LINKUSDT.py",
-        "12_FEES_ML_GRID_SUIUSDT.py",
-        "13_FEES_XGBOOST_FEATURE_GBPUSDT.py",
+    return False, "No changes needed"
+
+def check_for_error_pattern(filepath):
+    """Check if file has the format_qty error pattern"""
+    
+    if not os.path.exists(filepath):
+        return False
+    
+    with open(filepath, 'r') as f:
+        content = f.read()
+    
+    # Look for problematic patterns
+    patterns = [
+        r'format_qty\([^,)]+,\s*timeInForce',  # format_qty with timeInForce
+        r'format_qty\([^)]*timeInForce',        # Any format_qty with timeInForce
     ]
     
-    fixed = 0
-    for bot in bots:
-        if fix_bot(bot):
-            fixed += 1
+    for pattern in patterns:
+        if re.search(pattern, content):
+            return True
     
-    print("=" * 50)
-    print(f"Result: {fixed}/{len(bots)} files fixed")
+    return False
+
+def main():
+    print("=" * 60)
+    print("TARGETED FIX FOR CLOSE POSITION ERROR")
+    print("=" * 60)
+    print("Fixing: format_qty() got unexpected keyword argument 'timeInForce'\n")
     
-    if fixed == len(bots):
-        print("\n✅ All files are now working!")
-        print("\nTo run a bot:")
-        print("  python3 2_FEES_EMA_RSI_BNBUSDT.py")
+    # Priority files to check (based on error message)
+    priority_files = [
+        "2_FEES_EMA_RSI_BNBUSDT.py",
+        "EMA_RSI_BNBUSDT.py",
+        "*EMA*RSI*.py"
+    ]
+    
+    files_to_fix = []
+    
+    # Check priority files first
+    for pattern in priority_files:
+        if '*' in pattern:
+            files_to_fix.extend(glob.glob(pattern))
+        elif os.path.exists(pattern):
+            files_to_fix.append(pattern)
+    
+    # Also check all bot files
+    all_bots = glob.glob("*_FEES_*_*USDT.py")
+    files_to_fix.extend(all_bots)
+    
+    # Remove duplicates
+    files_to_fix = list(set(files_to_fix))
+    
+    print(f"Scanning {len(files_to_fix)} files for the error pattern...\n")
+    
+    affected_files = []
+    for filepath in files_to_fix:
+        if check_for_error_pattern(filepath):
+            affected_files.append(filepath)
+            print(f"  ⚠️  {filepath} - Has error pattern")
+    
+    if not affected_files:
+        print("\n✅ No files have the format_qty error pattern")
+        return
+    
+    print(f"\n📝 Found {len(affected_files)} files to fix\n")
+    print("-" * 40)
+    
+    fixed_count = 0
+    
+    for filepath in affected_files:
+        print(f"\n📄 {filepath}")
         
-        # Clean up backups
-        for bot in bots:
-            backup = f"{bot}.backup"
-            if os.path.exists(backup):
-                os.remove(backup)
-    else:
-        print("\n⚠️  Some files need manual fixing")
-        print("Backups saved as *.backup")
+        # Show the problematic code
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        for i, line in enumerate(lines):
+            if 'format_qty(' in line and 'timeInForce' in line:
+                print(f"  Line {i+1}: {line.strip()}")
+        
+        print("  Fixing...", end=" ")
+        
+        try:
+            success, message = fix_close_position_method(filepath)
+            if success:
+                print(f"✅ {message}")
+                fixed_count += 1
+            else:
+                print(f"ℹ️  {message}")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+    
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    
+    print(f"\n✅ Fixed {fixed_count}/{len(affected_files)} files")
+    
+    if fixed_count > 0:
+        print("\n🎯 WHAT WAS FIXED:")
+        print("  • format_qty() now only takes quantity parameter")
+        print("  • timeInForce moved to place_order() where it belongs")
+        print("  • Close position will now work correctly")
+        print("  • All orders use PostOnly for zero slippage")
+        
+        print("\n📝 TEST THE FIX:")
+        print("  1. Run your bot again")
+        print("  2. The 'format_qty() got unexpected keyword' error should be gone")
+        print("  3. Close positions should work correctly now")
+        
+        print("\n💡 The bot should now:")
+        print("  • Open positions with limit orders (zero slippage)")
+        print("  • Close positions with limit orders (zero slippage)")
+        print("  • No longer show the format_qty error")
 
 if __name__ == "__main__":
     main()

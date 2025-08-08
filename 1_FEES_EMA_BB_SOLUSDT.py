@@ -557,10 +557,19 @@ class EMABBTrendBot:
     async def close_position(self, reason: str):
         if not self.position or self.price_data.empty:
             return
+        
         side = "Sell" if self.position.get("side") == "Buy" else "Buy"
         qty = self.format_qty(float(self.position.get("size", "0") or 0))
-        ref_price = float(self.price_data["close"].iloc[-1])
-        price = self.format_price(ref_price)
+        current_price = float(self.price_data["close"].iloc[-1])
+        
+        # Calculate limit price for immediate fill
+        if side == "Sell":
+            limit_price = current_price * 0.999  # Below market for sell
+        else:
+            limit_price = current_price * 1.001  # Above market for buy
+        
+        limit_price = self.format_price(limit_price)
+        
         try:
             resp = self.exchange.place_order(
                 category="linear",
@@ -568,16 +577,17 @@ class EMABBTrendBot:
                 side=side,
                 orderType="Limit",
                 qty=qty,
-                price=price,
+                price=limit_price,
                 timeInForce="PostOnly",
                 reduceOnly=True,
             )
+            
             if resp.get("retCode") == 0:
                 if self.current_trade_id:
                     self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
-                        expected_exit=ref_price,
-                        actual_exit=float(price),
+                        expected_exit=current_price,
+                        actual_exit=float(limit_price),
                         reason=reason,
                     )
                     self.current_trade_id = None

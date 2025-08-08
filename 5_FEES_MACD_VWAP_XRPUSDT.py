@@ -446,8 +446,8 @@ class Strategy5_EMARSIBot:
                 side="Buy" if is_buy else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+                price=str(limit_price,
+                timeInForce="PostOnly")
             )
             
             if order.get('retCode') == 0:
@@ -480,11 +480,11 @@ class Strategy5_EMARSIBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty),
+                qty=self.format_qty(qty,
+                timeInForce="PostOnly"),
                 price=str(limit_price),
                 timeInForce="PostOnly",
-                reduceOnly=True
-            )
+                reduceOnly=True)
             
             if order.get('retCode') == 0:
                 print(f"✅ Closed: {reason} @ ${limit_price:.4f}")

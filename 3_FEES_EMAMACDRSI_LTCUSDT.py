@@ -375,7 +375,8 @@ class EMARSIBot:
                 side="Buy" if is_buy else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price),
+                price=str(limit_price,
+                timeInForce="PostOnly"),
                 timeInForce="PostOnly"
             )
             
@@ -416,9 +417,11 @@ class EMARSIBot:
                 category="linear",
                 symbol=self.symbol,
                 side=side,
-                orderType="Market",
-                qty=self.format_qty(qty),
-                reduceOnly=True
+                orderType="Limit",
+                qty=self.format_qty(qty,
+                timeInForce="PostOnly"),
+                reduceOnly=True,
+                timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:

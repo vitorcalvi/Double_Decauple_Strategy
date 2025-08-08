@@ -458,8 +458,8 @@ class MLGridBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+                price=str(limit_price,
+                timeInForce="PostOnly")
             )
             
             if order.get('retCode') == 0:
@@ -504,11 +504,11 @@ class MLGridBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty),
+                qty=self.format_qty(qty,
+                timeInForce="PostOnly"),
                 price=str(round(current_price * (1.001 if side == "Sell" else 0.999), 5)),
                 timeInForce="PostOnly",
-                reduceOnly=True
-            )
+                reduceOnly=True)
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:

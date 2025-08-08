@@ -384,8 +384,8 @@ class DynamicGridBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+                price=str(limit_price,
+                timeInForce="PostOnly")
             )
             
             if order.get('retCode') == 0:
@@ -435,11 +435,11 @@ class DynamicGridBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty),
+                qty=self.format_qty(qty,
+                timeInForce="PostOnly"),
                 price=str(limit_price),
                 timeInForce="PostOnly",
-                reduceOnly=True
-            )
+                reduceOnly=True)
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
