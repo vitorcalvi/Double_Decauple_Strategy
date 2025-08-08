@@ -173,7 +173,7 @@ class PivotReversalBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
             print(f"❌ Connection error: {e}")

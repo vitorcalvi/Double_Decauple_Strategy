@@ -243,7 +243,7 @@ class DynamicGridBot:
             # We'll still create a public client so klines work
         try:
             self.exchange = HTTP(
-                testnet=self.demo_mode,
+                demo=self.demo_mode,
                 api_key=self.api_key,
                 api_secret=self.api_secret,
                 recv_window=self.config["recv_window"],

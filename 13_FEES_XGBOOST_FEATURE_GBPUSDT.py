@@ -152,7 +152,7 @@ class LSTMXGBoostBot:
     
     def connect(self):
         try:
-            self.exchange = HTTP(testnet=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             if self.exchange.get_server_time().get('retCode') == 0:
                 self.get_instrument_info()
                 self.update_account_balance()
