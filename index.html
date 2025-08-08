@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simple PnL Guard</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: 'Courier New', monospace;
+        background: #0a0a0a;
+        color: #00ff00;
+        padding: 20px;
+        min-height: 100vh;
+      }
+
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+      }
+
+      .header {
+        border: 1px solid #00ff00;
+        padding: 15px;
+        margin-bottom: 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      h1 {
+        font-size: 20px;
+        text-transform: uppercase;
+      }
+
+      .status {
+        padding: 5px 15px;
+        border: 1px solid;
+        text-transform: uppercase;
+        font-weight: bold;
+      }
+
+      .status.active {
+        border-color: #00ff00;
+        color: #00ff00;
+      }
+
+      .status.inactive {
+        border-color: #ff0000;
+        color: #ff0000;
+      }
+
+      .config {
+        border: 1px solid #333;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+
+      .config-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 15px;
+        margin-bottom: 15px;
+      }
+
+      .input-group {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      label {
+        font-size: 12px;
+        color: #888;
+        text-transform: uppercase;
+      }
+
+      input,
+      select {
+        background: #000;
+        border: 1px solid #333;
+        color: #00ff00;
+        padding: 8px;
+        font-family: inherit;
+        font-size: 14px;
+      }
+
+      input:focus,
+      select:focus {
+        outline: none;
+        border-color: #00ff00;
+      }
+
+      .buttons {
+        display: flex;
+        gap: 10px;
+      }
+
+      button {
+        background: #000;
+        color: #00ff00;
+        border: 1px solid #00ff00;
+        padding: 10px 20px;
+        cursor: pointer;
+        font-family: inherit;
+        text-transform: uppercase;
+        font-weight: bold;
+        transition: all 0.2s;
+      }
+
+      button:hover {
+        background: #00ff00;
+        color: #000;
+      }
+
+      button.stop {
+        border-color: #ff0000;
+        color: #ff0000;
+      }
+
+      button.stop:hover {
+        background: #ff0000;
+        color: #000;
+      }
+
+      .positions {
+        border: 1px solid #333;
+        margin-bottom: 20px;
+      }
+
+      .positions-header {
+        padding: 10px 15px;
+        border-bottom: 1px solid #333;
+        font-weight: bold;
+        text-transform: uppercase;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th {
+        padding: 10px;
+        text-align: left;
+        border-bottom: 1px solid #333;
+        color: #888;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+
+      td {
+        padding: 10px;
+        border-bottom: 1px solid #111;
+        font-size: 14px;
+      }
+
+      .profit {
+        color: #00ff00;
+      }
+
+      .loss {
+        color: #ff0000;
+      }
+
+      .close-btn {
+        background: #ff0000;
+        color: #000;
+        border: none;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: bold;
+      }
+
+      .close-btn:hover {
+        background: #ff5555;
+      }
+
+      .log {
+        border: 1px solid #333;
+        height: 200px;
+        overflow-y: auto;
+        padding: 10px;
+        font-size: 12px;
+        background: #000;
+      }
+
+      .log-entry {
+        margin-bottom: 5px;
+        padding: 5px;
+        border-left: 2px solid #333;
+      }
+
+      .log-entry.success {
+        border-left-color: #00ff00;
+        color: #00ff00;
+      }
+
+      .log-entry.warning {
+        border-left-color: #ffff00;
+        color: #ffff00;
+      }
+
+      .log-entry.error {
+        border-left-color: #ff0000;
+        color: #ff0000;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        margin-bottom: 20px;
+      }
+
+      .stat-box {
+        border: 1px solid #333;
+        padding: 15px;
+        text-align: center;
+      }
+
+      .stat-value {
+        font-size: 24px;
+        font-weight: bold;
+        margin-bottom: 5px;
+      }
+
+      .stat-label {
+        font-size: 12px;
+        color: #888;
+        text-transform: uppercase;
+      }
+
+      .download-btn {
+        float: right;
+        font-size: 12px;
+        padding: 5px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>🛡️ Simple PnL Guard</h1>
+        <span id="status" class="status inactive">INACTIVE</span>
+      </div>
+
+      <div class="config">
+        <div class="config-row">
+          <div class="input-group">
+            <label>Min Profit to Guard (%)</label>
+            <input
+              type="number"
+              id="minProfit"
+              value="0.2"
+              step="0.1"
+              min="0"
+            />
+          </div>
+          <div class="input-group">
+            <label>Max Drawdown from Peak (%)</label>
+            <input type="number" id="maxDrawdown" value="25" step="1" min="1" />
+          </div>
+          <div class="input-group">
+            <label>Maker Fee (%)</label>
+            <input
+              type="number"
+              id="makerFee"
+              value="0.1"
+              step="0.01"
+              min="0"
+            />
+          </div>
+          <div class="input-group">
+            <label>Check Interval (seconds)</label>
+            <input type="number" id="checkInterval" value="2" min="1" />
+          </div>
+        </div>
+        <div class="buttons">
+          <button onclick="startGuard()">▶ START</button>
+          <button class="stop" onclick="stopGuard()">■ STOP</button>
+          <button onclick="downloadLog()">📥 DOWNLOAD LOG</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat-box">
+          <div class="stat-value profit" id="totalSaved">$0.00</div>
+          <div class="stat-label">Total Saved</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="positionsClosed">0</div>
+          <div class="stat-label">Positions Closed</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="monitoring">0</div>
+          <div class="stat-label">Monitoring</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="totalFees">$0.00</div>
+          <div class="stat-label">Fees Paid</div>
+        </div>
+      </div>
+
+      <div class="positions">
+        <div class="positions-header">Active Positions</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Entry</th>
+              <th>Current</th>
+              <th>Net Profit %</th>
+              <th>Net PnL</th>
+              <th>Fees</th>
+              <th>Peak %</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="positionsBody">
+            <tr>
+              <td colspan="10" style="text-align: center; color: #888">
+                No positions
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="log" id="logContainer">
+        <div class="log-entry">Waiting to start...</div>
+      </div>
+    </div>
+
+    <script>
+      class SimplePnLGuard {
+        constructor() {
+          this.positions = {};
+          this.peakProfits = {};
+          this.logs = [];
+          this.stats = {
+            totalSaved: 0,
+            positionsClosed: 0,
+            totalFees: 0
+          };
+          this.isRunning = false;
+          this.interval = null;
+        }
+
+        getConfig() {
+          return {
+            minProfit:
+              parseFloat(document.getElementById('minProfit').value) / 100,
+            maxDrawdown:
+              parseFloat(document.getElementById('maxDrawdown').value) / 100,
+            makerFee:
+              parseFloat(document.getElementById('makerFee').value) / 100,
+            checkInterval: parseInt(
+              document.getElementById('checkInterval').value
+            )
+          };
+        }
+
+        calculatePnLAfterFees(position) {
+          const entryPrice = position.entryPrice;
+          const currentPrice = position.currentPrice;
+          const size = position.size;
+          const side = position.side;
+
+          // Calculate gross PnL
+          let grossPnl, profitPct;
+          if (side === 'Buy') {
+            grossPnl = (currentPrice - entryPrice) * size;
+            profitPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+          } else {
+            grossPnl = (entryPrice - currentPrice) * size;
+            profitPct = ((entryPrice - currentPrice) / entryPrice) * 100;
+          }
+
+          // Calculate fees
+          const config = this.getConfig();
+          const entryFee = entryPrice * size * config.makerFee;
+          const exitFee = currentPrice * size * config.makerFee;
+          const totalFees = entryFee + exitFee;
+
+          // Net PnL
+          const netPnl = grossPnl - totalFees;
+          const netProfitPct = (netPnl / (entryPrice * size)) * 100;
+
+          return {
+            grossPnl,
+            netPnl,
+            fees: totalFees,
+            profitPct,
+            netProfitPct
+          };
+        }
+
+        updatePositions() {
+          // Demo positions - replace with actual API calls
+          const demoPositions = {
+            BTCUSDT_Buy: {
+              symbol: 'BTCUSDT',
+              side: 'Buy',
+              size: 0.01,
+              entryPrice: 42000,
+              currentPrice: 42500 + (Math.random() - 0.5) * 200
+            },
+            ETHUSDT_Sell: {
+              symbol: 'ETHUSDT',
+              side: 'Sell',
+              size: 0.1,
+              entryPrice: 2200,
+              currentPrice: 2190 + (Math.random() - 0.5) * 20
+            },
+            SOLUSDT_Buy: {
+              symbol: 'SOLUSDT',
+              side: 'Buy',
+              size: 10,
+              entryPrice: 100,
+              currentPrice: 102 + (Math.random() - 0.5) * 2
+            }
+          };
+
+          // Update positions
+          for (const [id, pos] of Object.entries(demoPositions)) {
+            this.positions[id] = pos;
+
+            const pnl = this.calculatePnLAfterFees(pos);
+            const config = this.getConfig();
+
+            // Track peak profit
+            if (pnl.netProfitPct > config.minProfit * 100) {
+              if (!this.peakProfits[id]) {
+                this.peakProfits[id] = pnl.netProfitPct;
+                this.log(
+                  `GUARD ACTIVATED: ${pos.symbol} at ${pnl.netProfitPct.toFixed(
+                    2
+                  )}%`,
+                  'success'
+                );
+              } else {
+                this.peakProfits[id] = Math.max(
+                  this.peakProfits[id],
+                  pnl.netProfitPct
+                );
+              }
+
+              // Check drawdown
+              const peak = this.peakProfits[id];
+              const drawdown = (peak - pnl.netProfitPct) / peak;
+
+              if (drawdown > config.maxDrawdown) {
+                this.closePosition(id, pos, pnl, peak);
+              }
+            }
+          }
+
+          this.updateUI();
+        }
+
+        closePosition(id, position, pnl, peak) {
+          this.log(
+            `CLOSED ${position.symbol}: Profit dropped from ${peak.toFixed(
+              2
+            )}% to ${pnl.netProfitPct.toFixed(2)}%`,
+            'warning'
+          );
+          this.log(
+            `Saved: $${pnl.netPnl.toFixed(2)} | Fees: $${pnl.fees.toFixed(2)}`,
+            'success'
+          );
+
+          this.stats.totalSaved += pnl.netPnl;
+          this.stats.positionsClosed++;
+          this.stats.totalFees += pnl.fees;
+
+          // Save to log
+          this.saveToLog({
+            timestamp: new Date().toISOString(),
+            action: 'POSITION_CLOSED',
+            symbol: position.symbol,
+            side: position.side,
+            netProfitPct: pnl.netProfitPct,
+            netPnl: pnl.netPnl,
+            fees: pnl.fees,
+            peakProfitPct: peak
+          });
+
+          delete this.positions[id];
+          delete this.peakProfits[id];
+        }
+
+        saveToLog(entry) {
+          this.logs.push(entry);
+          // In real implementation, send to server or use localStorage
+          localStorage.setItem('pnlGuardLogs', JSON.stringify(this.logs));
+        }
+
+        log(message, type = 'info') {
+          const container = document.getElementById('logContainer');
+          const entry = document.createElement('div');
+          entry.className = `log-entry ${type}`;
+          entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+          container.insertBefore(entry, container.firstChild);
+
+          while (container.children.length > 50) {
+            container.removeChild(container.lastChild);
+          }
+        }
+
+        updateUI() {
+          // Update stats
+          document.getElementById(
+            'totalSaved'
+          ).textContent = `$${this.stats.totalSaved.toFixed(2)}`;
+          document.getElementById('positionsClosed').textContent =
+            this.stats.positionsClosed;
+          document.getElementById('monitoring').textContent = Object.keys(
+            this.positions
+          ).length;
+          document.getElementById(
+            'totalFees'
+          ).textContent = `$${this.stats.totalFees.toFixed(2)}`;
+
+          // Update positions table
+          const tbody = document.getElementById('positionsBody');
+          tbody.innerHTML = '';
+
+          if (Object.keys(this.positions).length === 0) {
+            tbody.innerHTML =
+              '<tr><td colspan="10" style="text-align: center; color: #888;">No positions</td></tr>';
+            return;
+          }
+
+          for (const [id, pos] of Object.entries(this.positions)) {
+            const pnl = this.calculatePnLAfterFees(pos);
+            const peak = this.peakProfits[id] || 0;
+
+            const row = tbody.insertRow();
+            row.innerHTML = `
+                        <td>${pos.symbol}</td>
+                        <td>${pos.side}</td>
+                        <td>${pos.size}</td>
+                        <td>$${pos.entryPrice.toFixed(2)}</td>
+                        <td>$${pos.currentPrice.toFixed(2)}</td>
+                        <td class="${
+                          pnl.netProfitPct >= 0 ? 'profit' : 'loss'
+                        }">
+                            ${pnl.netProfitPct.toFixed(2)}%
+                        </td>
+                        <td class="${pnl.netPnl >= 0 ? 'profit' : 'loss'}">
+                            $${pnl.netPnl.toFixed(2)}
+                        </td>
+                        <td>$${pnl.fees.toFixed(2)}</td>
+                        <td>${peak.toFixed(2)}%</td>
+                        <td>
+                            <button class="close-btn" onclick="guard.manualClose('${id}')">CLOSE</button>
+                        </td>
+                    `;
+          }
+        }
+
+        manualClose(id) {
+          const pos = this.positions[id];
+          if (pos && confirm(`Close ${pos.symbol}?`)) {
+            const pnl = this.calculatePnLAfterFees(pos);
+            const peak = this.peakProfits[id] || pnl.netProfitPct;
+            this.closePosition(id, pos, pnl, peak);
+          }
+        }
+
+        start() {
+          this.isRunning = true;
+          document.getElementById('status').className = 'status active';
+          document.getElementById('status').textContent = 'ACTIVE';
+
+          this.log('PnL Guard started', 'success');
+
+          const config = this.getConfig();
+          this.updatePositions();
+          this.interval = setInterval(() => {
+            this.updatePositions();
+          }, config.checkInterval * 1000);
+        }
+
+        stop() {
+          this.isRunning = false;
+          if (this.interval) {
+            clearInterval(this.interval);
+          }
+
+          document.getElementById('status').className = 'status inactive';
+          document.getElementById('status').textContent = 'INACTIVE';
+
+          this.log('PnL Guard stopped', 'error');
+        }
+      }
+
+      // Initialize
+      const guard = new SimplePnLGuard();
+
+      function startGuard() {
+        guard.start();
+      }
+
+      function stopGuard() {
+        guard.stop();
+      }
+
+      function downloadLog() {
+        const logs = JSON.parse(localStorage.getItem('pnlGuardLogs') || '[]');
+        const content = logs.map(l => JSON.stringify(l)).join('\n');
+        const blob = new Blob([content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `PNL_GUARD_${new Date().toISOString().split('T')[0]}.log`;
+        a.click();
+      }
+    </script>
+  </body>
+</html>
