@@ -596,7 +596,17 @@ class EnhancedMLScalpingBot:
         expected_fill_price = self.apply_slippage(limit_price, side, "limit")
         
         try:
-            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", price=str(limit_price), timeInForce="PostOnly", reduceOnly=True)
+            # FIXED: Added missing qty parameter
+            order = self.exchange.place_order(
+                category="linear", 
+                symbol=self.symbol, 
+                side=side, 
+                orderType="Limit", 
+                qty=self.format_qty(qty),  # FIXED: Added qty parameter
+                price=str(limit_price), 
+                timeInForce="PostOnly", 
+                reduceOnly=True
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
@@ -705,6 +715,7 @@ class EnhancedMLScalpingBot:
         print(f"   • Fee calculations: Correct maker rebates")
         print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
         print(f"   • Account balance: Dynamic checking")
+        print(f"   • Close position: Fixed missing qty parameter")
         print(f"🎯 ML Threshold: {self.config['ml_confidence_threshold']:.2f}")
         print(f"💰 TP: {self.config['base_take_profit_pct']}% | SL: {self.config['base_stop_loss_pct']}%")
         

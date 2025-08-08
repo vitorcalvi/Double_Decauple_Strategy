@@ -393,7 +393,7 @@ class EMARSIBot:
         # Exit on opposite EMA crossover
         indicators = self.calculate_indicators(self.price_data)
         if indicators:
-            if (is_long and indicators['trend'] == 'DOWN') or (not is_long and indicators['trend'] == 'UP'):
+            if (is_long and indicators['trend'] == 'UP') or (not is_long and indicators['trend'] == 'DOWN'):
                 return True, "ema_crossover"
         
         return False, ""

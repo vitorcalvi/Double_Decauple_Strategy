@@ -226,31 +226,6 @@ class LiquiditySweepBot:
         
         return price * (1 + slippage_pct) if side in ["BUY", "Buy"] else price * (1 - slippage_pct)
     
-    async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for zero slippage"""
-        formatted_qty = self.format_qty(qty)
-        
-        # Calculate limit price with small offset
-        limit_price = price * (0.9998 if side == "Buy" else 1.0002)
-        limit_price = float(round(limit_price, 4))
-        
-        params = {
-            "category": "linear",
-            "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"
-        }
-        
-        if is_reduce:
-            params["reduceOnly"] = True
-        
-        order = self.exchange.place_order(**params)
-        
-        return limit_price if order.get('retCode') == 0 else None
-    
     async def check_pending_orders(self):
         """Check for any pending orders"""
         try:
@@ -535,7 +510,17 @@ class LiquiditySweepBot:
         expected_fill_price = self.apply_slippage(limit_price, side, "limit")
         
         try:
-            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", price=str(limit_price), timeInForce="PostOnly", reduceOnly=True)
+            # FIXED: Added missing qty parameter
+            order = self.exchange.place_order(
+                category="linear", 
+                symbol=self.symbol, 
+                side=side, 
+                orderType="Limit", 
+                qty=self.format_qty(qty),  # FIXED: Added qty parameter
+                price=str(limit_price), 
+                timeInForce="PostOnly", 
+                reduceOnly=True
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
@@ -619,6 +604,7 @@ class LiquiditySweepBot:
         print(f"   • Fee calculations: Correct maker rebates")
         print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
         print(f"   • Account balance: Dynamic checking")
+        print(f"   • Close position: Fixed missing qty parameter")
         
         try:
             while True:

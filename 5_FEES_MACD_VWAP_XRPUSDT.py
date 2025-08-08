@@ -105,7 +105,7 @@ class UnifiedLogger:
         with open(log_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 
-class Strategy5_EMARSIBot:
+class EMARSIBot:
     def __init__(self):
         self.symbol = 'XRPUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
@@ -567,5 +567,5 @@ class Strategy5_EMARSIBot:
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    bot = Strategy5_EMARSIBot()
+    bot = EMARSIBot()
     asyncio.run(bot.run())

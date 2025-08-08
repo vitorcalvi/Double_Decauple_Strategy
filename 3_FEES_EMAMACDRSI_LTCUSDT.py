@@ -369,7 +369,15 @@ class EMARSIBot:
         limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
         
         try:
-            order = self.exchange.place_order(category="linear", symbol=self.symbol, side="Buy" if is_buy else "Sell", orderType="Limit", qty=formatted_qty, price=str(limit_price), timeInForce="PostOnly")
+            order = self.exchange.place_order(
+                category="linear", 
+                symbol=self.symbol, 
+                side="Buy" if is_buy else "Sell", 
+                orderType="Limit", 
+                qty=formatted_qty, 
+                price=str(limit_price), 
+                timeInForce="PostOnly"
+            )
             
             if order.get('retCode') == 0:
                 self.pending_order = order['result']
@@ -401,10 +409,20 @@ class EMARSIBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         current_price = float(self.price_data['close'].iloc[-1])
         
-        execution_price = self.estimate_execution_price(current_price, side, is_limit=False)
+        execution_price = self.estimate_execution_price(current_price, side, is_limit=True)
         
         try:
-            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", reduceOnly=True, timeInForce="PostOnly")
+            # FIXED: Added missing qty and price parameters
+            order = self.exchange.place_order(
+                category="linear", 
+                symbol=self.symbol, 
+                side=side, 
+                orderType="Limit", 
+                qty=self.format_qty(qty),  # FIXED: Added qty parameter
+                price=str(execution_price),  # FIXED: Added price parameter
+                reduceOnly=True, 
+                timeInForce="PostOnly"
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
@@ -427,7 +445,7 @@ class EMARSIBot:
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
-        status_parts = [f"📊 BNB: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
+        status_parts = [f"📊 LTC: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
         
         if self.position:
             entry = float(self.position.get('avgPrice', 0))
