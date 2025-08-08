@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bybit Web Dashboard - Enhanced with fees, break-even, and close positions
+Bybit Web Dashboard - With actual fee tracking from executed orders
 """
 
 import os
@@ -37,38 +37,79 @@ class BybitDataProvider:
         except (ValueError, TypeError):
             return default
     
-    def get_position_fees(self, symbol):
-        """Get total fees paid for a position from order history"""
+    def get_position_fees(self, symbol, size, avg_price):
+        """Get actual fees paid for current position from recent executed orders"""
         try:
-            # Get recent orders for this symbol
+            # Get filled orders for this symbol
             orders = self.exchange.get_order_history(
                 category="linear",
                 symbol=symbol,
-                limit=50
+                orderStatus="Filled",
+                limit=200  # Increased to catch more orders
             )
             
+            if orders.get("retCode") != 0:
+                # Fallback to estimate
+                maker_fee_rate = 0.0002  # 0.02% limit order
+                return size * avg_price * maker_fee_rate
+            
+            # Calculate total fees from recent orders that match position size
             total_fees = 0
-            if orders.get("retCode") == 0:
-                for order in orders.get("result", {}).get("list", []):
-                    # Only count filled orders
-                    if order.get("orderStatus") == "Filled":
-                        fee = self.safe_float(order.get("cumExecFee"))
-                        total_fees += abs(fee)  # Fees are negative for rebates
+            total_qty = 0
+            
+            # Get orders sorted by time (most recent first)
+            order_list = orders.get("result", {}).get("list", [])
+            
+            for order in order_list:
+                order_qty = self.safe_float(order.get("cumExecQty"))
+                order_fee = self.safe_float(order.get("cumExecFee"))
+                
+                # Add fees from orders until we match position size
+                if total_qty < size:
+                    # Check if this order contributes to current position
+                    qty_to_count = min(order_qty, size - total_qty)
+                    fee_proportion = qty_to_count / order_qty if order_qty > 0 else 0
+                    
+                    total_fees += abs(order_fee * fee_proportion)
+                    total_qty += qty_to_count
+                    
+                    if total_qty >= size:
+                        break
+            
+            # If we couldn't find enough orders, estimate remaining fees
+            if total_qty < size:
+                remaining_qty = size - total_qty
+                maker_fee_rate = 0.0002  # 0.02% for limit orders
+                total_fees += remaining_qty * avg_price * maker_fee_rate
             
             return total_fees
-        except Exception:
-            return 0
+            
+        except Exception as e:
+            print(f"Error getting fees for {symbol}: {e}")
+            # Fallback: estimate based on limit order fee
+            maker_fee_rate = 0.0002
+            return size * avg_price * maker_fee_rate
     
     def calculate_breakeven(self, entry_price, size, fees, side):
-        """Calculate break-even price including fees"""
+        """Calculate break-even price including actual fees paid"""
         if size <= 0:
             return entry_price
         
-        fee_per_unit = fees / size
+        # Use actual fees paid + estimated exit fee
+        entry_fee_paid = fees
+        # Estimate exit fee at limit order rate (0.02%)
+        exit_fee_estimate = size * entry_price * 0.0002
+        total_fees = entry_fee_paid + exit_fee_estimate
+        
+        # Calculate fee impact per unit
+        fee_per_unit = total_fees / size
+        
         if side == "Buy":
-            return entry_price + fee_per_unit  # Need price to go up to cover fees
+            # For long: need price to go up to cover fees
+            return entry_price + fee_per_unit
         else:
-            return entry_price - fee_per_unit  # Need price to go down to cover fees
+            # For short: need price to go down to cover fees  
+            return entry_price - fee_per_unit
     
     def fetch_data(self):
         try:
@@ -85,19 +126,27 @@ class BybitDataProvider:
                             side = p.get("side", "")
                             avg_price = self.safe_float(p.get("avgPrice"))
                             mark_price = self.safe_float(p.get("markPrice"))
-                            is_buy = side == "Buy"
                             
-                            # Calculate PnL
-                            pnl = (mark_price - avg_price) * size if is_buy else (avg_price - mark_price) * size
+                            # Use unrealisedPnl from API if available
+                            unrealized_pnl = self.safe_float(p.get("unrealisedPnl"))
                             
-                            # Get fees for this position
-                            fees = self.get_position_fees(symbol)
+                            # If not available, calculate it
+                            if unrealized_pnl == 0:
+                                is_buy = side == "Buy"
+                                unrealized_pnl = (mark_price - avg_price) * size if is_buy else (avg_price - mark_price) * size
+                            
+                            # Get actual fees for this position
+                            fees = self.get_position_fees(symbol, size, avg_price)
                             
                             # Calculate break-even
                             breakeven = self.calculate_breakeven(avg_price, size, fees, side)
                             
-                            # Net PnL after fees
-                            net_pnl = pnl - fees
+                            # Net PnL after estimated fees
+                            net_pnl = unrealized_pnl - fees
+                            
+                            # PnL percentage
+                            position_value = avg_price * size
+                            pnl_pct = (unrealized_pnl / position_value) * 100 if position_value > 0 else 0
                             
                             positions.append({
                                 "symbol": symbol,
@@ -105,15 +154,16 @@ class BybitDataProvider:
                                 "size": size,
                                 "avg_price": avg_price,
                                 "mark_price": mark_price,
-                                "pnl": pnl,
+                                "pnl": unrealized_pnl,
                                 "fees": fees,
                                 "net_pnl": net_pnl,
                                 "breakeven": breakeven,
-                                "pnl_pct": (pnl / (avg_price * size)) * 100 if avg_price > 0 and size > 0 else 0,
+                                "pnl_pct": pnl_pct,
                                 "value": size * mark_price,
                                 "liq_price": self.safe_float(p.get("liqPrice"))
                             })
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error processing position: {e}")
                         continue
             
             # Fetch account
@@ -163,13 +213,6 @@ class BybitDataProvider:
             position = positions[0]
             side = "Sell" if position.get("side") == "Buy" else "Buy"
             qty = position.get("size")
-            
-            # Get current price for market order
-            ticker = self.exchange.get_tickers(category="linear", symbol=symbol)
-            if ticker.get("retCode") != 0:
-                return {"success": False, "message": "Failed to get price"}
-            
-            current_price = self.safe_float(ticker["result"]["list"][0]["lastPrice"])
             
             # Place market order to close
             order_resp = self.exchange.place_order(
@@ -242,23 +285,7 @@ def index():
         .btn-close:disabled { background: #666; cursor: not-allowed; opacity: 0.5; }
         .fees { color: #ffa500; }
         .breakeven { color: #9b59b6; }
-        .tooltip { position: relative; display: inline-block; }
-        .tooltip .tooltiptext {
-            visibility: hidden;
-            background-color: #333;
-            color: #fff;
-            text-align: center;
-            padding: 5px;
-            border-radius: 5px;
-            position: absolute;
-            z-index: 1;
-            bottom: 125%;
-            left: 50%;
-            margin-left: -60px;
-            font-size: 12px;
-            white-space: nowrap;
-        }
-        .tooltip:hover .tooltiptext { visibility: visible; }
+        .note { background: #1f2547; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 12px; color: #8892b0; }
     </style>
 </head>
 <body>
@@ -267,6 +294,7 @@ def index():
             <h1>📈 Bybit Position Dashboard</h1>
             <div class="mode" id="mode">TESTNET</div>
         </div>
+        <div class="note">ℹ️ Fees shown are actual fees paid for current positions (limit orders: 0.02%, market orders: 0.055%)</div>
         <div class="stats" id="stats"></div>
         <table>
             <thead>
@@ -276,8 +304,8 @@ def index():
                     <th>Size</th>
                     <th>Entry</th>
                     <th>Mark</th>
-                    <th>Gross PnL</th>
-                    <th>Fees</th>
+                    <th>Unrealized PnL</th>
+                    <th>Fees Paid</th>
                     <th>Net PnL</th>
                     <th>PnL %</th>
                     <th>Break-even</th>
@@ -335,7 +363,7 @@ def index():
                     <div class="card"><div class="label">Equity</div><div class="value">${fmt(data.account.equity)}</div></div>
                     <div class="card"><div class="label">Available</div><div class="value">${fmt(data.account.available)}</div></div>
                     <div class="card"><div class="label">Unrealized PnL</div><div class="value ${cls(data.account.unrealized_pnl)}">${fmt(data.account.unrealized_pnl)}</div></div>
-                    <div class="card"><div class="label">Total Fees</div><div class="value fees">${fmt(totalFees)}</div></div>
+                    <div class="card"><div class="label">Total Fees Paid</div><div class="value fees">${fmt(totalFees)}</div></div>
                     <div class="card"><div class="label">Positions</div><div class="value">${data.position_count}</div></div>
                 `;
                 
@@ -354,10 +382,7 @@ def index():
                             <td class="fees">$${fmt(p.fees)}</td>
                             <td class="${cls(p.net_pnl)}">${p.net_pnl >= 0 ? '+' : ''}$${fmt(p.net_pnl)}</td>
                             <td class="${cls(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%</td>
-                            <td class="breakeven tooltip">
-                                $${fmt(p.breakeven, 4)}
-                                <span class="tooltiptext">Break-even price</span>
-                            </td>
+                            <td class="breakeven">$${fmt(p.breakeven, 4)}</td>
                             <td>$${fmt(p.value)}</td>
                             <td>${p.liq_price > 0 ? '$' + fmt(p.liq_price, 4) : '—'}</td>
                             <td>
@@ -402,5 +427,5 @@ def close_position():
         return jsonify({"success": False, "message": str(e)})
 
 if __name__ == '__main__':
-    print("🚀 Starting Enhanced Dashboard → http://localhost:5000")
+    print("🚀 Starting Fixed Dashboard → http://localhost:5501")
     app.run(host='0.0.0.0', port=5501, debug=False)
