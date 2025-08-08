@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """
-EMA + BB Fixed Bot (Bybit TESTNET, linear futures) with Terminal Monitor
+EMA + BB Trend-Following Bot (Bybit TESTNET, linear futures) with Terminal Monitor
 
-- Signals run in demo/paper too (no LIVE_TRADING gate).
-- Uses Bybit instrument specs (tickSize, qtyStep, minOrderQty) for proper rounding.
-- Fractional qty allowed; no hard skip at qty < 1.
-- Safer PostOnly pricing (default 0.08% maker offset).
-- Compact terminal dashboard refreshed every loop, showing:
-  price, RSI, MACD hist, filters ✓/✗, position, open orders, cooldown, daily PnL, and next step.
+Entry logic (trend-following):
+  • BUY (trend-pullback):   ema_fast > ema_slow, close > ema_trend,
+                            price between ema_slow and ema_fast (pullback),
+                            MACD hist rising, RSI >= 45, volume/volatility pass
+  • SELL (trend-pullback):  ema_fast < ema_slow, close < ema_trend,
+                            price between ema_fast and ema_slow (pullback),
+                            MACD hist falling, RSI <= 55, volume/volatility pass
+  • BUY (breakout):         trend_bullish and close > 20-bar high * (1+0.0005)
+  • SELL (breakout):        trend_bearish and close < 20-bar low  * (1-0.0005)
+
+Notes:
+  • Signals run in demo/paper too (no LIVE_TRADING gate).
+  • Uses Bybit instrument specs (tickSize, qtyStep, minOrderQty).
+  • PostOnly maker with 0.08% offset by default.
+  • Percent TP/SL exits (configurable). Simple, robust.
+  • Terminal monitor shows live status and why it’s not trading yet.
+
+.env required:
+  TESTNET_BYBIT_API_KEY=xxx
+  TESTNET_BYBIT_API_SECRET=xxx
+  DEMO_MODE=true
 """
 
 import os
@@ -32,12 +47,9 @@ class TradeLogger:
         self.currency = "USDT"
         self.open_trades = {}
         self.trade_id = 1000
-
-        # emergency stop tracking (daily)
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
         self.max_daily_loss = 50.0  # USD
-
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
 
@@ -51,8 +63,6 @@ class TradeLogger:
 
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0.0  # PostOnly (assume maker fill when it happens)
-
         now = datetime.now(timezone.utc).isoformat()
         entry = {
             "id": trade_id,
@@ -63,7 +73,7 @@ class TradeLogger:
             "ts": now,
             "expected_price": round(float(expected_price), 6),
             "actual_price": round(float(actual_price), 6),
-            "slippage": round(float(slippage), 6),
+            "slippage": 0.0,  # PostOnly assumed
             "qty": float(qty),
             "stop_loss": round(float(stop_loss), 6),
             "take_profit": round(float(take_profit), 6),
@@ -87,7 +97,6 @@ class TradeLogger:
 
         tr = self.open_trades[trade_id]
         duration = (datetime.now() - tr["entry_time"]).total_seconds()
-
         entry_price = float(tr["entry_price"])
         qty = float(tr["qty"])
         if tr["side"] == "BUY":
@@ -95,9 +104,9 @@ class TradeLogger:
         else:
             gross_pnl = (entry_price - float(actual_exit)) * qty
 
-        # Maker rebate illustration (0.01% both sides)
+        # Illustrative maker rebates (0.01% each side on notional)
         entry_rebate = entry_price * qty * 0.0001
-        exit_rebate = float(actual_exit) * qty * 0.0001
+        exit_rebate  = float(actual_exit) * qty * 0.0001
         net_pnl = gross_pnl + entry_rebate + exit_rebate
 
         self.daily_pnl += net_pnl
@@ -127,9 +136,9 @@ class TradeLogger:
         return payload
 
 
-class EMABBFixedBot:
+class EMABBTrendBot:
     def __init__(self):
-        self.LIVE_TRADING = False  # demo/paper
+        self.LIVE_TRADING = False
         self.demo_mode = os.getenv("DEMO_MODE", "true").lower() == "true"
 
         self.account_balance_fallback = 1000.0
@@ -137,8 +146,6 @@ class EMABBFixedBot:
         self.open_orders_count = 0
         self.last_trade_time = 0.0
         self.trade_cooldown = 30  # seconds
-
-        self.daily_pnl = 0.0  # mirrored from logger
 
         self.symbol = "SOLUSDT"
         prefix = "TESTNET_" if self.demo_mode else "LIVE_"
@@ -148,8 +155,8 @@ class EMABBFixedBot:
 
         self.position = None
         self.price_data = pd.DataFrame()
-        self.last_signal = None           # last placed signal (after order placed)
-        self.preview_signal = None        # signal generated this cycle (before place)
+        self.last_signal = None
+        self.preview_signal = None
         self.last_signal_time = None
 
         self.order_timeout = 180  # seconds
@@ -169,9 +176,16 @@ class EMABBFixedBot:
             "max_position_pct": 0.05,
             "lookback": 100,
             "maker_offset_pct": 0.08,  # 0.08%
-            "base_slippage": 0.0,      # PostOnly
             "stop_loss_pct": 0.50,     # %
             "take_profit_pct": 1.00,   # %
+            # Trend-breakout sensitivity (relative to last 20-bar high/low)
+            "breakout_buffer": 0.0005,  # 0.05%
+            # Filters (relaxed vs reversal version)
+            "vol_std_min": 0.003,
+            "vol_std_max": 0.060,
+            "vol_sma_mult": 0.60,
+            # Debounce to avoid duplicate signals on tiny moves
+            "price_debounce": 0.002,  # 0.2%
         }
 
         # instrument steps — loaded from exchange
@@ -179,21 +193,20 @@ class EMABBFixedBot:
         self.qty_step = 0.001
         self.price_step = 0.01
 
-        # terminal monitor settings
+        # terminal monitor
         self.monitor_enabled = True
-        self.monitor_full_refresh = True   # clear screen & redraw
-        self.monitor_interval = 5          # seconds (same as loop)
+        self.monitor_full_refresh = True
+        self.monitor_interval = 5
         self._spinner = itertools.cycle("|/-\\")
         self._last_monitor_t = 0
 
-        self.logger = TradeLogger("EMA_BB_FIXED", self.symbol)
+        self.logger = TradeLogger("EMA_BB_TREND", self.symbol)
         self.current_trade_id = None
 
-        # cache for monitor
         self._last_ind = None
         self._last_filters = (False, False, False)
 
-    # ---------- helpers (exchange steps) ----------
+    # ---------- helpers ----------
     @staticmethod
     def _round_down_to_step(x: float, step: float) -> float:
         return (int(x / step) * step) if step > 0 else x
@@ -213,7 +226,6 @@ class EMABBFixedBot:
             ok = self.exchange.get_server_time().get("retCode") == 0
             if not ok:
                 return False
-
             info = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
             lst = info.get("result", {}).get("list", [])
             if lst:
@@ -288,12 +300,12 @@ class EMABBFixedBot:
         vol_ok = True
         if len(rets) >= 20:
             v = rets.rolling(20).std().iloc[-1]
-            vol_ok = 0.005 < v < 0.03
+            vol_ok = self.config["vol_std_min"] < v < self.config["vol_std_max"]
 
         vol_avg = df["volume"].rolling(20).mean()
         vol_pass = True
         if len(df) >= 20:
-            vol_pass = df["volume"].iloc[-1] > vol_avg.iloc[-1] * 0.8
+            vol_pass = df["volume"].iloc[-1] > vol_avg.iloc[-1] * self.config["vol_sma_mult"]
 
         return trend_up, vol_ok, vol_pass
 
@@ -302,9 +314,12 @@ class EMABBFixedBot:
             return None
         try:
             close = df["close"]
+            high = df["high"]
+            low  = df["low"]
+
             ema_fast = close.ewm(span=self.config["ema_fast"]).mean()
             ema_slow = close.ewm(span=self.config["ema_slow"]).mean()
-            ema_trend = close.ewm(span=self.config["ema_trend"]).mean()
+            ema_trend= close.ewm(span=self.config["ema_trend"]).mean()
 
             exp1 = close.ewm(span=self.config["macd_fast"]).mean()
             exp2 = close.ewm(span=self.config["macd_slow"]).mean()
@@ -321,10 +336,9 @@ class EMABBFixedBot:
                 rs = gain.iloc[-1] / loss.iloc[-1]
                 rsi_val = 100 - (100 / (1 + rs))
 
-            bb_mid = close.rolling(self.config["bb_period"]).mean()
-            bb_sd = close.rolling(self.config["bb_period"]).std()
-            bb_upper = bb_mid + self.config["bb_std"] * bb_sd
-            bb_lower = bb_mid - self.config["bb_std"] * bb_sd
+            # Recent swing levels (exclude current bar for breakout buffer)
+            recent_high = high.rolling(20).max().iloc[-2]
+            recent_low  = low.rolling(20).min().iloc[-2]
 
             return {
                 "price": float(close.iloc[-1]),
@@ -336,17 +350,26 @@ class EMABBFixedBot:
                 "hist": float(hist.iloc[-1]),
                 "hist_prev": float(hist.iloc[-2]) if len(hist) > 1 else 0.0,
                 "rsi": float(rsi_val),
-                "bb_upper": float(bb_upper.iloc[-1]),
-                "bb_lower": float(bb_lower.iloc[-1]),
-                "bb_middle": float(bb_mid.iloc[-1]),
+                "recent_high": float(recent_high),
+                "recent_low": float(recent_low),
             }
         except Exception as e:
             print(f"Indicator error: {e}")
             return None
 
+    def _in_pullback_band_long(self, price, ema_fast, ema_slow):
+        # Price between EMA slow and EMA fast (pullback to value)
+        lo, hi = sorted([ema_slow, ema_fast])
+        return lo <= price <= hi
+
+    def _in_pullback_band_short(self, price, ema_fast, ema_slow):
+        # For bearish trend (ema_fast < ema_slow): still between the two EMAs
+        lo, hi = sorted([ema_fast, ema_slow])
+        return lo <= price <= hi
+
     def generate_signal(self, df: pd.DataFrame):
         ind = self.calculate_indicators(df)
-        self._last_ind = ind  # cache for monitor
+        self._last_ind = ind
         if not ind:
             return None
 
@@ -355,36 +378,46 @@ class EMABBFixedBot:
         if not (vol_normal and vol_ok):
             return None
 
+        # Debounce duplicate signals on tiny price changes
         if self.last_signal:
-            price_change = abs(ind["price"] - self.last_signal["price"]) / self.last_signal["price"]
-            if price_change < 0.002:  # debounce 0.2%
+            price_change = abs(ind["price"] - self.last_signal["price"]) / max(self.last_signal["price"], 1e-9)
+            if price_change < self.config["price_debounce"]:
                 return None
 
-        # BUY
-        if (
-            ind["trend_bullish"]
-            and trend_up
-            and ind["rsi"] < 35
-            and ind["hist"] > 0 >= ind["hist_prev"]
-            and ind["price"] > ind["bb_lower"]
-        ):
-            return {"action": "BUY", "price": ind["price"], "rsi": ind["rsi"], "reason": "oversold_reversal"}
+        p   = ind["price"]
+        ef  = ind["ema_fast"]
+        es  = ind["ema_slow"]
+        et  = ind["ema_trend"]
+        rsi = ind["rsi"]
+        h, hp = ind["hist"], ind["hist_prev"]
+        bof = self.config["breakout_buffer"]
 
-        # SELL
-        if (
-            ind["trend_bearish"]
-            and (not trend_up)
-            and ind["rsi"] > 65
-            and ind["hist"] < 0 <= ind["hist_prev"]
-            and ind["price"] < ind["bb_upper"]
-        ):
-            return {"action": "SELL", "price": ind["price"], "rsi": ind["rsi"], "reason": "overbought_reversal"}
+        # --- Primary: Trend Pullback Entries ---
+        # BUY pullback in bullish trend
+        if ind["trend_bullish"] and trend_up:
+            if self._in_pullback_band_long(p, ef, es) and (h > hp) and (rsi >= 45):
+                return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_pullback"}
+
+        # SELL pullback in bearish trend
+        if ind["trend_bearish"] and (not trend_up):
+            if self._in_pullback_band_short(p, ef, es) and (h < hp) and (rsi <= 55):
+                return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_pullback"}
+
+        # --- Secondary: Trend Breakout Continuation ---
+        # BUY breakout above recent high (with bullish trend context)
+        if ind["trend_bullish"] and p > ind["recent_high"] * (1 + bof):
+            if (h >= hp) and (rsi >= 50):  # mild confirmation
+                return {"action": "BUY", "price": p, "rsi": rsi, "reason": "trend_breakout"}
+
+        # SELL breakdown below recent low (with bearish trend context)
+        if ind["trend_bearish"] and p < ind["recent_low"] * (1 - bof):
+            if (h <= hp) and (rsi <= 50):
+                return {"action": "SELL", "price": p, "rsi": rsi, "reason": "trend_breakout"}
 
         return None
 
     # ---------- orders ----------
     async def check_pending_orders(self):
-        # local timeout
         if self.pending_order and (time.time() - self.last_trade_time > self.order_timeout):
             try:
                 self.exchange.cancel_order(
@@ -440,16 +473,14 @@ class EMABBFixedBot:
         return ref_price * (1.0 + off)
 
     async def execute_trade(self, signal: dict):
-        # cooldown
         if time.time() - self.last_trade_time < self.trade_cooldown:
             return
-        # no overlap
         if await self.check_pending_orders():
             return
         if self.position:
             return
 
-        # SL first for sizing
+        # Percent-based SL for sizing
         if signal["action"] == "BUY":
             stop_loss_price = signal["price"] * (1 - self.config["stop_loss_pct"] / 100.0)
         else:
@@ -486,9 +517,9 @@ class EMABBFixedBot:
                     qty=float(qty),
                     stop_loss=stop_loss_price,
                     take_profit=tp,
-                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_FIXED",
+                    info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_TREND",
                 )
-                print(f"✅ {signal['action']} {qty} @ {limit} | RSI {signal['rsi']:.1f}")
+                print(f"✅ {signal['action']} {qty} @ {limit} | RSI {signal['rsi']:.1f} | {signal['reason']}")
             else:
                 print(f"❌ place_order retCode={resp.get('retCode')} msg={resp.get('retMsg')}")
         except Exception as e:
@@ -497,7 +528,6 @@ class EMABBFixedBot:
     def should_close(self):
         if not self.position or self.price_data.empty:
             return False, ""
-
         try:
             current_price = float(self.price_data["close"].iloc[-1])
             entry_price = float(self.position.get("avgPrice", 0) or 0)
@@ -515,6 +545,7 @@ class EMABBFixedBot:
             if profit_pct <= -self.config["stop_loss_pct"]:
                 return True, "stop_loss"
 
+            # Time-based churn protection (1h)
             if time.time() - self.last_trade_time > 3600:
                 return True, "timeout"
 
@@ -525,12 +556,10 @@ class EMABBFixedBot:
     async def close_position(self, reason: str):
         if not self.position or self.price_data.empty:
             return
-
         side = "Sell" if self.position.get("side") == "Buy" else "Buy"
         qty = self.format_qty(float(self.position.get("size", "0") or 0))
         ref_price = float(self.price_data["close"].iloc[-1])
         price = self.format_price(ref_price)
-
         try:
             resp = self.exchange.place_order(
                 category="linear",
@@ -550,7 +579,6 @@ class EMABBFixedBot:
                         actual_exit=float(price),
                         reason=reason,
                     )
-                    self.daily_pnl = self.logger.daily_pnl
                     self.current_trade_id = None
                 print(f"💰 Closed: {reason}")
                 self.position = None
@@ -565,7 +593,6 @@ class EMABBFixedBot:
     def _check(x): return "✓" if x else "–"
 
     def _clear_screen(self):
-        # clear terminal if full refresh is desired
         if self.monitor_full_refresh:
             print("\x1b[2J\x1b[H", end="")
 
@@ -586,7 +613,6 @@ class EMABBFixedBot:
         rsi = ind.get("rsi", float("nan"))
         hist = ind.get("hist", float("nan"))
 
-        # position summary
         pos_str = "FLAT"
         if self.position:
             side = self.position.get("side")
@@ -598,7 +624,6 @@ class EMABBFixedBot:
             else:
                 pos_str = f"{side} {size}@{avg}"
 
-        # pending order summary
         po = self.pending_order
         if po:
             created_ms = int(po.get("createdTime", "0") or "0")
@@ -622,7 +647,6 @@ class EMABBFixedBot:
 
     # ---------- main loop ----------
     async def run_cycle(self):
-        # emergency daily stop
         if self.logger.daily_pnl < -self.logger.max_daily_loss:
             print(f"🔴 EMERGENCY STOP: daily PnL {self.logger.daily_pnl:.2f} < -{self.logger.max_daily_loss}")
             if self.position:
@@ -637,7 +661,6 @@ class EMABBFixedBot:
         await self.check_position()
         await self.check_pending_orders()
 
-        # compute preview signal for monitor
         self.preview_signal = self.generate_signal(self.price_data)
 
         if self.position:
@@ -647,7 +670,6 @@ class EMABBFixedBot:
         elif not self.pending_order and self.preview_signal:
             await self.execute_trade(self.preview_signal)
 
-        # finally print monitor
         self._print_monitor()
 
     async def run(self):
@@ -655,7 +677,7 @@ class EMABBFixedBot:
             print("❌ Failed to connect to Bybit")
             return
 
-        print(f"🔧 EMA+BB Bot for {self.symbol}")
+        print(f"🔧 EMA+BB Trend-Following Bot for {self.symbol}")
         print(f"📊 Mode: {'DEMO' if self.demo_mode else 'LIVE'} | Trading: {'ON' if self.LIVE_TRADING else 'OFF'} (signals still run)")
         print(f"✅ Using tickSize={self.price_step}, qtyStep={self.qty_step}, minQty={self.min_qty}")
         print(f"🎯 TP {self.config['take_profit_pct']}% | SL {self.config['stop_loss_pct']}% | Maker offset {self.config['maker_offset_pct']}%")
@@ -676,5 +698,5 @@ class EMABBFixedBot:
 
 
 if __name__ == "__main__":
-    bot = EMABBFixedBot()
+    bot = EMABBTrendBot()
     asyncio.run(bot.run())
