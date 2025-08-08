@@ -13,9 +13,17 @@ CORS(app)
 
 @app.route('/proxy', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def proxy():
+    # Handle OPTIONS preflight
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     # Get target info from headers
     endpoint = request.headers.get('X-Target-Endpoint')
     env = request.headers.get('X-Target-Env')
+    
+    # Check if endpoint exists
+    if not endpoint:
+        return jsonify({'error': 'Missing X-Target-Endpoint header'}), 400
     
     # Select base URL
     base_url = 'https://api-testnet.bybit.com' if env == 'testnet' else 'https://api.bybit.com'

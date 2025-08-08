@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "EMA_BB_TREND", "symbol": "SOLUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-08T09:25:13.158054+00:00", "expected_price": 175.07, "actual_price": 175.21, "slippage": 0.0, "qty": 0.2, "stop_loss": 175.94535, "take_profit": 173.3193, "currency": "USDT", "info": "RSI:40.0_trend_continuation_TREND"}

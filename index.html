@@ -1,85 +1,86 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" x-data="pnlGuardApp()" x-init="init()" class="no-js">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Simple PnL Guard</title>
+    <title>PnL Guard - Bybit Live (Alpine.js)</title>
+
+    <!-- Alpine.js (CDN) -->
+    <script src="https://unpkg.com/alpinejs@3.x.x" defer></script>
+
     <style>
       * {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
       }
-
       body {
-        font-family: 'Courier New', monospace;
+        font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
         background: #0a0a0a;
         color: #00ff00;
-        padding: 20px;
-        min-height: 100vh;
+        padding: 15px;
       }
-
       .container {
-        max-width: 1000px;
+        max-width: 1200px;
         margin: 0 auto;
       }
-
       .header {
         border: 1px solid #00ff00;
         padding: 15px;
-        margin-bottom: 20px;
+        margin-bottom: 15px;
         display: flex;
         justify-content: space-between;
         align-items: center;
       }
-
       h1 {
-        font-size: 20px;
+        font-size: 18px;
         text-transform: uppercase;
       }
-
       .status {
         padding: 5px 15px;
         border: 1px solid;
-        text-transform: uppercase;
         font-weight: bold;
       }
-
       .status.active {
         border-color: #00ff00;
         color: #00ff00;
+        animation: pulse 2s infinite;
       }
-
       .status.inactive {
         border-color: #ff0000;
         color: #ff0000;
       }
-
-      .config {
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+      .section {
         border: 1px solid #333;
         padding: 15px;
-        margin-bottom: 20px;
+        margin-bottom: 15px;
+        background: #111;
       }
-
-      .config-row {
+      .row {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap: 15px;
         margin-bottom: 15px;
       }
-
       .input-group {
         display: flex;
         flex-direction: column;
         gap: 5px;
       }
-
       label {
-        font-size: 12px;
+        font-size: 11px;
         color: #888;
         text-transform: uppercase;
       }
-
       input,
       select {
         background: #000;
@@ -87,229 +88,229 @@
         color: #00ff00;
         padding: 8px;
         font-family: inherit;
-        font-size: 14px;
+        font-size: 13px;
       }
-
       input:focus,
       select:focus {
         outline: none;
         border-color: #00ff00;
       }
-
       .buttons {
         display: flex;
         gap: 10px;
+        flex-wrap: wrap;
       }
-
       button {
         background: #000;
         color: #00ff00;
         border: 1px solid #00ff00;
-        padding: 10px 20px;
+        padding: 8px 15px;
         cursor: pointer;
         font-family: inherit;
         text-transform: uppercase;
+        font-size: 12px;
         font-weight: bold;
         transition: all 0.2s;
       }
-
-      button:hover {
+      button:hover:not(:disabled) {
         background: #00ff00;
         color: #000;
       }
-
-      button.stop {
-        border-color: #ff0000;
-        color: #ff0000;
+      button:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
       }
-
-      button.stop:hover {
-        background: #ff0000;
+      button.danger {
+        border-color: #f00;
+        color: #f00;
+      }
+      button.danger:hover:not(:disabled) {
+        background: #f00;
         color: #000;
       }
-
-      .positions {
-        border: 1px solid #333;
-        margin-bottom: 20px;
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+        margin-bottom: 15px;
       }
-
-      .positions-header {
-        padding: 10px 15px;
-        border-bottom: 1px solid #333;
+      .stat-box {
+        border: 1px solid #333;
+        padding: 10px;
+        text-align: center;
+      }
+      .stat-value {
+        font-size: 20px;
         font-weight: bold;
+        margin-bottom: 3px;
+      }
+      .stat-label {
+        font-size: 10px;
+        color: #888;
         text-transform: uppercase;
       }
-
+      .profit {
+        color: #00ff00;
+      }
+      .loss {
+        color: #ff0000;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
       }
-
       th {
-        padding: 10px;
+        padding: 8px;
         text-align: left;
         border-bottom: 1px solid #333;
         color: #888;
-        font-size: 12px;
+        font-size: 10px;
         text-transform: uppercase;
+        background: #111;
       }
-
       td {
-        padding: 10px;
+        padding: 8px;
         border-bottom: 1px solid #111;
-        font-size: 14px;
+        font-size: 12px;
       }
-
-      .profit {
-        color: #00ff00;
+      tr:hover {
+        background: #111;
       }
-
-      .loss {
-        color: #ff0000;
-      }
-
       .close-btn {
         background: #ff0000;
         color: #000;
         border: none;
-        padding: 5px 10px;
+        padding: 4px 8px;
         cursor: pointer;
-        font-size: 12px;
+        font-size: 10px;
         font-weight: bold;
       }
-
-      .close-btn:hover {
-        background: #ff5555;
-      }
-
       .log {
         border: 1px solid #333;
-        height: 200px;
+        height: 150px;
         overflow-y: auto;
         padding: 10px;
-        font-size: 12px;
+        font-size: 11px;
         background: #000;
+        font-family: monospace;
       }
-
       .log-entry {
-        margin-bottom: 5px;
-        padding: 5px;
+        margin-bottom: 3px;
+        padding: 3px;
         border-left: 2px solid #333;
       }
-
       .log-entry.success {
         border-left-color: #00ff00;
         color: #00ff00;
       }
-
       .log-entry.warning {
         border-left-color: #ffff00;
         color: #ffff00;
       }
-
       .log-entry.error {
         border-left-color: #ff0000;
         color: #ff0000;
       }
-
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 15px;
-        margin-bottom: 20px;
-      }
-
-      .stat-box {
-        border: 1px solid #333;
-        padding: 15px;
-        text-align: center;
-      }
-
-      .stat-value {
-        font-size: 24px;
-        font-weight: bold;
-        margin-bottom: 5px;
-      }
-
-      .stat-label {
-        font-size: 12px;
-        color: #888;
-        text-transform: uppercase;
-      }
-
-      .download-btn {
-        float: right;
-        font-size: 12px;
-        padding: 5px 10px;
+      .log-entry.info {
+        border-left-color: #00ffff;
+        color: #00ffff;
       }
     </style>
   </head>
+
   <body>
     <div class="container">
       <div class="header">
-        <h1>🛡️ Simple PnL Guard</h1>
-        <span id="status" class="status inactive">INACTIVE</span>
+        <h1>🛡️ REAL-TIME PNL GUARD - BYBIT</h1>
+        <span
+          :class="['status', running ? 'active' : 'inactive']"
+          x-text="running ? 'ACTIVE - LIVE DATA' : 'INACTIVE'"
+        ></span>
       </div>
 
-      <div class="config">
-        <div class="config-row">
+      <!-- Connection / Env -->
+      <div class="section">
+        <div class="row">
           <div class="input-group">
-            <label>Min Profit to Guard (%)</label>
+            <label>Environment</label>
+            <select x-model="environment">
+              <option value="testnet">TESTNET (Demo)</option>
+              <option value="mainnet">MAINNET (Live)</option>
+            </select>
+          </div>
+          <div class="input-group">
+            <label>Proxy Server</label>
+            <input type="text" x-model="proxyUrl" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Config -->
+      <div class="section">
+        <div class="row">
+          <div class="input-group">
+            <label>Min Profit % to Guard</label>
             <input
               type="number"
-              id="minProfit"
-              value="0.2"
               step="0.1"
               min="0"
+              x-model.number="minProfitPct"
             />
           </div>
           <div class="input-group">
-            <label>Max Drawdown from Peak (%)</label>
-            <input type="number" id="maxDrawdown" value="25" step="1" min="1" />
-          </div>
-          <div class="input-group">
-            <label>Maker Fee (%)</label>
+            <label>Max Drawdown %</label>
             <input
               type="number"
-              id="makerFee"
-              value="0.1"
-              step="0.01"
-              min="0"
+              step="1"
+              min="1"
+              x-model.number="maxDrawdownPct"
             />
           </div>
           <div class="input-group">
-            <label>Check Interval (seconds)</label>
-            <input type="number" id="checkInterval" value="2" min="1" />
+            <label>Maker Fee %</label>
+            <input type="number" step="0.01" x-model.number="makerFeePct" />
+          </div>
+          <div class="input-group">
+            <label>Check Interval (s)</label>
+            <input type="number" min="1" x-model.number="checkIntervalSec" />
           </div>
         </div>
         <div class="buttons">
-          <button onclick="startGuard()">▶ START</button>
-          <button class="stop" onclick="stopGuard()">■ STOP</button>
-          <button onclick="downloadLog()">📥 DOWNLOAD LOG</button>
+          <button @click="start()" :disabled="running">▶ START GUARD</button>
+          <button class="danger" @click="stop()" :disabled="!running">
+            ■ STOP
+          </button>
+          <button @click="testConnection()">TEST CONNECTION</button>
+          <button @click="downloadLog()">📥 DOWNLOAD LOG</button>
         </div>
       </div>
 
+      <!-- Stats -->
       <div class="stats">
         <div class="stat-box">
-          <div class="stat-value profit" id="totalSaved">$0.00</div>
+          <div class="stat-value profit" x-text="fmtUSD(totalSaved)">$0.00</div>
           <div class="stat-label">Total Saved</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="positionsClosed">0</div>
-          <div class="stat-label">Positions Closed</div>
+          <div class="stat-value" x-text="fmtUSD(totalRebates)">$0.00</div>
+          <div class="stat-label">Fee Rebates</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="monitoring">0</div>
+          <div class="stat-value" x-text="positionsClosed">0</div>
+          <div class="stat-label">Closed</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" x-text="Object.keys(positions).length">0</div>
           <div class="stat-label">Monitoring</div>
         </div>
         <div class="stat-box">
-          <div class="stat-value" id="totalFees">$0.00</div>
-          <div class="stat-label">Fees Paid</div>
+          <div class="stat-value" x-text="fmtUSD(accountBalance)">$0.00</div>
+          <div class="stat-label">Balance</div>
         </div>
       </div>
 
-      <div class="positions">
-        <div class="positions-header">Active Positions</div>
+      <!-- Table -->
+      <div class="section">
         <table>
           <thead>
             <tr>
@@ -317,314 +318,357 @@
               <th>Side</th>
               <th>Size</th>
               <th>Entry</th>
-              <th>Current</th>
-              <th>Net Profit %</th>
-              <th>Net PnL</th>
-              <th>Fees</th>
+              <th>Mark</th>
+              <th>Gross P&L</th>
+              <th>Rebates</th>
+              <th>Net P&L</th>
+              <th>Net %</th>
               <th>Peak %</th>
               <th>Action</th>
             </tr>
           </thead>
-          <tbody id="positionsBody">
-            <tr>
-              <td colspan="10" style="text-align: center; color: #888">
-                No positions
-              </td>
-            </tr>
+          <tbody>
+            <template x-if="Object.keys(positions).length === 0">
+              <tr>
+                <td colspan="11" style="text-align: center; color: #888">
+                  Connect to see live positions
+                </td>
+              </tr>
+            </template>
+
+            <template x-for="(pos, id) in positions" :key="id">
+              <tr>
+                <td x-text="pos.symbol"></td>
+                <td x-text="pos.side"></td>
+                <td x-text="pos.size"></td>
+                <td x-text="fmtPrice(pos.avgPrice)"></td>
+                <td x-text="fmtPrice(pos.markPrice)"></td>
+                <td
+                  :class="pos.pnl?.grossPnl >= 0 ? 'profit' : 'loss'"
+                  x-text="fmtUSD(pos.pnl?.grossPnl)"
+                ></td>
+                <td class="profit" x-text="fmtUSD(pos.pnl?.totalRebates)"></td>
+                <td
+                  :class="pos.pnl?.netPnl >= 0 ? 'profit' : 'loss'"
+                  x-text="fmtUSD(pos.pnl?.netPnl)"
+                ></td>
+                <td
+                  :class="pos.pnl?.netProfitPct >= 0 ? 'profit' : 'loss'"
+                  x-text="fmtPct(pos.pnl?.netProfitPct)"
+                ></td>
+                <td x-text="fmtPct(peakProfits[id] || 0)"></td>
+                <td>
+                  <button class="close-btn" @click="manualClose(id)">
+                    CLOSE
+                  </button>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
 
+      <!-- Log -->
       <div class="log" id="logContainer">
-        <div class="log-entry">Waiting to start...</div>
+        <template x-for="(l, idx) in logs.slice().reverse()" :key="idx">
+          <div
+            class="log-entry"
+            :class="l.type"
+            x-text="`[${l.time}] ${l.msg}`"
+          ></div>
+        </template>
       </div>
     </div>
 
     <script>
-      class SimplePnLGuard {
-        constructor() {
-          this.positions = {};
-          this.peakProfits = {};
-          this.logs = [];
-          this.stats = {
-            totalSaved: 0,
-            positionsClosed: 0,
-            totalFees: 0
-          };
-          this.isRunning = false;
-          this.interval = null;
-        }
+      function pnlGuardApp() {
+        return {
+          // ======= State =======
+          environment: 'testnet',
+          proxyUrl: 'http://localhost:8080',
 
-        getConfig() {
-          return {
-            minProfit:
-              parseFloat(document.getElementById('minProfit').value) / 100,
-            maxDrawdown:
-              parseFloat(document.getElementById('maxDrawdown').value) / 100,
-            makerFee:
-              parseFloat(document.getElementById('makerFee').value) / 100,
-            checkInterval: parseInt(
-              document.getElementById('checkInterval').value
-            )
-          };
-        }
+          minProfitPct: 0.2, // %
+          maxDrawdownPct: 25, // %
+          makerFeePct: -0.04, // %
+          checkIntervalSec: 2, // seconds
 
-        calculatePnLAfterFees(position) {
-          const entryPrice = position.entryPrice;
-          const currentPrice = position.currentPrice;
-          const size = position.size;
-          const side = position.side;
+          running: false,
+          pollTimer: null,
 
-          // Calculate gross PnL
-          let grossPnl, profitPct;
-          if (side === 'Buy') {
-            grossPnl = (currentPrice - entryPrice) * size;
-            profitPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-          } else {
-            grossPnl = (entryPrice - currentPrice) * size;
-            profitPct = ((entryPrice - currentPrice) / entryPrice) * 100;
-          }
+          positions: {}, // id -> { ...pos, pnl }
+          peakProfits: {}, // id -> peak percent
+          logs: [], // {time, msg, type}
+          totalSaved: 0,
+          totalRebates: 0,
+          positionsClosed: 0,
+          accountBalance: 0,
+          tradeIdCounter: 1000,
 
-          // Calculate fees
-          const config = this.getConfig();
-          const entryFee = entryPrice * size * config.makerFee;
-          const exitFee = currentPrice * size * config.makerFee;
-          const totalFees = entryFee + exitFee;
+          // ======= Lifecycle =======
+          init() {
+            this.log('App ready', 'info');
+          },
 
-          // Net PnL
-          const netPnl = grossPnl - totalFees;
-          const netProfitPct = (netPnl / (entryPrice * size)) * 100;
+          // ======= Utils / Formatters =======
+          cfg() {
+            return {
+              minProfit: this.minProfitPct / 100,
+              maxDrawdown: this.maxDrawdownPct / 100,
+              makerFee: this.makerFeePct / 100,
+              env: this.environment,
+              proxy: this.proxyUrl
+            };
+          },
+          fmtUSD(v) {
+            v = Number(v || 0);
+            return (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(2);
+          },
+          fmtPct(v) {
+            v = Number(v || 0);
+            return v.toFixed(2) + '%';
+          },
+          fmtPrice(v) {
+            v = Number(v || 0);
+            return '$' + v.toFixed(4);
+          },
+          nowStr() {
+            return new Date().toLocaleTimeString();
+          },
+          log(msg, type = 'info') {
+            this.logs.push({ time: this.nowStr(), msg, type });
+            if (this.logs.length > 500) this.logs.shift();
+          },
 
-          return {
-            grossPnl,
-            netPnl,
-            fees: totalFees,
-            profitPct,
-            netProfitPct
-          };
-        }
-
-        updatePositions() {
-          // Demo positions - replace with actual API calls
-          const demoPositions = {
-            BTCUSDT_Buy: {
-              symbol: 'BTCUSDT',
-              side: 'Buy',
-              size: 0.01,
-              entryPrice: 42000,
-              currentPrice: 42500 + (Math.random() - 0.5) * 200
-            },
-            ETHUSDT_Sell: {
-              symbol: 'ETHUSDT',
-              side: 'Sell',
-              size: 0.1,
-              entryPrice: 2200,
-              currentPrice: 2190 + (Math.random() - 0.5) * 20
-            },
-            SOLUSDT_Buy: {
-              symbol: 'SOLUSDT',
-              side: 'Buy',
-              size: 10,
-              entryPrice: 100,
-              currentPrice: 102 + (Math.random() - 0.5) * 2
+          // ======= API =======
+          async makeRequest(endpoint, method = 'GET', params = {}) {
+            const { env, proxy } = this.cfg();
+            const headers = {
+              'X-Target-Endpoint': endpoint,
+              'X-Target-Env': env,
+              'Content-Type': 'application/json'
+            };
+            const qs = new URLSearchParams(params).toString();
+            const url = `${proxy}/proxy?${qs}`;
+            try {
+              const res = await fetch(url, {
+                method,
+                headers,
+                body: method === 'POST' ? JSON.stringify(params) : null
+              });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              return await res.json();
+            } catch (e) {
+              this.log(`API Error: ${e.message}`, 'error');
+              throw e;
             }
-          };
+          },
 
-          // Update positions
-          for (const [id, pos] of Object.entries(demoPositions)) {
-            this.positions[id] = pos;
+          async testConnection() {
+            try {
+              this.log('Testing connection...', 'info');
+              const r = await this.makeRequest('/v5/market/time');
+              if (r?.retCode === 0) {
+                this.log('✅ Connection successful!', 'success');
+                await this.getAccountBalance();
+                const positions = await this.fetchPositions();
+                this.log(`Found ${positions.length} open positions`, 'info');
+                return true;
+              } else {
+                this.log(`❌ API Error: ${r?.retMsg || 'Unknown'}`, 'error');
+              }
+            } catch (e) {
+              this.log(`❌ Connection failed: ${e.message}`, 'error');
+            }
+            return false;
+          },
 
-            const pnl = this.calculatePnLAfterFees(pos);
-            const config = this.getConfig();
+          async getAccountBalance() {
+            try {
+              const r = await this.makeRequest(
+                '/v5/account/wallet-balance',
+                'GET',
+                { accountType: 'UNIFIED' }
+              );
+              if (r?.retCode === 0) {
+                const usdt = r.result?.list?.[0]?.coin?.find(
+                  c => c.coin === 'USDT'
+                );
+                if (usdt)
+                  this.accountBalance = parseFloat(usdt.walletBalance || 0);
+              }
+            } catch {
+              this.log('Balance check failed', 'error');
+            }
+          },
 
-            // Track peak profit
-            if (pnl.netProfitPct > config.minProfit * 100) {
-              if (!this.peakProfits[id]) {
-                this.peakProfits[id] = pnl.netProfitPct;
-                this.log(
-                  `GUARD ACTIVATED: ${pos.symbol} at ${pnl.netProfitPct.toFixed(
+          async fetchPositions() {
+            try {
+              const r = await this.makeRequest('/v5/position/list', 'GET', {
+                category: 'linear',
+                settleCoin: 'USDT'
+              });
+              return r?.retCode === 0 ? r.result?.list || [] : [];
+            } catch {
+              return [];
+            }
+          },
+
+          // ======= PnL & Monitoring =======
+          calcPnL(pos) {
+            const size = parseFloat(pos.size);
+            const avg = parseFloat(pos.avgPrice);
+            const mark = parseFloat(pos.markPrice);
+            if (!size || !avg || !mark) return null;
+
+            const { makerFee } = this.cfg();
+            const gross =
+              pos.side === 'Buy' ? (mark - avg) * size : (avg - mark) * size;
+
+            // Approx rebate on both entry/exit marks (simple estimate)
+            const rebates = Math.abs(makerFee) * size * (avg + mark);
+            const net = gross + rebates;
+            const netPct = (net / (avg * size)) * 100;
+
+            return {
+              grossPnl: gross,
+              totalRebates: rebates,
+              netPnl: net,
+              netProfitPct: netPct
+            };
+          },
+
+          async updatePositions() {
+            const arr = await this.fetchPositions();
+            const currentIds = new Set();
+
+            for (const p of arr) {
+              if (parseFloat(p.size) === 0) continue;
+              const id = `${p.symbol}_${p.side}`;
+              currentIds.add(id);
+
+              const pnl = this.calcPnL(p);
+              if (!pnl) continue;
+
+              if (!this.positions[id])
+                this.log(`New position: ${p.symbol} ${p.side}`, 'info');
+              this.positions[id] = { ...this.positions[id], ...p, pnl };
+
+              const { minProfit, maxDrawdown } = this.cfg();
+              if (pnl.netProfitPct > minProfit * 100) {
+                const peak = (this.peakProfits[id] = Math.max(
+                  this.peakProfits[id] || 0,
+                  pnl.netProfitPct
+                ));
+                const drawdown =
+                  peak > 0 ? (peak - pnl.netProfitPct) / peak : 0;
+
+                if (drawdown > maxDrawdown) {
+                  await this.closePosition(
+                    this.positions[id],
+                    pnl,
+                    peak,
+                    drawdown
+                  );
+                }
+              }
+            }
+
+            // cleanup missing
+            Object.keys(this.positions).forEach(id => {
+              if (!currentIds.has(id)) {
+                delete this.positions[id];
+                delete this.peakProfits[id];
+              }
+            });
+          },
+
+          async closePosition(pos, pnl, peak, drawdown) {
+            try {
+              const side = pos.side === 'Buy' ? 'Sell' : 'Buy';
+              const mark = parseFloat(pos.markPrice);
+              const offset = side === 'Sell' ? 0.9999 : 1.0001;
+              const limitPrice = (mark * offset).toFixed(4);
+
+              const r = await this.makeRequest('/v5/order/create', 'POST', {
+                category: 'linear',
+                symbol: pos.symbol,
+                side,
+                orderType: 'Limit',
+                qty: pos.size,
+                price: String(limitPrice),
+                timeInForce: 'PostOnly',
+                reduceOnly: true
+              });
+
+              if (r?.retCode === 0) {
+                this.totalSaved += pnl.netPnl;
+                this.totalRebates += pnl.totalRebates;
+                this.positionsClosed++;
+
+                this.tradeIdCounter += 1;
+                this.logs.push({
+                  time: new Date().toISOString(),
+                  msg: `Closed ${pos.symbol}: Saved ${this.fmtUSD(
+                    pnl.netPnl
+                  )} | Peak ${peak.toFixed(2)}% | DD ${(drawdown * 100).toFixed(
                     2
                   )}%`,
-                  'success'
-                );
+                  type: 'success'
+                });
+
+                this.log(`✅ Close submitted for ${pos.symbol}`, 'success');
               } else {
-                this.peakProfits[id] = Math.max(
-                  this.peakProfits[id],
-                  pnl.netProfitPct
-                );
+                this.log(`❌ Close failed: ${r?.retMsg || 'Unknown'}`, 'error');
               }
-
-              // Check drawdown
-              const peak = this.peakProfits[id];
-              const drawdown = (peak - pnl.netProfitPct) / peak;
-
-              if (drawdown > config.maxDrawdown) {
-                this.closePosition(id, pos, pnl, peak);
-              }
+            } catch (e) {
+              this.log(`❌ Close error: ${e.message}`, 'error');
             }
+          },
+
+          async manualClose(id) {
+            const pos = this.positions[id];
+            if (!pos) return;
+            if (!confirm(`Close ${pos.symbol} ${pos.side} position?`)) return;
+
+            const pnl = pos.pnl || this.calcPnL(pos);
+            const peak = this.peakProfits[id] || (pnl ? pnl.netProfitPct : 0);
+            await this.closePosition(pos, pnl, peak, 0);
+          },
+
+          // ======= Controls =======
+          async start() {
+            if (this.running) return;
+            this.running = true;
+            this.log('PnL Guard started', 'success');
+
+            await this.getAccountBalance();
+            await this.updatePositions();
+
+            this.pollTimer = setInterval(
+              () => this.updatePositions(),
+              this.checkIntervalSec * 1000
+            );
+          },
+
+          stop() {
+            if (!this.running) return;
+            this.running = false;
+            if (this.pollTimer) clearInterval(this.pollTimer);
+            this.pollTimer = null;
+            this.log('PnL Guard stopped', 'error');
+          },
+
+          downloadLog() {
+            const lines = this.logs.map(l => JSON.stringify(l)).join('\n');
+            const blob = new Blob([lines], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `PNL_GUARD_${
+              new Date().toISOString().split('T')[0]
+            }.log`;
+            a.click();
           }
-
-          this.updateUI();
-        }
-
-        closePosition(id, position, pnl, peak) {
-          this.log(
-            `CLOSED ${position.symbol}: Profit dropped from ${peak.toFixed(
-              2
-            )}% to ${pnl.netProfitPct.toFixed(2)}%`,
-            'warning'
-          );
-          this.log(
-            `Saved: $${pnl.netPnl.toFixed(2)} | Fees: $${pnl.fees.toFixed(2)}`,
-            'success'
-          );
-
-          this.stats.totalSaved += pnl.netPnl;
-          this.stats.positionsClosed++;
-          this.stats.totalFees += pnl.fees;
-
-          // Save to log
-          this.saveToLog({
-            timestamp: new Date().toISOString(),
-            action: 'POSITION_CLOSED',
-            symbol: position.symbol,
-            side: position.side,
-            netProfitPct: pnl.netProfitPct,
-            netPnl: pnl.netPnl,
-            fees: pnl.fees,
-            peakProfitPct: peak
-          });
-
-          delete this.positions[id];
-          delete this.peakProfits[id];
-        }
-
-        saveToLog(entry) {
-          this.logs.push(entry);
-          // In real implementation, send to server or use localStorage
-          localStorage.setItem('pnlGuardLogs', JSON.stringify(this.logs));
-        }
-
-        log(message, type = 'info') {
-          const container = document.getElementById('logContainer');
-          const entry = document.createElement('div');
-          entry.className = `log-entry ${type}`;
-          entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-          container.insertBefore(entry, container.firstChild);
-
-          while (container.children.length > 50) {
-            container.removeChild(container.lastChild);
-          }
-        }
-
-        updateUI() {
-          // Update stats
-          document.getElementById(
-            'totalSaved'
-          ).textContent = `$${this.stats.totalSaved.toFixed(2)}`;
-          document.getElementById('positionsClosed').textContent =
-            this.stats.positionsClosed;
-          document.getElementById('monitoring').textContent = Object.keys(
-            this.positions
-          ).length;
-          document.getElementById(
-            'totalFees'
-          ).textContent = `$${this.stats.totalFees.toFixed(2)}`;
-
-          // Update positions table
-          const tbody = document.getElementById('positionsBody');
-          tbody.innerHTML = '';
-
-          if (Object.keys(this.positions).length === 0) {
-            tbody.innerHTML =
-              '<tr><td colspan="10" style="text-align: center; color: #888;">No positions</td></tr>';
-            return;
-          }
-
-          for (const [id, pos] of Object.entries(this.positions)) {
-            const pnl = this.calculatePnLAfterFees(pos);
-            const peak = this.peakProfits[id] || 0;
-
-            const row = tbody.insertRow();
-            row.innerHTML = `
-                        <td>${pos.symbol}</td>
-                        <td>${pos.side}</td>
-                        <td>${pos.size}</td>
-                        <td>$${pos.entryPrice.toFixed(2)}</td>
-                        <td>$${pos.currentPrice.toFixed(2)}</td>
-                        <td class="${
-                          pnl.netProfitPct >= 0 ? 'profit' : 'loss'
-                        }">
-                            ${pnl.netProfitPct.toFixed(2)}%
-                        </td>
-                        <td class="${pnl.netPnl >= 0 ? 'profit' : 'loss'}">
-                            $${pnl.netPnl.toFixed(2)}
-                        </td>
-                        <td>$${pnl.fees.toFixed(2)}</td>
-                        <td>${peak.toFixed(2)}%</td>
-                        <td>
-                            <button class="close-btn" onclick="guard.manualClose('${id}')">CLOSE</button>
-                        </td>
-                    `;
-          }
-        }
-
-        manualClose(id) {
-          const pos = this.positions[id];
-          if (pos && confirm(`Close ${pos.symbol}?`)) {
-            const pnl = this.calculatePnLAfterFees(pos);
-            const peak = this.peakProfits[id] || pnl.netProfitPct;
-            this.closePosition(id, pos, pnl, peak);
-          }
-        }
-
-        start() {
-          this.isRunning = true;
-          document.getElementById('status').className = 'status active';
-          document.getElementById('status').textContent = 'ACTIVE';
-
-          this.log('PnL Guard started', 'success');
-
-          const config = this.getConfig();
-          this.updatePositions();
-          this.interval = setInterval(() => {
-            this.updatePositions();
-          }, config.checkInterval * 1000);
-        }
-
-        stop() {
-          this.isRunning = false;
-          if (this.interval) {
-            clearInterval(this.interval);
-          }
-
-          document.getElementById('status').className = 'status inactive';
-          document.getElementById('status').textContent = 'INACTIVE';
-
-          this.log('PnL Guard stopped', 'error');
-        }
-      }
-
-      // Initialize
-      const guard = new SimplePnLGuard();
-
-      function startGuard() {
-        guard.start();
-      }
-
-      function stopGuard() {
-        guard.stop();
-      }
-
-      function downloadLog() {
-        const logs = JSON.parse(localStorage.getItem('pnlGuardLogs') || '[]');
-        const content = logs.map(l => JSON.stringify(l)).join('\n');
-        const blob = new Blob([content], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `PNL_GUARD_${new Date().toISOString().split('T')[0]}.log`;
-        a.click();
+        };
       }
     </script>
   </body>
