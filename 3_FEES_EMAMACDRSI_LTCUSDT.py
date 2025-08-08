@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import pandas as pd
 import json
@@ -10,6 +11,13 @@ load_dotenv()
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
@@ -28,38 +36,40 @@ class TradeLogger:
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if side == "BUY" else "SHORT",
-            "action": "OPEN",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "expected_price": round(expected_price, 4),
-            "actual_price": round(actual_price, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(qty, 6),
-            "stop_loss": round(stop_loss, 4),
-            "take_profit": round(take_profit, 4),
-            "currency": self.currency,
-            "info": info
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if side == "BUY" else "SHORT",
+        "action": "OPEN",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "expected_price": round(expected_price, 4),
+        "actual_price": round(actual_price, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(qty, 6),
+        "stop_loss": round(stop_loss, 4),
+        "take_profit": round(take_profit, 4),
+        "currency": self.currency,
+        "info": info
         }
         
         self.open_trades[trade_id] = {
-            "entry_time": datetime.now(),
-            "entry_price": actual_price,
-            "side": side,
-            "qty": qty,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit
+        "entry_time": datetime.now(),
+        "entry_price": actual_price,
+        "side": side,
+        "qty": qty,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit
         }
         
         with open(self.log_file, "a") as f:
+            pass
             f.write(json.dumps(log_entry) + "\n")
         
-        return trade_id, log_entry
+            return trade_id, log_entry
     
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
+            pass
             return None
             
         trade = self.open_trades[trade_id]
@@ -68,8 +78,9 @@ class TradeLogger:
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         if trade["side"] == "BUY":
+            pass
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
-        else:
+            else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
         entry_fee = trade["entry_price"] * trade["qty"] * fees_entry / 100
@@ -79,26 +90,27 @@ class TradeLogger:
         net_pnl = gross_pnl - total_fees
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
-            "action": "CLOSE",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "duration_sec": int(duration),
-            "entry_price": round(trade["entry_price"], 4),
-            "expected_exit": round(expected_exit, 4),
-            "actual_exit": round(actual_exit, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(trade["qty"], 6),
-            "gross_pnl": round(gross_pnl, 2),
-            "total_fees": round(total_fees, 2),
-            "net_pnl": round(net_pnl, 2),
-            "reason": reason,
-            "currency": self.currency
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+        "action": "CLOSE",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "duration_sec": int(duration),
+        "entry_price": round(trade["entry_price"], 4),
+        "expected_exit": round(expected_exit, 4),
+        "actual_exit": round(actual_exit, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(trade["qty"], 6),
+        "gross_pnl": round(gross_pnl, 2),
+        "total_fees": round(total_fees, 2),
+        "net_pnl": round(net_pnl, 2),
+        "reason": reason,
+        "currency": self.currency
         }
         
         with open(self.log_file, "a") as f:
+            pass
             f.write(json.dumps(log_entry) + "\n")
         
         del self.open_trades[trade_id]
@@ -106,6 +118,11 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -121,18 +138,18 @@ class EMARSIBot:
         
         # FIXED: Strong signal requirements
         self.config = {
-            'ema_fast': 5,
-            'ema_slow': 13,
-            'rsi_period': 5,
-            'rsi_oversold': 30,  # FIXED: Only buy when RSI < 30
-            'rsi_overbought': 70,  # FIXED: Only sell when RSI > 70
-            'risk_per_trade': 1.0,
-            'maker_offset_pct': 0.01,
-            'slippage_pct': 0.02,
-            'net_take_profit': 0.86,
-            'net_stop_loss': 0.43,
-            'order_timeout': 180,
-            'min_notional': 5,
+        'ema_fast': 5,
+        'ema_slow': 13,
+        'rsi_period': 5,
+        'rsi_oversold': 30,  # FIXED: Only buy when RSI < 30
+        'rsi_overbought': 70,  # FIXED: Only sell when RSI > 70
+        'risk_per_trade': 1.0,
+        'maker_offset_pct': 0.01,
+        'slippage_pct': 0.02,
+        'net_take_profit': 0.86,
+        'net_stop_loss': 0.43,
+        'order_timeout': 180,
+        'min_notional': 5,
         }
         
         self.tick_size = 0.01
@@ -152,25 +169,30 @@ class EMARSIBot:
         except:
             return False
     
-    async def get_account_balance(self):
+        async def get_account_balance(self):
         try:
             result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if result.get('retCode') == 0:
+                pass
                 balance_list = result['result']['list']
                 if balance_list:
+                    pass
                     for coin in balance_list[0]['coin']:
+                        pass
                         if coin['coin'] == 'USDT':
+                            pass
                             self.account_balance = float(coin['availableToWithdraw'])
                             return True
-            return False
+                        return False
         except:
             self.account_balance = 1000
             return False
     
-    async def get_instrument_info(self):
+                async def get_instrument_info(self):
         try:
             result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
             if result.get('retCode') == 0:
+                pass
                 info = result['result']['list'][0]
                 self.tick_size = float(info['priceFilter']['tickSize'])
                 self.qty_step = float(info['lotSizeFilter']['qtyStep'])
@@ -181,18 +203,21 @@ class EMARSIBot:
     
     def calculate_position_size(self, price, stop_loss_price):
         if self.account_balance <= 0:
+            pass
             return 0
         
         risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
         
         stop_distance = abs(price - stop_loss_price)
         if stop_distance == 0:
+            pass
             return 0
         
         position_size = risk_amount / stop_distance
         
         notional = position_size * price
         if notional < self.config['min_notional']:
+            pass
             return 0
         
         return position_size
@@ -206,24 +231,35 @@ class EMARSIBot:
     
     def estimate_execution_price(self, market_price, side, is_limit=True):
         if is_limit:
+            pass
             if side == 'BUY':
+                pass
                 return self.format_price(market_price * (1 - self.config['maker_offset_pct']/100))
             else:
                 return self.format_price(market_price * (1 + self.config['maker_offset_pct']/100))
-        else:
-            if side == 'BUY':
-                return self.format_price(market_price * (1 + self.config['slippage_pct']/100))
             else:
-                return self.format_price(market_price * (1 - self.config['slippage_pct']/100))
+            if side == 'BUY':
+                pass
+                return self.format_price(market_price * (1 + self.config['slippage_pct']/100))
+                else:
+                    return self.format_price(market_price * (1 - self.config['slippage_pct']/100))
     
-    async def check_pending_orders(self):
+            async def check_pending_orders(self):
+
+        # Clear pending orders after timeout
+        if self.pending_order and time.time() - self.last_trade_time > 30:
+            pass
+            self.pending_order = False
+            print("✓ Cleared stale pending order")
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
+                pass
                 return False
             
             order_list = orders['result']['list']
             if not order_list:
+                pass
                 self.pending_order = None
                 return False
             
@@ -231,6 +267,7 @@ class EMARSIBot:
             age = datetime.now().timestamp() - int(order['createdTime']) / 1000
             
             if age > self.config['order_timeout']:
+                pass
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
                 self.pending_order = None
                 return False
@@ -242,6 +279,7 @@ class EMARSIBot:
     
     def calculate_indicators(self, df):
         if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
+            pass
             return None
         
         close = df['close']
@@ -253,26 +291,33 @@ class EMARSIBot:
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
         rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
+
+            # Handle flat market
+            if pd.isna(rsi) or rsi == 0:
+                rsi = 50.0  # Neutral RSI for flat market
         
-        return {
-            'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
-            'rsi': rsi if pd.notna(rsi) else 50,
-            'ema_fast': ema_fast,
-            'ema_slow': ema_slow
+                return {
+        'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
+        'rsi': rsi if pd.notna(rsi) else 50,
+        'ema_fast': ema_fast,
+        'ema_slow': ema_slow
         }
     
     def generate_signal(self, df):
         # FIXED: Don't generate signals if position exists
         if self.position:
+            pass
             return None
         
         # FIXED: Check trade cooldown
         time_since_last = datetime.now().timestamp() - self.last_trade_time
         if time_since_last < self.trade_cooldown:
+            pass
             return None
         
         indicators = self.calculate_indicators(df)
         if not indicators:
+            pass
             return None
         
         price = float(df['close'].iloc[-1])
@@ -280,21 +325,24 @@ class EMARSIBot:
         # FIXED: Strong signal requirements
         # BUY: Uptrend + RSI < 30 (oversold)
         if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
+            pass
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         # SELL: Downtrend + RSI > 70 (overbought)
         elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+            pass
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
     
-    async def get_market_data(self):
+            async def get_market_data(self):
         try:
             klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
             if klines.get('retCode') != 0:
+                pass
                 return False
             
             df = pd.DataFrame(klines['result']['list'], 
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             
@@ -303,10 +351,11 @@ class EMARSIBot:
         except:
             return False
     
-    async def check_position(self):
+            async def check_position(self):
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
+                pass
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except:
@@ -314,67 +363,80 @@ class EMARSIBot:
     
     def should_close(self):
         if not self.position:
+            pass
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
         entry_price = float(self.position.get('avgPrice', 0))
         
         if entry_price == 0:
+            pass
             return False, ""
         
         is_long = self.position.get('side') == "Buy"
         
         if is_long:
+            pass
             profit_pct = (current_price - entry_price) / entry_price * 100
-        else:
+            else:
             profit_pct = (entry_price - current_price) / entry_price * 100
         
         if profit_pct >= self.config['net_take_profit']:
+            pass
             return True, "take_profit"
         if profit_pct <= -self.config['net_stop_loss']:
+            pass
             return True, "stop_loss"
         
         # FIXED: Exit on opposite EMA crossover
         indicators = self.calculate_indicators(self.price_data)
         if indicators:
+            pass
             if is_long and indicators['trend'] == 'DOWN':
+                pass
                 return True, "ema_crossover"
             elif not is_long and indicators['trend'] == 'UP':
+                pass
                 return True, "ema_crossover"
         
-        return False, ""
+            return False, ""
     
-    async def execute_trade(self, signal):
+            async def execute_trade(self, signal):
         # FIXED: Triple-check no position exists
-        await self.check_position()
+                await self.check_position()
         if self.position:
+            pass
             print("⚠️ Position already exists, skipping trade")
             return
             
         if await self.check_pending_orders():
+            pass
             print("⚠️ Pending order exists, skipping trade")
             return
         
         # FIXED: Enforce cooldown
-        time_since_last = datetime.now().timestamp() - self.last_trade_time
+            time_since_last = datetime.now().timestamp() - self.last_trade_time
         if time_since_last < self.trade_cooldown:
+            pass
             print(f"⚠️ Trade cooldown active, wait {self.trade_cooldown - time_since_last:.0f}s")
             return
         
-        await self.get_account_balance()
+            await self.get_account_balance()
         
         market_price = signal['price']
         is_buy = signal['action'] == 'BUY'
         
         if is_buy:
+            pass
             stop_loss_price = market_price * (1 - self.config['net_stop_loss']/100)
-        else:
+            else:
             stop_loss_price = market_price * (1 + self.config['net_stop_loss']/100)
         
         qty = self.calculate_position_size(market_price, stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if float(formatted_qty) < self.qty_step:
+            pass
             print(f"⚠️ Position size too small: {formatted_qty}")
             return
         
@@ -382,41 +444,45 @@ class EMARSIBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if is_buy else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+            category="linear",
+            symbol=self.symbol,
+            side="Buy" if is_buy else "Sell",
+            orderType="Limit",
+            qty=formatted_qty,
+            price=str(limit_price),
+            timeInForce="PostOnly"),
+            timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
+                pass
                 self.pending_order = order['result']
                 self.last_trade_time = datetime.now().timestamp()  # FIXED: Update last trade time
                 
                 take_profit = limit_price * (1 + self.config['net_take_profit']/100) if is_buy else limit_price * (1 - self.config['net_take_profit']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
-                    side=signal['action'],
-                    expected_price=market_price,
-                    actual_price=limit_price,
-                    qty=float(formatted_qty),
-                    stop_loss=stop_loss_price,
-                    take_profit=take_profit,
-                    info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
+                side=signal['action'],
+                expected_price=market_price,
+                actual_price=limit_price,
+                qty=float(formatted_qty),
+                stop_loss=stop_loss_price,
+                take_profit=take_profit,
+                info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
                 )
                 
                 print(f"✅ {signal['action']}: {formatted_qty} @ ${limit_price:.2f} | RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.0f}")
                 
         except Exception as e:
+            pass
             print(f"❌ Trade failed: {e}")
     
-    async def close_position(self, reason):
+                async def close_position(self, reason):
         if not self.position:
+            pass
             return
         
-        qty = float(self.position['size'])
+            qty = float(self.position['size'])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         current_price = float(self.price_data['close'].iloc[-1])
         
@@ -424,95 +490,126 @@ class EMARSIBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Market",
-                qty=self.format_qty(qty),
-                reduceOnly=True
+            category="linear",
+            symbol=self.symbol,
+            side=side,
+            orderType="Market",
+            qty=self.format_qty(qty),
+            reduceOnly=True
             )
             
             if order.get('retCode') == 0:
+                pass
                 if self.current_trade_id:
+                    pass
                     self.logger.log_trade_close(
-                        trade_id=self.current_trade_id,
-                        expected_exit=current_price,
-                        actual_exit=execution_price,
-                        reason=reason,
-                        fees_entry=-0.04,
-                        fees_exit=0.1
+                    trade_id=self.current_trade_id,
+                    expected_exit=current_price,
+                    actual_exit=execution_price,
+                    reason=reason,
+                    fees_entry=-0.04,
+                    fees_exit=0.1
                     )
                     self.current_trade_id = None
                 
                 print(f"✅ Closed: {reason} @ ${execution_price:.2f}")
         except Exception as e:
+            pass
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
         if len(self.price_data) == 0:
+            pass
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
         status_parts = [f"📊 BNB: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
         
         if self.position:
+            pass
             entry = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = float(self.position.get('size', 0))
             pnl = float(self.position.get('unrealisedPnl', 0))
             status_parts.append(f"📍 {side}: {size:.2f} @ ${entry:.2f} | PnL: ${pnl:.2f}")
-        elif self.pending_order:
+            elif self.pending_order:
+                pass
             order_price = float(self.pending_order.get('price', 0))
             order_side = self.pending_order.get('side', '')
             age = int(datetime.now().timestamp() - int(self.pending_order.get('createdTime', 0)) / 1000)
             status_parts.append(f"⏳ {order_side} @ ${order_price:.2f} ({age}s)")
-        else:
+            else:
             indicators = self.calculate_indicators(self.price_data)
             if indicators:
+                pass
                 # Show signal strength
                 signal_status = ""
                 if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
+                    pass
                     signal_status = "🟢 BUY SIGNAL"
-                elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+                    elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+                        pass
                     signal_status = "🔴 SELL SIGNAL"
-                else:
+                    else:
                     signal_status = "⚪ NO SIGNAL"
                     
                 status_parts.append(f"RSI: {indicators['rsi']:.1f} | Trend: {indicators['trend']} | {signal_status}")
         
         # Show cooldown status
         if self.last_trade_time > 0:
+            pass
             time_since_last = datetime.now().timestamp() - self.last_trade_time
             if time_since_last < self.trade_cooldown:
+                pass
                 status_parts.append(f"⏰ Cooldown: {self.trade_cooldown - time_since_last:.0f}s")
         
-        print(" | ".join(status_parts), end='\r')
+            print(" | ".join(status_parts), end='\r')
     
-    async def run_cycle(self):
+                async def run_cycle(self):
         if not await self.get_market_data():
+            pass
             return
         
-        await self.check_position()
+            await self.check_position()
         await self.check_pending_orders()
         
         if self.position:
+            pass
+        # Check for position closing conditions
+        if self.position:
+            pass
+            pnl = self.position.get('unrealisedPnl', 0)
+            if pnl > 20 or pnl < -10:  # Close on profit/loss:
+                pass
+                await self.close_position("pnl_threshold")
+                elif time.time() - self.last_trade_time > 3600:  # Close after 1 hour:
+                    pass
+                await self.close_position("timeout")
+                pass
             should_close, reason = self.should_close()
             if should_close:
+                pass
                 await self.close_position(reason)
-        elif not self.pending_order:
-            signal = self.generate_signal(self.price_data)
+                elif not self.pending_order:
+                    pass
+                signal = self.generate_signal(self.price_data)
+        if signal and self.LIVE_TRADING and not self.pending_order:
+            pass
+            await self.execute_trade(signal)
             if signal:
+                pass
                 await self.execute_trade(signal)
         
-        self.show_status()
+            self.show_status()
     
-    async def run(self):
+                async def run(self):
         if not self.connect():
+            pass
             print("❌ Failed to connect")
             return
         
-        await self.get_account_balance()
-        await self.get_instrument_info()
+            await self.get_account_balance()
+            await self.get_instrument_info()
         
         print(f"🔧 EMA + RSI bot for {self.symbol} (FIXED)")
         print(f"✅ FIXES APPLIED:")
@@ -524,22 +621,38 @@ class EMARSIBot:
         print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
         
         while True:
+            pass
             try:
                 await self.run_cycle()
                 await asyncio.sleep(1)
             except KeyboardInterrupt:
+                pass
                 print("\n🛑 Bot stopped")
                 try:
                     self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
                 except:
                     pass
                 if self.position:
-                    await self.close_position("manual_stop")
+                    pass
+        # Check for position closing conditions
+        if self.position:
+            pass
+            pnl = self.position.get('unrealisedPnl', 0)
+            if pnl > 20 or pnl < -10:  # Close on profit/loss:
+                pass
+                await self.close_position("pnl_threshold")
+                elif time.time() - self.last_trade_time > 3600:  # Close after 1 hour:
+                    pass
+                await self.close_position("timeout")
+                pass
+                await self.close_position("manual_stop")
                 break
             except Exception as e:
+                pass
                 print(f"❌ Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
+    pass
     bot = EMARSIBot()
     asyncio.run(bot.run())

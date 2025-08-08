@@ -2,6 +2,7 @@ import os
 import asyncio
 import pandas as pd
 import json
+import time
 from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
@@ -84,12 +85,19 @@ class TradeLogger:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
         # FIXED: Proper maker rebate calculation
-        entry_rebate = trade["entry_price"] * trade["qty"] * 0.0004  # 0.04% rebate
-        exit_rebate = actual_exit * trade["qty"] * 0.0004           # 0.04% rebate
+        entry_rebate = trade["entry_price"] * trade["qty"] * 0.0001  # 0.01% rebate
+        exit_rebate = actual_exit * trade["qty"] * 0.0001           # 0.01% rebate
         total_rebates = entry_rebate + exit_rebate
         
         # FIXED: Net PnL includes rebates earned
         net_pnl = gross_pnl + total_rebates
+        
+        # Update daily tracking
+        self.daily_pnl += net_pnl
+        if net_pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
         
         log_entry = {
             "id": trade_id,
@@ -119,7 +127,13 @@ class TradeLogger:
 
 class EMABBFixedBot:
     def __init__(self):
-        # Trade cooldown mechanism
+        # Core trading flags
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+        
+        # Account and trading state
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
         
@@ -128,17 +142,16 @@ class EMABBFixedBot:
         self.consecutive_losses = 0
         self.max_daily_loss = 50  # $50 max daily loss
         
+        # Symbol and API setup
         self.symbol = 'SOLUSDT'
-        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
-        
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         self.exchange = None
         
+        # Trading state
         self.position = None
         self.price_data = pd.DataFrame()
-        self.pending_order = None
         self.last_signal = None
         self.order_timeout = 180
         
@@ -214,42 +227,44 @@ class EMABBFixedBot:
     # FIXED: Dynamic position sizing
     def calculate_position_size(self, price, stop_loss_price):
         try:
-            account = self.exchange.get_wallet_balance(category="linear", coin="USDT")
-            balance = float(account['result']['list'][0]['totalEquity'])
-            
-            risk_amount = balance * self.config['risk_per_trade']
-            price_diff = abs(price - stop_loss_price)
-            risk_per_unit = price_diff
-            
-            if risk_per_unit > 0:
-                position_size = risk_amount / risk_per_unit
+            # Try to get real balance from exchange
+            account = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if account.get('retCode') == 0:
+                balance_list = account['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            balance = float(coin['availableToWithdraw'])
+                            break
+                else:
+                    balance = self.account_balance
             else:
-                position_size = balance * 0.02  # Fallback 2%
-            
-            max_size = balance * self.config['max_position_pct']
-            return min(position_size, max_size)
+                balance = self.account_balance
         except:
-            return 50  # Fallback for demo/errors
+            balance = self.account_balance  # Use default
+        
+        risk_amount = balance * self.config['risk_per_trade']
+        price_diff = abs(price - stop_loss_price)
+        
+        if price_diff > 0:
+            position_size = risk_amount / price_diff
+        else:
+            position_size = balance * 0.02  # Fallback 2%
+        
+        max_size = balance * self.config['max_position_pct']
+        return min(position_size, max_size)
     
     # FIXED: Proper slippage modeling
     def apply_slippage(self, price, side, volatility=None):
-        if volatility is None:
-            if len(self.price_data) >= 20:
-                returns = self.price_data['close'].pct_change().dropna()
-                volatility = returns.rolling(20).std().iloc[-1]
-            else:
-                volatility = 0.01
-        
-        base_slippage = 0  # PostOnly = zero slippage
-        vol_multiplier = min(volatility * 100, 3)  # Cap at 3x
-        total_slippage = 0  # PostOnly = zero slippage
-        
-        if side in ["Buy", "BUY"]:
-            return price * (1 + total_slippage)
-        else:
-            return price * (1 - total_slippage)
+        # PostOnly orders have ZERO slippage
+        return price  # No slippage with PostOnly
     
     async def check_pending_orders(self):
+        # Clear pending orders after timeout
+        if self.pending_order and time.time() - self.last_trade_time > 30:
+            self.pending_order = False
+            print("✓ Cleared stale pending order")
+        
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
@@ -318,11 +333,17 @@ class EMABBFixedBot:
             signal_line = macd_line.ewm(span=self.config['macd_signal']).mean()
             histogram = macd_line - signal_line
             
-            # RSI
+            # RSI - Fixed to return 50 when flat
             delta = close.diff()
             gain = delta.clip(lower=0).rolling(window=self.config['rsi_period']).mean()
             loss = -delta.clip(upper=0).rolling(window=self.config['rsi_period']).mean()
-            rsi = 100 - (100 / (1 + gain / (loss + 1e-10)))
+            
+            # Check for flat market
+            if loss.iloc[-1] == 0 or pd.isna(loss.iloc[-1]):
+                rsi = 50.0  # Neutral RSI for flat market
+            else:
+                rs = gain.iloc[-1] / loss.iloc[-1]
+                rsi = 100 - (100 / (1 + rs))
             
             # Bollinger Bands
             bb_middle = close.rolling(window=self.config['bb_period']).mean()
@@ -339,7 +360,7 @@ class EMABBFixedBot:
                 'trend_bearish': ema_fast.iloc[-1] < ema_slow.iloc[-1] and close.iloc[-1] < ema_trend.iloc[-1],
                 'histogram': histogram.iloc[-1],
                 'histogram_prev': histogram.iloc[-2] if len(histogram) > 1 else 0,
-                'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50,
+                'rsi': rsi if not pd.isna(rsi) else 50,
                 'bb_upper': bb_upper.iloc[-1],
                 'bb_lower': bb_lower.iloc[-1],
                 'bb_middle': bb_middle.iloc[-1]
@@ -364,29 +385,35 @@ class EMABBFixedBot:
             if price_change < 0.002:
                 return None
         
-        # BUY signal: Enhanced conditions
+        # BUY signal: Strong oversold conditions
         if (ind['trend_bullish'] and trend_up and 
-            ind['rsi'] >= 60 and ind['rsi'] < 75 and
+            ind['rsi'] < 30 and  # Only buy when RSI < 30
             ind['histogram'] > 0 and ind['histogram_prev'] <= 0 and
             ind['price'] > ind['bb_lower']):
-            return {
+            
+            signal = {
                 'action': 'BUY',
                 'price': ind['price'],
                 'rsi': ind['rsi'],
-                'reason': 'enhanced_long'
+                'reason': 'oversold_reversal'
             }
+            if self.LIVE_TRADING and not self.pending_order:
+                return signal
         
-        # SELL signal: Enhanced conditions
+        # SELL signal: Strong overbought conditions
         if (ind['trend_bearish'] and not trend_up and
-            ind['rsi'] <= 40 and ind['rsi'] > 25 and
+            ind['rsi'] > 70 and  # Only sell when RSI > 70
             ind['histogram'] < 0 and ind['histogram_prev'] >= 0 and
             ind['price'] < ind['bb_upper']):
-            return {
+            
+            signal = {
                 'action': 'SELL',
                 'price': ind['price'],
                 'rsi': ind['rsi'],
-                'reason': 'enhanced_short'
+                'reason': 'overbought_reversal'
             }
+            if self.LIVE_TRADING and not self.pending_order:
+                return signal
         
         return None
     
@@ -436,10 +463,18 @@ class EMABBFixedBot:
             current_price = float(self.price_data['close'].iloc[-1])
             entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
+            unrealised_pnl = float(self.position.get('unrealisedPnl', 0))
             
             if entry_price == 0:
                 return False, ""
             
+            # Check PnL thresholds
+            if unrealised_pnl > 20:
+                return True, "take_profit_pnl"
+            if unrealised_pnl < -10:
+                return True, "stop_loss_pnl"
+            
+            # Check percentage thresholds
             profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" else ((entry_price - current_price) / entry_price * 100)
             
             if profit_pct >= self.config['take_profit_pct']:
@@ -447,13 +482,16 @@ class EMABBFixedBot:
             if profit_pct <= -self.config['stop_loss_pct']:
                 return True, "stop_loss"
             
+            # Check timeout
+            if time.time() - self.last_trade_time > 3600:  # 1 hour
+                return True, "timeout"
+            
             return False, ""
         except:
             return False, ""
     
     async def execute_trade(self, signal):
         # Check trade cooldown
-        import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
@@ -476,7 +514,7 @@ class EMABBFixedBot:
         if float(formatted_qty) < 1:
             return
         
-        # FIXED: Apply slippage to execution price
+        # FIXED: Apply slippage to execution price (zero with PostOnly)
         actual_price = self.apply_slippage(signal['price'], signal['action'])
         
         offset = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
@@ -498,7 +536,6 @@ class EMABBFixedBot:
                 self.last_signal = signal
                 self.pending_order = order['result']
                 
-                stop_loss = stop_loss_price
                 take_profit = signal['price'] * (1 + self.config['take_profit_pct']/100) if signal['action'] == 'BUY' else signal['price'] * (1 - self.config['take_profit_pct']/100)
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
@@ -506,7 +543,7 @@ class EMABBFixedBot:
                     expected_price=signal['price'],
                     actual_price=limit_price,
                     qty=float(formatted_qty),
-                    stop_loss=stop_loss,
+                    stop_loss=stop_loss_price,
                     take_profit=take_profit,
                     info=f"RSI:{signal['rsi']:.1f}_{signal['reason']}_FIXED"
                 )
@@ -524,7 +561,7 @@ class EMABBFixedBot:
         qty = float(self.position['size'])
         current_price = float(self.price_data['close'].iloc[-1])
         
-        # FIXED: Apply slippage to close price
+        # FIXED: Apply slippage to close price (zero with PostOnly)
         actual_exit_price = self.apply_slippage(current_price, side)
         
         try:
@@ -535,29 +572,32 @@ class EMABBFixedBot:
                 orderType="Limit",
                 qty=self.format_qty(qty),
                 price=str(actual_exit_price),
+                timeInForce="PostOnly",
                 reduceOnly=True
             )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
-                    self.logger.log_trade_close(
+                    log_entry = self.logger.log_trade_close(
                         trade_id=self.current_trade_id,
                         expected_exit=current_price,
                         actual_exit=actual_exit_price,
                         reason=reason
                     )
+                    if log_entry:
+                        self.daily_pnl = self.logger.daily_pnl
                     self.current_trade_id = None
                 
                 print(f"💰 Closed: {reason}")
                 self.position = None
                 self.last_signal = None
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Close failed: {e}")
     
     async def run_cycle(self):
         # Emergency stop check
-        if self.daily_pnl < -self.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
+        if self.logger.daily_pnl < -self.logger.max_daily_loss:
+            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f} exceeded limit")
             if self.position:
                 await self.close_position("emergency_stop")
             return
@@ -583,11 +623,13 @@ class EMABBFixedBot:
             return
         
         print(f"🔧 FIXED EMA+BB Bot for {self.symbol}")
+        print(f"📊 Mode: {'DEMO' if self.demo_mode else 'LIVE'} | Trading: {'ON' if self.LIVE_TRADING else 'OFF'}")
         print(f"✅ FIXED: Dynamic position sizing (1% risk)")
         print(f"✅ FIXED: Proper fee calculations (+rebates)")
-        print(f"✅ FIXED: Slippage modeling")
+        print(f"✅ FIXED: Zero slippage (PostOnly)")
         print(f"✅ FIXED: Enhanced filters")
         print(f"🎯 TP: {self.config['take_profit_pct']}% | SL: {self.config['stop_loss_pct']}%")
+        print(f"⏰ Trade cooldown: {self.trade_cooldown}s")
         
         try:
             while True:

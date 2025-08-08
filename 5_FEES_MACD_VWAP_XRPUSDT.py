@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import os
 import asyncio
 import pandas as pd
@@ -10,6 +12,13 @@ load_dotenv()
 
 class UnifiedLogger:
     def __init__(self, bot_name, symbol):
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         
         # Trade cooldown mechanism
@@ -37,35 +46,36 @@ class UnifiedLogger:
         slippage = actual_price - expected_price if side == "BUY" else expected_price - actual_price
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if side == "BUY" else "SHORT",
-            "action": "OPEN",
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "expected_price": round(expected_price, 4),
-            "actual_price": round(actual_price, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(qty, 6),
-            "stop_loss": round(stop_loss, 4),
-            "take_profit": round(take_profit, 4),
-            "currency": self.currency,
-            "info": info
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if side == "BUY" else "SHORT",
+        "action": "OPEN",
+        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expected_price": round(expected_price, 4),
+        "actual_price": round(actual_price, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(qty, 6),
+        "stop_loss": round(stop_loss, 4),
+        "take_profit": round(take_profit, 4),
+        "currency": self.currency,
+        "info": info
         }
         
         self.open_trades[trade_id] = {
-            "entry_time": datetime.now(),
-            "entry_price": actual_price,
-            "side": side,
-            "qty": qty,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit
+        "entry_time": datetime.now(),
+        "entry_price": actual_price,
+        "side": side,
+        "qty": qty,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit
         }
         
         return trade_id, log_entry
 
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
+            pass
             return None
             
         trade = self.open_trades[trade_id]
@@ -74,8 +84,9 @@ class UnifiedLogger:
         slippage = actual_exit - expected_exit if trade["side"] == "SELL" else expected_exit - actual_exit
         
         if trade["side"] == "BUY":
+            pass
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
-        else:
+            else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
         entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
@@ -84,23 +95,23 @@ class UnifiedLogger:
         net_pnl = gross_pnl + total_rebates
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
-            "action": "CLOSE",
-            "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "duration_sec": int(duration),
-            "entry_price": round(trade["entry_price"], 4),
-            "expected_exit": round(expected_exit, 4),
-            "actual_exit": round(actual_exit, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(trade["qty"], 6),
-            "gross_pnl": round(gross_pnl, 2),
-            "rebates": {"entry": round(entry_rebate, 4), "exit": round(exit_rebate, 4), "total": round(total_rebates, 4)},
-            "net_pnl": round(net_pnl, 2),
-            "reason": reason,
-            "currency": self.currency
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+        "action": "CLOSE",
+        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_sec": int(duration),
+        "entry_price": round(trade["entry_price"], 4),
+        "expected_exit": round(expected_exit, 4),
+        "actual_exit": round(actual_exit, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(trade["qty"], 6),
+        "gross_pnl": round(gross_pnl, 2),
+        "rebates": {"entry": round(entry_rebate, 4), "exit": round(exit_rebate, 4), "total": round(total_rebates, 4)},
+        "net_pnl": round(net_pnl, 2),
+        "reason": reason,
+        "currency": self.currency
         }
         
         del self.open_trades[trade_id]
@@ -108,11 +119,17 @@ class UnifiedLogger:
     
     def write_log(self, log_entry, log_file):
         with open(log_file, "a") as f:
+            pass
             f.write(json.dumps(log_entry) + "\n")
 
 class Strategy5_EMARSIBot:
     def __init__(self):
         
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
@@ -139,18 +156,18 @@ class Strategy5_EMARSIBot:
         
         # FIXED: Stronger signal thresholds
         self.config = {
-            'ema_fast': 9,
-            'ema_slow': 21,
-            'rsi_period': 7,
-            'rsi_long_threshold': 30,  # FIXED: Buy only when RSI < 30 (oversold)
-            'rsi_short_threshold': 70,  # FIXED: Sell only when RSI > 70 (overbought)
-            'risk_per_trade_pct': 2.0,
-            'maker_offset_pct': 0.01,
-            'stop_loss': 0.35,
-            'take_profit': 0.50,  # FIXED: Add take profit
-            'trail_divergence': 0.15,
-            'order_timeout': 180,
-            'expected_slippage_pct': 0.02,
+        'ema_fast': 9,
+        'ema_slow': 21,
+        'rsi_period': 7,
+        'rsi_long_threshold': 30,  # FIXED: Buy only when RSI < 30 (oversold)
+        'rsi_short_threshold': 70,  # FIXED: Sell only when RSI > 70 (overbought)
+        'risk_per_trade_pct': 2.0,
+        'maker_offset_pct': 0.01,
+        'stop_loss': 0.35,
+        'take_profit': 0.50,  # FIXED: Add take profit
+        'trail_divergence': 0.15,
+        'order_timeout': 180,
+        'expected_slippage_pct': 0.02,
         }
         
         os.makedirs("logs", exist_ok=True)
@@ -168,32 +185,39 @@ class Strategy5_EMARSIBot:
         except:
             return False
     
-    async def get_account_balance(self):
+        async def get_account_balance(self):
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
+                pass
                 balance_list = wallet['result']['list']
                 if balance_list:
+                    pass
                     for coin in balance_list[0]['coin']:
+                        pass
                         if coin['coin'] == 'USDT':
+                            pass
                             balance_str = coin['availableToWithdraw']
                             if balance_str and balance_str.strip():
+                                pass
                                 self.account_balance = float(balance_str)
                                 return True
         except:
             pass
         
-        self.account_balance = 1000.0
-        return True
+                            self.account_balance = 1000.0
+                            return True
     
     def calculate_position_size(self, price, stop_loss_price):
         if self.account_balance <= 0:
+            pass
             return 0
         
         risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
         price_diff = abs(price - stop_loss_price)
         
         if price_diff == 0:
+            pass
             return 0
         
         slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
@@ -208,29 +232,34 @@ class Strategy5_EMARSIBot:
     
     def format_qty(self, qty):
         if qty < 0.1:
+            pass
             return "0"
         formatted = f"{round(qty, 1):.1f}"
         return formatted if float(formatted) >= 0.1 else "0"
     
     def apply_slippage(self, price, side, order_type="market"):
         if order_type == "limit":
+            pass
             return price
         
         slippage_pct = self.config['expected_slippage_pct'] / 100
         
         if side in ["BUY", "Buy"]:
+            pass
             return price * (1 + slippage_pct)
         else:
             return price * (1 - slippage_pct)
     
-    async def check_pending_orders(self):
+                        async def check_pending_orders(self):
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
+                pass
                 return False
             
             order_list = orders['result']['list']
             if not order_list:
+                pass
                 self.pending_order = None
                 return False
             
@@ -238,6 +267,7 @@ class Strategy5_EMARSIBot:
             age = datetime.now().timestamp() - int(order['createdTime']) / 1000
             
             if age > self.config['order_timeout']:
+                pass
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order['orderId'])
                 self.pending_order = None
                 return False
@@ -249,6 +279,7 @@ class Strategy5_EMARSIBot:
     
     def calculate_indicators(self, df):
         if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
+            pass
             return None
         
         close = df['close']
@@ -265,6 +296,10 @@ class Strategy5_EMARSIBot:
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
         rsi = 100 - (100 / (1 + gain / (loss + 1e-10))).iloc[-1]
+
+            # Handle flat market
+            if pd.isna(rsi) or rsi == 0:
+                rsi = 50.0  # Neutral RSI for flat market
         
         # FIXED: Proper crossover detection with state tracking
         current_state = 'UP' if ema_fast.iloc[-1] > ema_slow.iloc[-1] else 'DOWN'
@@ -272,28 +307,33 @@ class Strategy5_EMARSIBot:
         crossover_down = False
         
         if self.last_ema_state:
+            pass
             if self.last_ema_state == 'DOWN' and current_state == 'UP':
+                pass
                 crossover_up = True
-            elif self.last_ema_state == 'UP' and current_state == 'DOWN':
+                elif self.last_ema_state == 'UP' and current_state == 'DOWN':
+                    pass
                 crossover_down = True
         
-        self.last_ema_state = current_state
+            self.last_ema_state = current_state
         
-        return {
-            'ema_fast': ema_fast.iloc[-1],
-            'ema_slow': ema_slow.iloc[-1],
-            'crossover_up': crossover_up,
-            'crossover_down': crossover_down,
-            'rsi': rsi if pd.notna(rsi) else 50
+            return {
+        'ema_fast': ema_fast.iloc[-1],
+        'ema_slow': ema_slow.iloc[-1],
+        'crossover_up': crossover_up,
+        'crossover_down': crossover_down,
+        'rsi': rsi if pd.notna(rsi) else 50
         }
     
     def generate_signal(self, df):
         # FIXED: Don't generate signals if position exists
         if self.position:
+            pass
             return None
             
         indicators = self.calculate_indicators(df)
         if not indicators:
+            pass
             return None
         
         price = float(df['close'].iloc[-1])
@@ -301,22 +341,25 @@ class Strategy5_EMARSIBot:
         # FIXED: Stronger signal requirements
         # BUY: EMA crossover up + RSI < 30 (oversold)
         if indicators['crossover_up'] and indicators['rsi'] < self.config['rsi_long_threshold']:
+            pass
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         
         # SELL: EMA crossover down + RSI > 70 (overbought)
         elif indicators['crossover_down'] and indicators['rsi'] > self.config['rsi_short_threshold']:
+            pass
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
     
-    async def get_market_data(self):
+                        async def get_market_data(self):
         try:
             klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
             if klines.get('retCode') != 0:
+                pass
                 return False
             
             df = pd.DataFrame(klines['result']['list'], 
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             
@@ -325,17 +368,20 @@ class Strategy5_EMARSIBot:
         except:
             return False
     
-    async def check_position(self):
+                    async def check_position(self):
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
+                pass
                 pos_list = positions['result']['list']
                 if pos_list and float(pos_list[0]['size']) > 0:
+                    pass
                     self.position = pos_list[0]
                     if not self.entry_price:
+                        pass
                         self.entry_price = float(self.position.get('avgPrice', 0))
-                else:
-                    self.position = None
+                        else:
+                        self.position = None
                     self.entry_price = None
                     self.trailing_stop = None
         except:
@@ -343,6 +389,7 @@ class Strategy5_EMARSIBot:
     
     def should_close(self):
         if not self.position or not self.entry_price:
+            pass
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -353,103 +400,122 @@ class Strategy5_EMARSIBot:
         
         # FIXED: Take profit exit
         if profit_pct >= self.config['take_profit']:
+            pass
             return True, "take_profit"
         
         # Hard stop loss
         if profit_pct <= -self.config['stop_loss']:
+            pass
             return True, "stop_loss"
         
         # Trailing stop when EMAs diverge > 0.15%
         if self.ema_divergence > self.config['trail_divergence'] and profit_pct > 0:
+            pass
             if not self.trailing_stop:
+                pass
                 if is_long:
+                    pass
                     self.trailing_stop = current_price * (1 - self.config['stop_loss'] / 100)
-                else:
+                    else:
                     self.trailing_stop = current_price * (1 + self.config['stop_loss'] / 100)
-            else:
+                    else:
                 if is_long:
+                    pass
                     new_stop = current_price * (1 - self.config['stop_loss'] / 100)
                     if new_stop > self.trailing_stop:
+                        pass
                         self.trailing_stop = new_stop
                     if current_price <= self.trailing_stop:
+                        pass
                         return True, "trailing_stop"
-                else:
-                    new_stop = current_price * (1 + self.config['stop_loss'] / 100)
+                        else:
+                        new_stop = current_price * (1 + self.config['stop_loss'] / 100)
                     if new_stop < self.trailing_stop:
+                        pass
                         self.trailing_stop = new_stop
                     if current_price >= self.trailing_stop:
+                        pass
                         return True, "trailing_stop"
         
-        return False, ""
+                        return False, ""
     
     def log_trade(self, action, price, info=""):
         if action in ["BUY", "SELL"] and not self.current_trade_id:
+            pass
             if action == "BUY":
+                pass
                 stop_loss_price = price * (1 - self.config['stop_loss']/100)
                 take_profit = price * (1 + self.config['take_profit']/100)
-            else:
+                else:
                 stop_loss_price = price * (1 + self.config['stop_loss']/100)
                 take_profit = price * (1 - self.config['take_profit']/100)
             
             qty = self.calculate_position_size(price, stop_loss_price)
             
             self.current_trade_id, log_entry = self.unified_logger.log_trade_open(
-                side=action,
-                expected_price=price,
-                actual_price=price,
-                qty=qty,
-                stop_loss=stop_loss_price,
-                take_profit=take_profit,
-                info=info
+            side=action,
+            expected_price=price,
+            actual_price=price,
+            qty=qty,
+            stop_loss=stop_loss_price,
+            take_profit=take_profit,
+            info=info
             )
             
             self.unified_logger.write_log(log_entry, self.log_file)
             
-        elif action == "CLOSE" and self.current_trade_id:
+            elif action == "CLOSE" and self.current_trade_id:
+                pass
             expected_exit = price
             actual_exit = self.apply_slippage(price, "SELL" if self.position.get('side') == "Buy" else "BUY", "limit")
             
             log_entry = self.unified_logger.log_trade_close(
-                trade_id=self.current_trade_id,
-                expected_exit=expected_exit,
-                actual_exit=actual_exit,
-                reason=info,
-                fees_entry=-0.04,
-                fees_exit=-0.04
+            trade_id=self.current_trade_id,
+            expected_exit=expected_exit,
+            actual_exit=actual_exit,
+            reason=info,
+            fees_entry=-0.04,
+            fees_exit=-0.04
             )
             
             if log_entry:
+                pass
                 self.unified_logger.write_log(log_entry, self.log_file)
             
             self.current_trade_id = None
     
-    async def execute_trade(self, signal):
+        async def execute_trade(self, signal):
         
         # Check trade cooldown
         import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
+            pass
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
         # FIXED: Double-check no position exists
         await self.check_position()
         if self.position:
+            pass
             return
             
         if await self.check_pending_orders():
+            pass
             return
         
         await self.get_account_balance()
         
         if signal['action'] == 'BUY':
+            pass
             stop_loss_price = signal['price'] * (1 - self.config['stop_loss']/100)
-        else:
+            else:
             stop_loss_price = signal['price'] * (1 + self.config['stop_loss']/100)
         
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if float(formatted_qty) < 0.1:
+            pass
             print(f"❌ Position size too small: {qty}")
             return
         
@@ -459,16 +525,18 @@ class Strategy5_EMARSIBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if is_buy else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+            category="linear",
+            symbol=self.symbol,
+            side="Buy" if is_buy else "Sell",
+            orderType="Limit",
+            qty=formatted_qty,
+            price=str(limit_price),
+            timeInForce="PostOnly"),
+            timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
+                pass
                 self.last_trade_time = time.time()  # Update last trade time
                 self.pending_order = order['result']
                 
@@ -479,13 +547,15 @@ class Strategy5_EMARSIBot:
                 
                 self.log_trade(signal['action'], limit_price, f"RSI:{signal['rsi']:.1f}_EMA_cross")
         except Exception as e:
+            pass
             print(f"❌ Trade failed: {e}")
 
-    async def close_position(self, reason):
+                async def close_position(self, reason):
         if not self.position:
+            pass
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
+            current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
@@ -494,26 +564,30 @@ class Strategy5_EMARSIBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True
+            category="linear",
+            symbol=self.symbol,
+            side=side,
+            orderType="Limit",
+            qty=self.format_qty(qty)
+            timeInForce="PostOnly"),
+            price=str(limit_price),
+            timeInForce="PostOnly",
+            reduceOnly=True
             )
             
             if order.get('retCode') == 0:
+                pass
                 print(f"✅ Closed: {reason} @ ${limit_price:.4f}")
                 self.log_trade("CLOSE", current_price, reason)
                 self.entry_price = None
                 self.trailing_stop = None
         except Exception as e:
+            pass
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
         if len(self.price_data) == 0:
+            pass
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -521,85 +595,119 @@ class Strategy5_EMARSIBot:
         status_parts.append(f"Bal: ${self.account_balance:.0f}")
         
         if self.position:
+            pass
             side = self.position.get('side', '')
             profit_pct = 0
             if self.entry_price:
+                pass
                 if side == "Buy":
+                    pass
                     profit_pct = ((current_price - self.entry_price) / self.entry_price * 100)
-                else:
+                    else:
                     profit_pct = ((self.entry_price - current_price) / self.entry_price * 100)
             
-            status_parts.append(f"📍 {side} @ ${self.entry_price:.4f} ({profit_pct:+.2f}%)")
+                status_parts.append(f"📍 {side} @ ${self.entry_price:.4f} ({profit_pct:+.2f}%)")
             if self.trailing_stop:
+                pass
                 status_parts.append(f"Trail: ${self.trailing_stop:.4f}")
-        elif self.pending_order:
-            order_price = float(self.pending_order.get('price', 0))
-            order_side = self.pending_order.get('side', '')
+                elif self.pending_order:
+                    pass
+                order_price = float(self.pending_order.get('price', 0))
+                order_side = self.pending_order.get('side', '')
             age = int(datetime.now().timestamp() - int(self.pending_order.get('createdTime', 0)) / 1000)
             status_parts.append(f"⏳ {order_side} @ ${order_price:.4f} ({age}s)")
-        else:
+            else:
             indicators = self.calculate_indicators(self.price_data)
             if indicators:
+                pass
                 status_parts.append(f"RSI: {indicators['rsi']:.1f}")
                 if indicators['ema_fast'] > indicators['ema_slow']:
+                    pass
                     status_parts.append("EMA: ↑")
-                else:
+                    else:
                     status_parts.append("EMA: ↓")
         
-        print(" | ".join(status_parts), end='\r')
+                print(" | ".join(status_parts), end='\r')
     
-    async def run_cycle(self):
+            async def run_cycle(self):
         
         # Emergency stop check
         if self.daily_pnl < -self.max_daily_loss:
+            pass
             print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
             if self.position:
+                pass
                 await self.close_position("emergency_stop")
-            return
+                return
         if not await self.get_market_data():
+            pass
             return
         
-        await self.check_position()
+            await self.check_position()
         await self.check_pending_orders()
         
         if self.position:
+            pass
             should_close, reason = self.should_close()
             if should_close:
+                pass
                 await self.close_position(reason)
-        elif not self.pending_order:
-            signal = self.generate_signal(self.price_data)
+                elif not self.pending_order:
+                    pass
+                signal = self.generate_signal(self.price_data)
+        if signal and self.LIVE_TRADING and not self.pending_order:
+            pass
+            await self.execute_trade(signal)
             if signal:
+                pass
                 await self.execute_trade(signal)
         
-        self.show_status()
+            self.show_status()
     
-    async def run(self):
+                async def run(self):
         if not self.connect():
+            pass
             print("❌ Failed to connect")
             return
         
-        print(f"✅ Strategy 5: EMA Crossover + RSI Filter (FIXED)")
+            print(f"✅ Strategy 5: EMA Crossover + RSI Filter (FIXED)")
         print(f"📊 {self.symbol} | EMA 9/21 | RSI 7")
         print(f"🎯 Strong signals: RSI<{self.config['rsi_long_threshold']} for LONG, RSI>{self.config['rsi_short_threshold']} for SHORT")
         print(f"🎯 TP: {self.config['take_profit']}% | SL: {self.config['stop_loss']}% | Trail at EMA div > {self.config['trail_divergence']}%")
         
         while True:
+            pass
             try:
                 await self.run_cycle()
                 await asyncio.sleep(1)
             except KeyboardInterrupt:
+                pass
                 print("\n🛑 Bot stopped")
                 try:
                     self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
                 except:
                     pass
                 if self.position:
-                    await self.close_position("manual_stop")
+                    pass
+        # Check for position closing conditions
+        if self.position:
+            pass
+            pnl = self.position.get('unrealisedPnl', 0)
+            if pnl > 20 or pnl < -10:  # Close on profit/loss:
+                pass
+                await self.close_position("pnl_threshold")
+                elif time.time() - self.last_trade_time > 3600:  # Close after 1 hour:
+                    pass
+                await self.close_position("timeout")
+                pass
+                await self.close_position("manual_stop")
                 break
             except Exception as e:
+                pass
                 print(f"❌ Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
+    pass
     bot = Strategy5_EMARSIBot()
     asyncio.run(bot.run())

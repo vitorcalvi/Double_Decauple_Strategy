@@ -12,6 +12,11 @@ load_dotenv()
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
@@ -54,6 +59,11 @@ class TradeLogger:
 
 class RMISupertrendBot:
     def __init__(self):
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.config = {
             'symbol': 'ADAUSDT',
             'interval': '15',

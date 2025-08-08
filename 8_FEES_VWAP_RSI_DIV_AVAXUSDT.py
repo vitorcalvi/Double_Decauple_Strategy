@@ -11,38 +11,54 @@ load_dotenv()
 
 class TradeLogger:
  def __init__(self, bot_name, symbol):
-        self.bot_name = bot_name
-async def execute_limit_order(self, side, qty, price, is_reduce=False):
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+
+     self.LIVE_TRADING = False  # Enable actual trading
+     self.account_balance = 1000.0  # Default balance
+     self.pending_order = False
+     self.last_trade_time = 0
+     self.trade_cooldown = 30  # 30 seconds between trades
+     self.bot_name = bot_name
+    async def execute_limit_order(self, side, qty, price, is_reduce=False):
     """Execute limit order with PostOnly for zero slippage"""
     formatted_qty = self.format_qty(qty)
     
     # Calculate limit price with small offset
     if side == "Buy":
+        pass
         limit_price = price * 0.9998  # Slightly below market
-    else:
+        else:
         limit_price = price * 1.0002  # Slightly above market
     
     limit_price = float(self.format_price(limit_price))
     
     params = {
-        "category": "linear",
-        "symbol": self.symbol,
-        "side": side,
-        "orderType": "Limit",
-        "qty": formatted_qty,
-        "price": str(limit_price),
-        "timeInForce": "PostOnly"  # This ensures ZERO slippage
+    "category": "linear",
+    "symbol": self.symbol,
+    "side": side,
+    "orderType": "Limit",
+    "qty": formatted_qty,
+    "price": str(limit_price),
+    "timeInForce": "PostOnly"  # This ensures ZERO slippage
     }
     
     if is_reduce:
+        pass
         params["reduceOnly"] = True
     
     order = self.exchange.place_order(**params)
     
     if order.get('retCode') == 0:
+        pass
         return limit_price  # Return actual price, slippage = 0
     return None
     def __init__(self, bot_name, symbol):
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         
         # Trade cooldown mechanism
@@ -72,38 +88,40 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
         slippage = 0  # PostOnly = zero slippage
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if side == "BUY" else "SHORT",
-            "action": "OPEN",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "expected_price": round(expected_price, 4),
-            "actual_price": round(actual_price, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(qty, 6),
-            "stop_loss": round(stop_loss, 4),
-            "take_profit": round(take_profit, 4),
-            "currency": self.currency,
-            "info": info
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if side == "BUY" else "SHORT",
+        "action": "OPEN",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "expected_price": round(expected_price, 4),
+        "actual_price": round(actual_price, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(qty, 6),
+        "stop_loss": round(stop_loss, 4),
+        "take_profit": round(take_profit, 4),
+        "currency": self.currency,
+        "info": info
         }
         
         self.open_trades[trade_id] = {
-            "entry_time": datetime.now(),
-            "entry_price": actual_price,
-            "side": side,
-            "qty": qty,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit
+        "entry_time": datetime.now(),
+        "entry_price": actual_price,
+        "side": side,
+        "qty": qty,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit
         }
         
         with open(self.log_file, "a") as f:
+            pass
             f.write(json.dumps(log_entry) + "\n")
         
-        return trade_id, log_entry
+            return trade_id, log_entry
     
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.04, fees_exit=-0.04):
         if trade_id not in self.open_trades:
+            pass
             return None
             
         trade = self.open_trades[trade_id]
@@ -112,8 +130,9 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
         slippage = 0  # PostOnly = zero slippage
         
         if trade["side"] == "BUY":
+            pass
             gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
-        else:
+            else:
             gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
         
         # FIXED: Proper rebate calculation for maker orders
@@ -123,26 +142,27 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
         net_pnl = gross_pnl + total_rebates  # Add rebates since they're earnings
         
         log_entry = {
-            "id": trade_id,
-            "bot": self.bot_name,
-            "symbol": self.symbol,
-            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
-            "action": "CLOSE",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "duration_sec": int(duration),
-            "entry_price": round(trade["entry_price"], 4),
-            "expected_exit": round(expected_exit, 4),
-            "actual_exit": round(actual_exit, 4),
-            "slippage": round(slippage, 4),
-            "qty": round(trade["qty"], 6),
-            "gross_pnl": round(gross_pnl, 2),
-            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
-            "net_pnl": round(net_pnl, 2),
-            "reason": reason,
-            "currency": self.currency
+        "id": trade_id,
+        "bot": self.bot_name,
+        "symbol": self.symbol,
+        "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+        "action": "CLOSE",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "duration_sec": int(duration),
+        "entry_price": round(trade["entry_price"], 4),
+        "expected_exit": round(expected_exit, 4),
+        "actual_exit": round(actual_exit, 4),
+        "slippage": round(slippage, 4),
+        "qty": round(trade["qty"], 6),
+        "gross_pnl": round(gross_pnl, 2),
+        "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
+        "net_pnl": round(net_pnl, 2),
+        "reason": reason,
+        "currency": self.currency
         }
         
         with open(self.log_file, "a") as f:
+            pass
             f.write(json.dumps(log_entry) + "\n")
         
         del self.open_trades[trade_id]
@@ -151,6 +171,11 @@ async def execute_limit_order(self, side, qty, price, is_reduce=False):
 class VWAPRSIDivergenceBot:
     def __init__(self):
         
+        self.LIVE_TRADING = False  # Enable actual trading
+        self.account_balance = 1000.0  # Default balance
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30  # 30 seconds between trades
         # Trade cooldown mechanism
         self.last_trade_time = 0
         self.trade_cooldown = 30  # 30 seconds between trades
@@ -175,16 +200,16 @@ class VWAPRSIDivergenceBot:
         
         # FIXED PARAMETERS
         self.config = {
-            'timeframe': '5',
-            'rsi_period': 9,
-            'divergence_lookback': 5,
-            'ema_period': 50,
-            'risk_per_trade': 2.0,       # FIXED: 2% risk per trade instead of fixed $100
-            'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,
-            'net_take_profit': 0.70,
-            'net_stop_loss': 0.35,
-            'slippage_basis_points': 3,  # FIXED: 0.03% expected slippage for AVAX
+        'timeframe': '5',
+        'rsi_period': 9,
+        'divergence_lookback': 5,
+        'ema_period': 50,
+        'risk_per_trade': 2.0,       # FIXED: 2% risk per trade instead of fixed $100
+        'maker_offset_pct': 0.01,
+        'maker_fee_pct': -0.04,
+        'net_take_profit': 0.70,
+        'net_stop_loss': 0.35,
+        'slippage_basis_points': 3,  # FIXED: 0.03% expected slippage for AVAX
         }
         
         self.rsi_pivots = {'highs': [], 'lows': []}
@@ -198,6 +223,7 @@ class VWAPRSIDivergenceBot:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
             return self.exchange.get_server_time().get('retCode') == 0
         except Exception as e:
+            pass
             print(f"❌ Connection error: {e}")
             return False
     
@@ -206,6 +232,7 @@ class VWAPRSIDivergenceBot:
         # AVAX minimum quantity is 0.01 with 2 decimal places
         min_qty = 0.01
         if qty < min_qty:
+            pass
             return "0"
         
         # Round to 2 decimal places for AVAX
@@ -213,22 +240,27 @@ class VWAPRSIDivergenceBot:
         return f"{formatted:.2f}"
     
     # FIXED: Get account balance for position sizing
-    async def get_account_balance(self):
+        async def get_account_balance(self):
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
             if wallet.get('retCode') == 0:
+                pass
                 for coin in wallet['result']['list'][0]['coin']:
+                    pass
                     if coin['coin'] == 'USDT':
+                        pass
                         self.account_balance = float(coin['availableToWithdraw'])
                         return True
-            return False
+                    return False
         except Exception as e:
+            pass
             print(f"❌ Balance check error: {e}")
             return False
     
     # FIXED: Calculate position size based on account balance and risk
     def calculate_position_size(self, price, stop_loss_price):
         if self.account_balance <= 0:
+            pass
             return 0
         
         # Calculate risk amount (2% of balance)
@@ -237,6 +269,7 @@ class VWAPRSIDivergenceBot:
         # Calculate position size based on stop loss distance
         stop_distance = abs(price - stop_loss_price)
         if stop_distance == 0:
+            pass
             return 0
         
         # Position size = Risk Amount / Stop Distance
@@ -250,16 +283,18 @@ class VWAPRSIDivergenceBot:
         slippage_pct = self.config['slippage_basis_points'] / 10000  # Convert basis points to percentage
         
         if side in ['BUY', 'Buy']:
+            pass
             # Buy orders get worse (higher) price due to slippage
             actual_price = expected_price * (1 + slippage_pct)
-        else:
+            else:
             # Sell orders get worse (lower) price due to slippage
             actual_price = expected_price * (1 - slippage_pct)
         
-        return actual_price
+            return actual_price
     
     def calculate_vwap(self, df):
         if len(df) < 20:
+            pass
             return None
         
         recent_data = df.tail(min(288, len(df)))
@@ -275,25 +310,33 @@ class VWAPRSIDivergenceBot:
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
         rs = gain / (loss + 1e-10)
         rsi = 100 - (100 / (1 + rs))
-        return rsi
+
+            # Handle flat market
+            if pd.isna(rsi) or rsi == 0:
+                rsi = 50.0  # Neutral RSI for flat market
+                return rsi
     
     def detect_pivots(self, series, window=5):
         pivots_high = []
         pivots_low = []
         
         for i in range(window, len(series) - window):
-            if all(series.iloc[i] >= series.iloc[i-j] for j in range(1, window+1)) and \
-               all(series.iloc[i] >= series.iloc[i+j] for j in range(1, window+1)):
-                pivots_high.append((i, series.iloc[i]))
+            pass
+            if all(series.iloc[i] >= series.iloc[i-j] for j in range(1, window+1)) and \:
+                pass
+            all(series.iloc[i] >= series.iloc[i+j] for j in range(1, window+1)):
+            pivots_high.append((i, series.iloc[i]))
             
-            if all(series.iloc[i] <= series.iloc[i-j] for j in range(1, window+1)) and \
-               all(series.iloc[i] <= series.iloc[i+j] for j in range(1, window+1)):
-                pivots_low.append((i, series.iloc[i]))
+            if all(series.iloc[i] <= series.iloc[i-j] for j in range(1, window+1)) and \:
+                pass
+            all(series.iloc[i] <= series.iloc[i+j] for j in range(1, window+1)):
+            pivots_low.append((i, series.iloc[i]))
         
-        return pivots_high, pivots_low
+            return pivots_high, pivots_low
     
     def detect_divergence(self, df):
         if len(df) < 30:
+            pass
             return None
         
         close = df['close']
@@ -307,34 +350,42 @@ class VWAPRSIDivergenceBot:
         
         # Bullish divergence
         if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+            pass
             if price_lows[-1][1] < price_lows[-2][1] and rsi_lows[-1][1] > rsi_lows[-2][1]:
+                pass
                 if abs(price_lows[-1][0] - len(df) + 1) <= 5:
+                    pass
                     return {
-                        'type': 'bullish',
-                        'price': current_price,
-                        'rsi': current_rsi,
-                        'strength': abs(rsi_lows[-1][1] - rsi_lows[-2][1])
-                    }
+                'type': 'bullish',
+                'price': current_price,
+                'rsi': current_rsi,
+                'strength': abs(rsi_lows[-1][1] - rsi_lows[-2][1])
+                }
         
         # Bearish divergence
         if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+            pass
             if price_highs[-1][1] > price_highs[-2][1] and rsi_highs[-1][1] < rsi_highs[-2][1]:
+                pass
                 if abs(price_highs[-1][0] - len(df) + 1) <= 5:
+                    pass
                     return {
-                        'type': 'bearish',
-                        'price': current_price,
-                        'rsi': current_rsi,
-                        'strength': abs(rsi_highs[-1][1] - rsi_highs[-2][1])
-                    }
+                'type': 'bearish',
+                'price': current_price,
+                'rsi': current_rsi,
+                'strength': abs(rsi_highs[-1][1] - rsi_highs[-2][1])
+                }
         
-        return None
+                return None
     
     def generate_signal(self, df):
         if len(df) < 50:
+            pass
             return None
         
         divergence = self.detect_divergence(df)
         if not divergence:
+            pass
             return None
         
         current_price = float(df['close'].iloc[-1])
@@ -342,68 +393,77 @@ class VWAPRSIDivergenceBot:
         ema = df['close'].ewm(span=self.config['ema_period']).mean().iloc[-1]
         
         if not vwap:
+            pass
             return None
         
         # Bullish divergence + price crosses above VWAP
         if divergence['type'] == 'bullish' and current_price > vwap and current_price > ema:
+            pass
             return {
-                'action': 'BUY',
-                'price': current_price,
-                'vwap': vwap,
-                'rsi': divergence['rsi'],
-                'divergence_strength': divergence['strength']
-            }
+        'action': 'BUY',
+        'price': current_price,
+        'vwap': vwap,
+        'rsi': divergence['rsi'],
+        'divergence_strength': divergence['strength']
+        }
         
         # Bearish divergence + price crosses below VWAP
         elif divergence['type'] == 'bearish' and current_price < vwap and current_price < ema:
+            pass
             return {
-                'action': 'SELL',
-                'price': current_price,
-                'vwap': vwap,
-                'rsi': divergence['rsi'],
-                'divergence_strength': divergence['strength']
-            }
+        'action': 'SELL',
+        'price': current_price,
+        'vwap': vwap,
+        'rsi': divergence['rsi'],
+        'divergence_strength': divergence['strength']
+        }
         
         return None
     
-    async def get_market_data(self):
+                async def get_market_data(self):
         try:
             klines = self.exchange.get_kline(
-                category="linear",
-                symbol=self.symbol,
-                interval=self.config['timeframe'],
-                limit=100
+            category="linear",
+            symbol=self.symbol,
+            interval=self.config['timeframe'],
+            limit=100
             )
             
             if klines.get('retCode') != 0:
+                pass
                 return False
             
             df = pd.DataFrame(klines['result']['list'], columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
             ])
             
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
+                pass
                 df[col] = pd.to_numeric(df[col])
             
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
         except Exception as e:
+            pass
             print(f"❌ Market data error: {e}")
             return False
     
-    async def check_position(self):
+            async def check_position(self):
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
+                pass
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except Exception as e:
+            pass
             print(f"❌ Position check error: {e}")
             pass
     
     def should_close(self):
         if not self.position:
+            pass
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -411,69 +471,84 @@ class VWAPRSIDivergenceBot:
         side = self.position.get('side', '')
         
         if entry_price == 0:
+            pass
             return False, ""
         
         if side == "Buy":
+            pass
             profit_pct = (current_price - entry_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
+                pass
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
+                pass
                 return True, "stop_loss"
             
             # Check for swing high
             price_highs, _ = self.detect_pivots(self.price_data['close'])
             if price_highs and abs(price_highs[-1][0] - len(self.price_data) + 1) <= 3:
+                pass
                 return True, "swing_high_exit"
-        else:
+            else:
             profit_pct = (entry_price - current_price) / entry_price * 100
             if profit_pct >= self.config['net_take_profit']:
+                pass
                 return True, "take_profit"
             if profit_pct <= -self.config['net_stop_loss']:
+                pass
                 return True, "stop_loss"
             
             # Check for swing low
             _, price_lows = self.detect_pivots(self.price_data['close'])
             if price_lows and abs(price_lows[-1][0] - len(self.price_data) + 1) <= 3:
+                pass
                 return True, "swing_low_exit"
         
         # Check for opposite RSI extreme
         rsi = self.calculate_rsi(self.price_data['close']).iloc[-1]
         if side == "Buy" and rsi > 70:
+            pass
             return True, "rsi_overbought"
         elif side == "Sell" and rsi < 30:
+            pass
             return True, "rsi_oversold"
         
         return False, ""
     
-    async def execute_trade(self, signal):
+                async def execute_trade(self, signal):
         
         # Check trade cooldown
-        import time
+            import time
         if time.time() - self.last_trade_time < self.trade_cooldown:
+            pass
             remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
             print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
             return
         # FIXED: Check account balance first
         if not await self.get_account_balance():
+            pass
             print("❌ Could not get account balance")
             return
         
-        if self.account_balance < 10:  # Minimum $10 balance
+        if self.account_balance < 10:  # Minimum $10 balance:
+            pass
             print(f"❌ Insufficient balance: ${self.account_balance:.2f}")
             return
         
         # FIXED: Calculate stop loss price for position sizing
-        stop_loss_pct = self.config['net_stop_loss'] / 100
+            stop_loss_pct = self.config['net_stop_loss'] / 100
         if signal['action'] == 'BUY':
+            pass
             stop_loss_price = signal['price'] * (1 - stop_loss_pct)
-        else:
+            else:
             stop_loss_price = signal['price'] * (1 + stop_loss_pct)
         
         # FIXED: Calculate position size based on risk
-        qty = self.calculate_position_size(signal['price'], stop_loss_price)
+            qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
         
         if formatted_qty == "0":
+            pass
             print(f"❌ Position size too small: {qty:.6f}")
             return
         
@@ -485,16 +560,18 @@ class VWAPRSIDivergenceBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price),
-                timeInForce="PostOnly"
+            category="linear",
+            symbol=self.symbol,
+            side="Buy" if signal['action'] == 'BUY' else "Sell",
+            orderType="Limit",
+            qty=formatted_qty,
+            price=str(limit_price),
+            timeInForce="PostOnly"),
+            timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
+                pass
                 self.last_trade_time = time.time()  # Update last trade time
                 net_tp = expected_execution_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 - self.config['net_take_profit']/100)
                 net_sl = expected_execution_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY' else expected_execution_price * (1 + self.config['net_stop_loss']/100)
@@ -503,13 +580,13 @@ class VWAPRSIDivergenceBot:
                 risk_pct = (position_value * stop_loss_pct / self.account_balance) * 100
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
-                    side=signal['action'],
-                    expected_price=limit_price,
-                    actual_price=expected_execution_price,
-                    qty=float(formatted_qty),
-                    stop_loss=net_sl,
-                    take_profit=net_tp,
-                    info=f"vwap:{signal['vwap']:.4f}_rsi:{signal['rsi']:.1f}_div:{signal['divergence_strength']:.1f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
+                side=signal['action'],
+                expected_price=limit_price,
+                actual_price=expected_execution_price,
+                qty=float(formatted_qty),
+                stop_loss=net_sl,
+                take_profit=net_tp,
+                info=f"vwap:{signal['vwap']:.4f}_rsi:{signal['rsi']:.1f}_div:{signal['divergence_strength']:.1f}_risk:{risk_pct:.1f}%_bal:{self.account_balance:.2f}"
                 )
                 
                 print(f"📈 DIVERGENCE {signal['action']}: {formatted_qty} @ ${limit_price:.4f}")
@@ -519,13 +596,15 @@ class VWAPRSIDivergenceBot:
                 print(f"   🎯 Expected Execution: ${expected_execution_price:.4f} (with slippage)")
                 
         except Exception as e:
+            pass
             print(f"❌ Trade failed: {e}")
     
-    async def close_position(self, reason):
+                async def close_position(self, reason):
         if not self.position:
+            pass
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
+            current_price = float(self.price_data['close'].iloc[-1])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
         
@@ -537,25 +616,28 @@ class VWAPRSIDivergenceBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True
+            category="linear",
+            symbol=self.symbol,
+            side=side,
+            orderType="Limit",
+            qty=self.format_qty(qty)
+            timeInForce="PostOnly"),
+            price=str(limit_price),
+            timeInForce="PostOnly",
+            reduceOnly=True
             )
             
             if order.get('retCode') == 0:
+                pass
                 if self.current_trade_id:
+                    pass
                     self.logger.log_trade_close(
-                        trade_id=self.current_trade_id,
-                        expected_exit=limit_price,
-                        actual_exit=expected_exit_price,
-                        reason=reason,
-                        fees_entry=self.config['maker_fee_pct'],
-                        fees_exit=self.config['maker_fee_pct']
+                    trade_id=self.current_trade_id,
+                    expected_exit=limit_price,
+                    actual_exit=expected_exit_price,
+                    reason=reason,
+                    fees_entry=self.config['maker_fee_pct'],
+                    fees_exit=self.config['maker_fee_pct']
                     )
                     self.current_trade_id = None
                 
@@ -563,10 +645,12 @@ class VWAPRSIDivergenceBot:
                 self.position = None
                 
         except Exception as e:
+            pass
             print(f"❌ Close failed: {e}")
     
     def show_status(self):
         if len(self.price_data) == 0:
+            pass
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -581,11 +665,13 @@ class VWAPRSIDivergenceBot:
         print(f"   • Slippage Modeling: {self.config['slippage_basis_points']} basis points")
         
         if vwap:
+            pass
             print(f"📊 VWAP: ${vwap:.4f} | RSI: {rsi:.1f}")
             position_to_vwap = "Above" if current_price > vwap else "Below"
             print(f"📍 Price is {position_to_vwap} VWAP")
         
         if self.position:
+            pass
             entry_price = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = self.position.get('size', '0')
@@ -597,37 +683,44 @@ class VWAPRSIDivergenceBot:
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} AVAX @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
             print(f"   📊 Position: ${position_value:.2f} ({risk_pct:.1f}% of balance)")
-        else:
+            else:
             print("🔍 Scanning for RSI divergences...")
         
-        print("-" * 50)
+            print("-" * 50)
     
-    async def run_cycle(self):
+        async def run_cycle(self):
         
         # Emergency stop check
         if self.daily_pnl < -self.max_daily_loss:
+            pass
             print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.daily_pnl):.2f} exceeded limit")
             if self.position:
+                pass
                 await self.close_position("emergency_stop")
-            return
+                return
         if not await self.get_market_data():
+            pass
             return
         
         await self.check_position()
         
         if self.position:
+            pass
             should_close, reason = self.should_close()
             if should_close:
+                pass
                 await self.close_position(reason)
-        else:
-            signal = self.generate_signal(self.price_data)
+                else:
+                signal = self.generate_signal(self.price_data)
             if signal:
+                pass
                 await self.execute_trade(signal)
         
-        self.show_status()
+                self.show_status()
     
-    async def run(self):
+            async def run(self):
         if not self.connect():
+            pass
             print("❌ Failed to connect")
             return
         
@@ -643,16 +736,32 @@ class VWAPRSIDivergenceBot:
         
         try:
             while True:
+                pass
                 await self.run_cycle()
                 await asyncio.sleep(10)
         except KeyboardInterrupt:
+            pass
             print("\n🛑 Bot stopped")
             if self.position:
+                pass
+        # Check for position closing conditions
+        if self.position:
+            pass
+            pnl = self.position.get('unrealisedPnl', 0)
+            if pnl > 20 or pnl < -10:  # Close on profit/loss:
+                pass
+                await self.close_position("pnl_threshold")
+                elif time.time() - self.last_trade_time > 3600:  # Close after 1 hour:
+                    pass
+                await self.close_position("timeout")
+                pass
                 await self.close_position("manual_stop")
         except Exception as e:
+            pass
             print(f"⚠️ Runtime error: {e}")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
+    pass
     bot = VWAPRSIDivergenceBot()
     asyncio.run(bot.run())
