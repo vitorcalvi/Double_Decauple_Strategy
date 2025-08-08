@@ -24,7 +24,7 @@ class TradeLogger:
         self.max_daily_loss = 50
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/9_FEES_PIVOT_REVERSAL_LINKUSDT.log"
         
     def generate_trade_id(self):
         self.trade_id += 1

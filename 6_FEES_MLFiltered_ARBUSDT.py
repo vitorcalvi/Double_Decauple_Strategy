@@ -19,7 +19,7 @@ class TradeLogger:
         self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/6_FEES_MLFiltered_ARBUSDT.log"
         
     def generate_trade_id(self):
         self.trade_id += 1
@@ -542,8 +542,7 @@ class EnhancedMLScalpingBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly")
+                price=str(limit_price)
             )
             
             if order.get('retCode') == 0:
@@ -597,16 +596,7 @@ class EnhancedMLScalpingBot:
         expected_fill_price = self.apply_slippage(limit_price, side, "limit")
         
         try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True)
+            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", price=str(limit_price), timeInForce="PostOnly", reduceOnly=True)
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:

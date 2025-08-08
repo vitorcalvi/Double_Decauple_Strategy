@@ -24,7 +24,7 @@ class TradeLogger:
         self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/10_FEES_RMI_SUPERTREND_ADAUSDT.log"
         
     def generate_trade_id(self):
         self.trade_id += 1

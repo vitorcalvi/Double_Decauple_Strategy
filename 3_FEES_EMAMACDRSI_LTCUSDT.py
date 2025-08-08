@@ -19,7 +19,7 @@ class TradeLogger:
         self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/3_FEES_EMAMACDRSI_LTCUSDT.log"
         
     def generate_trade_id(self):
         self.trade_id += 1
@@ -105,7 +105,7 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
-        self.symbol = 'BNBUSDT'
+        self.symbol = 'LTCUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -369,16 +369,7 @@ class EMARSIBot:
         limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
         
         try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if is_buy else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly"),
-                timeInForce="PostOnly"
-            )
+            order = self.exchange.place_order(category="linear", symbol=self.symbol, side="Buy" if is_buy else "Sell", orderType="Limit", qty=formatted_qty, price=str(limit_price), timeInForce="PostOnly")
             
             if order.get('retCode') == 0:
                 self.pending_order = order['result']
@@ -413,16 +404,7 @@ class EMARSIBot:
         execution_price = self.estimate_execution_price(current_price, side, is_limit=False)
         
         try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
-                reduceOnly=True,
-                timeInForce="PostOnly"
-            )
+            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", reduceOnly=True, timeInForce="PostOnly")
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:

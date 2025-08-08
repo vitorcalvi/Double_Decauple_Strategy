@@ -142,7 +142,7 @@ class Strategy5_EMARSIBot:
         self.trade_cooldown = 30
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/5_EMA_RSI_XRPUSDT_FIXED.log"
+        self.log_file = f"logs/5_FEES_MACD_VWAP_XRPUSDT.log"
         self.unified_logger = UnifiedLogger("STRATEGY5_EMA_RSI_FIXED", self.symbol)
         self.current_trade_id = None
         self.entry_price = None
@@ -446,8 +446,7 @@ class Strategy5_EMARSIBot:
                 side="Buy" if is_buy else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly")
+                price=str(limit_price)
             )
             
             if order.get('retCode') == 0:
@@ -475,16 +474,7 @@ class Strategy5_EMARSIBot:
         limit_price = round(current_price * offset_mult, 4)
         
         try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True)
+            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", price=str(limit_price), timeInForce="PostOnly", reduceOnly=True)
             
             if order.get('retCode') == 0:
                 print(f"✅ Closed: {reason} @ ${limit_price:.4f}")

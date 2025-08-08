@@ -41,7 +41,7 @@ class TradeLogger:
         self.consecutive_losses = 0
         self.max_daily_loss = 50.0  # USD
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/1_FEES_EMA_BB_SOLUSDT.log"
 
     def generate_trade_id(self):
         self.trade_id += 1
@@ -571,16 +571,7 @@ class EMABBTrendBot:
         limit_price = self.format_price(limit_price)
         
         try:
-            resp = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=qty,
-                price=limit_price,
-                timeInForce="PostOnly",
-                reduceOnly=True,
-            )
+            resp = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", qty=qty, price=limit_price, timeInForce="PostOnly", reduceOnly=True, )
             
             if resp.get("retCode") == 0:
                 if self.current_trade_id:

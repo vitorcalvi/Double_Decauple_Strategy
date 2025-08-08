@@ -24,7 +24,7 @@ class TradeLogger:
         self.max_daily_loss = 50
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/8_FEES_VWAP_RSI_DIV_AVAXUSDT.log"
         
     def generate_trade_id(self):
         self.trade_id += 1
@@ -420,8 +420,7 @@ class VWAPRSIDivergenceBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly")
+                price=str(limit_price)
             )
             
             if order.get('retCode') == 0:
@@ -469,16 +468,7 @@ class VWAPRSIDivergenceBot:
         expected_exit_price = self.apply_slippage(limit_price, side)
         
         try:
-            order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
-                price=str(limit_price),
-                timeInForce="PostOnly",
-                reduceOnly=True)
+            order = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", price=str(limit_price), timeInForce="PostOnly", reduceOnly=True)
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
