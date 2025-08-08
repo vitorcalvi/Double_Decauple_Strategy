@@ -1,672 +1,444 @@
 <!DOCTYPE html>
-<html lang="en" x-data="pnlGuardApp()" x-init="init()" class="no-js">
+<html lang="en" x-data="dashboard()" x-init="init()">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PnL Guard - Bybit Live (Alpine.js)</title>
-
-    <!-- Alpine.js (CDN) -->
-    <script src="https://unpkg.com/alpinejs@3.x.x" defer></script>
-
+    <title>Bybit Order Dashboard</title>
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
+    ></script>
     <style>
+      :root {
+        --fg: #e6e6e6;
+        --bg: #0b0b0b;
+        --muted: #9aa0a6;
+        --ok: #0ecb81;
+        --bad: #f6465d;
+        --card: #121212;
+        --line: #1f1f1f;
+      }
       * {
-        margin: 0;
-        padding: 0;
         box-sizing: border-box;
       }
       body {
-        font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-        background: #0a0a0a;
-        color: #00ff00;
-        padding: 15px;
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--bg);
+        color: var(--fg);
       }
-      .container {
-        max-width: 1200px;
-        margin: 0 auto;
-      }
-      .header {
-        border: 1px solid #00ff00;
-        padding: 15px;
-        margin-bottom: 15px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      h1 {
-        font-size: 18px;
-        text-transform: uppercase;
-      }
-      .status {
-        padding: 5px 15px;
-        border: 1px solid;
-        font-weight: bold;
-      }
-      .status.active {
-        border-color: #00ff00;
-        color: #00ff00;
-        animation: pulse 2s infinite;
-      }
-      .status.inactive {
-        border-color: #ff0000;
-        color: #ff0000;
-      }
-      @keyframes pulse {
-        0%,
-        100% {
-          opacity: 1;
-        }
-        50% {
-          opacity: 0.5;
-        }
-      }
-      .section {
-        border: 1px solid #333;
-        padding: 15px;
-        margin-bottom: 15px;
-        background: #111;
+      .wrap {
+        max-width: 1100px;
+        margin: 24px auto;
+        padding: 0 16px;
       }
       .row {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 15px;
-        margin-bottom: 15px;
-      }
-      .input-group {
         display: flex;
-        flex-direction: column;
-        gap: 5px;
-      }
-      label {
-        font-size: 11px;
-        color: #888;
-        text-transform: uppercase;
-      }
-      input,
-      select {
-        background: #000;
-        border: 1px solid #333;
-        color: #00ff00;
-        padding: 8px;
-        font-family: inherit;
-        font-size: 13px;
-      }
-      input:focus,
-      select:focus {
-        outline: none;
-        border-color: #00ff00;
-      }
-      .buttons {
-        display: flex;
-        gap: 10px;
+        gap: 12px;
         flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      select,
+      button,
+      input {
+        background: var(--card);
+        border: 1px solid var(--line);
+        color: var(--fg);
+        padding: 6px 10px;
+        border-radius: 8px;
       }
       button {
-        background: #000;
-        color: #00ff00;
-        border: 1px solid #00ff00;
-        padding: 8px 15px;
         cursor: pointer;
-        font-family: inherit;
-        text-transform: uppercase;
-        font-size: 12px;
-        font-weight: bold;
-        transition: all 0.2s;
       }
-      button:hover:not(:disabled) {
-        background: #00ff00;
-        color: #000;
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px;
+        margin: 12px 0;
       }
-      button:disabled {
-        opacity: 0.3;
-        cursor: not-allowed;
-      }
-      button.danger {
-        border-color: #f00;
-        color: #f00;
-      }
-      button.danger:hover:not(:disabled) {
-        background: #f00;
-        color: #000;
-      }
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 10px;
-        margin-bottom: 15px;
-      }
-      .stat-box {
-        border: 1px solid #333;
-        padding: 10px;
-        text-align: center;
-      }
-      .stat-value {
+      h1 {
         font-size: 20px;
-        font-weight: bold;
-        margin-bottom: 3px;
+        margin: 0 0 8px;
       }
-      .stat-label {
-        font-size: 10px;
-        color: #888;
-        text-transform: uppercase;
-      }
-      .profit {
-        color: #00ff00;
-      }
-      .loss {
-        color: #ff0000;
+      h2 {
+        font-size: 16px;
+        margin: 0 0 8px;
+        color: var(--muted);
       }
       table {
         width: 100%;
         border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border-top: 1px solid var(--line);
+        padding: 8px 6px;
+        text-align: left;
+        vertical-align: middle;
       }
       th {
-        padding: 8px;
-        text-align: left;
-        border-bottom: 1px solid #333;
-        color: #888;
-        font-size: 10px;
-        text-transform: uppercase;
-        background: #111;
+        color: #bdbdbd;
+        font-weight: 600;
+        background: #151515;
+        position: sticky;
+        top: 0;
       }
-      td {
-        padding: 8px;
-        border-bottom: 1px solid #111;
+      .right {
+        text-align: right;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .good {
+        color: var(--ok);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .pill {
         font-size: 12px;
+        padding: 2px 6px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #161616;
       }
-      tr:hover {
-        background: #111;
-      }
-      .close-btn {
-        background: #ff0000;
-        color: #000;
-        border: none;
-        padding: 4px 8px;
-        cursor: pointer;
-        font-size: 10px;
-        font-weight: bold;
-      }
-      .log {
-        border: 1px solid #333;
-        height: 150px;
-        overflow-y: auto;
-        padding: 10px;
-        font-size: 11px;
-        background: #000;
-        font-family: monospace;
-      }
-      .log-entry {
-        margin-bottom: 3px;
-        padding: 3px;
-        border-left: 2px solid #333;
-      }
-      .log-entry.success {
-        border-left-color: #00ff00;
-        color: #00ff00;
-      }
-      .log-entry.warning {
-        border-left-color: #ffff00;
-        color: #ffff00;
-      }
-      .log-entry.error {
-        border-left-color: #ff0000;
-        color: #ff0000;
-      }
-      .log-entry.info {
-        border-left-color: #00ffff;
-        color: #00ffff;
+      .error {
+        color: #fff;
+        background: var(--bad);
+        padding: 8px;
+        border-radius: 8px;
       }
     </style>
   </head>
-
   <body>
-    <div class="container">
-      <div class="header">
-        <h1>🛡️ REAL-TIME PNL GUARD - BYBIT</h1>
+    <div class="wrap">
+      <div class="row">
+        <h1>Bybit Order Dashboard</h1>
+        <span class="pill" x-text="connected ? 'Proxy: OK' : 'Proxy: …'"></span>
+        <span class="muted" x-show="loading">Loading…</span>
         <span
-          :class="['status', running ? 'active' : 'inactive']"
-          x-text="running ? 'ACTIVE - LIVE DATA' : 'INACTIVE'"
+          class="muted"
+          x-text="lastUpdated ? ('Updated: ' + lastUpdated) : ''"
         ></span>
       </div>
 
-      <!-- Connection / Env -->
-      <div class="section">
+      <div class="card">
         <div class="row">
-          <div class="input-group">
-            <label>Environment</label>
-            <select x-model="environment">
-              <option value="testnet">TESTNET (Demo)</option>
-              <option value="mainnet">MAINNET (Live)</option>
+          <label
+            >Environment
+            <select x-model="env" @change="fetchAll()">
+              <option value="testnet">Testnet</option>
+              <option value="mainnet">Mainnet</option>
             </select>
-          </div>
-          <div class="input-group">
-            <label>Proxy Server</label>
-            <input type="text" x-model="proxyUrl" />
-          </div>
+          </label>
+          <label
+            >Proxy
+            <input type="text" size="26" x-model="baseUrl" />
+          </label>
+          <button @click="fetchAll()">Refresh</button>
+          <button
+            @click="toggleAuto()"
+            x-text="auto ? 'Auto: ON' : 'Auto: OFF'"
+          ></button>
+          <span class="muted">every 5s</span>
         </div>
-      </div>
-
-      <!-- Config -->
-      <div class="section">
         <div class="row">
-          <div class="input-group">
-            <label>Min Profit % to Guard</label>
+          <label
+            >Token
             <input
-              type="number"
-              step="0.1"
-              min="0"
-              x-model.number="minProfitPct"
+              type="password"
+              size="36"
+              x-model="token"
+              placeholder="PROXY_BEARER_TOKEN"
             />
-          </div>
-          <div class="input-group">
-            <label>Max Drawdown %</label>
-            <input
-              type="number"
-              step="1"
-              min="1"
-              x-model.number="maxDrawdownPct"
-            />
-          </div>
-          <div class="input-group">
-            <label>Maker Fee %</label>
-            <input type="number" step="0.01" x-model.number="makerFeePct" />
-          </div>
-          <div class="input-group">
-            <label>Check Interval (s)</label>
-            <input type="number" min="1" x-model.number="checkIntervalSec" />
-          </div>
+          </label>
         </div>
-        <div class="buttons">
-          <button @click="start()" :disabled="running">▶ START GUARD</button>
-          <button class="danger" @click="stop()" :disabled="!running">
-            ■ STOP
-          </button>
-          <button @click="testConnection()">TEST CONNECTION</button>
-          <button @click="downloadLog()">📥 DOWNLOAD LOG</button>
+        <div class="row" x-show="error">
+          <div class="error" x-text="error"></div>
         </div>
       </div>
 
-      <!-- Stats -->
-      <div class="stats">
-        <div class="stat-box">
-          <div class="stat-value profit" x-text="fmtUSD(totalSaved)">$0.00</div>
-          <div class="stat-label">Total Saved</div>
+      <div class="card">
+        <h2>Account Summary</h2>
+        <div
+          x-show="wallet"
+          style="
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+          "
+        >
+          <div>
+            Total Balance<br /><strong
+              x-text="fmt(wallet.totalWalletBalance) + ' USDT'"
+            ></strong>
+          </div>
+          <div>
+            Available<br /><strong
+              x-text="fmt(wallet.totalAvailableBalance) + ' USDT'"
+            ></strong>
+          </div>
+          <div>
+            Total UPL<br />
+            <strong
+              :class="wallet.totalPerpUPL >= 0 ? 'good' : 'bad'"
+              x-text="fmt(wallet.totalPerpUPL) + ' USDT'"
+            ></strong>
+          </div>
         </div>
-        <div class="stat-box">
-          <div class="stat-value" x-text="fmtUSD(totalRebates)">$0.00</div>
-          <div class="stat-label">Fee Rebates</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-value" x-text="positionsClosed">0</div>
-          <div class="stat-label">Closed</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-value" x-text="Object.keys(positions).length">0</div>
-          <div class="stat-label">Monitoring</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-value" x-text="fmtUSD(accountBalance)">$0.00</div>
-          <div class="stat-label">Balance</div>
-        </div>
+        <div class="muted" x-show="!wallet">No wallet data.</div>
       </div>
 
-      <!-- Table -->
-      <div class="section">
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>Side</th>
-              <th>Size</th>
-              <th>Entry</th>
-              <th>Mark</th>
-              <th>Gross P&L</th>
-              <th>Rebates</th>
-              <th>Net P&L</th>
-              <th>Net %</th>
-              <th>Peak %</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-if="Object.keys(positions).length === 0">
+      <div class="card">
+        <h2>Positions</h2>
+        <div style="overflow: auto; max-height: 340px">
+          <table>
+            <thead>
               <tr>
-                <td colspan="11" style="text-align: center; color: #888">
-                  Connect to see live positions
-                </td>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th class="right">Size</th>
+                <th class="right">Avg Price</th>
+                <th class="right">Mark</th>
+                <th class="right">UPL</th>
+                <th class="right">UPL %</th>
+                <th class="right">Value</th>
               </tr>
-            </template>
-
-            <template x-for="(pos, id) in positions" :key="id">
-              <tr>
-                <td x-text="pos.symbol"></td>
-                <td x-text="pos.side"></td>
-                <td x-text="pos.size"></td>
-                <td x-text="fmtPrice(pos.avgPrice)"></td>
-                <td x-text="fmtPrice(pos.markPrice)"></td>
-                <td
-                  :class="pos.pnl?.grossPnl >= 0 ? 'profit' : 'loss'"
-                  x-text="fmtUSD(pos.pnl?.grossPnl)"
-                ></td>
-                <td class="profit" x-text="fmtUSD(pos.pnl?.totalRebates)"></td>
-                <td
-                  :class="pos.pnl?.netPnl >= 0 ? 'profit' : 'loss'"
-                  x-text="fmtUSD(pos.pnl?.netPnl)"
-                ></td>
-                <td
-                  :class="pos.pnl?.netProfitPct >= 0 ? 'profit' : 'loss'"
-                  x-text="fmtPct(pos.pnl?.netProfitPct)"
-                ></td>
-                <td x-text="fmtPct(peakProfits[id] || 0)"></td>
-                <td>
-                  <button class="close-btn" @click="manualClose(id)">
-                    CLOSE
-                  </button>
-                </td>
+            </thead>
+            <tbody>
+              <template
+                x-for="pos in positions"
+                :key="pos.symbol + '-' + pos.side"
+              >
+                <tr>
+                  <td x-text="pos.symbol"></td>
+                  <td x-text="pos.side"></td>
+                  <td class="right" x-text="fmt(pos.size)"></td>
+                  <td class="right" x-text="fmt(pos.avgPrice)"></td>
+                  <td class="right" x-text="fmt(pos.markPrice)"></td>
+                  <td
+                    class="right"
+                    :class="+pos.unrealisedPnl >= 0 ? 'good' : 'bad'"
+                    x-text="fmt(pos.unrealisedPnl) + ' USDT'"
+                  ></td>
+                  <td
+                    class="right"
+                    :class="pnlPct(pos) >= 0 ? 'good' : 'bad'"
+                    x-text="pnlPct(pos).toFixed(2) + '%'"
+                  ></td>
+                  <td
+                    class="right"
+                    x-text="fmt(pos.positionValue) + ' USDT'"
+                  ></td>
+                </tr>
+              </template>
+              <tr x-show="positions.length === 0">
+                <td colspan="8" class="muted">No positions</td>
               </tr>
-            </template>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <!-- Log -->
-      <div class="log" id="logContainer">
-        <template x-for="(l, idx) in logs.slice().reverse()" :key="idx">
-          <div
-            class="log-entry"
-            :class="l.type"
-            x-text="`[${l.time}] ${l.msg}`"
-          ></div>
-        </template>
+      <div class="card">
+        <h2>Active Orders</h2>
+        <div style="overflow: auto; max-height: 360px">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th class="right">Qty</th>
+                <th class="right">Price</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="order in orders" :key="order.orderId">
+                <tr>
+                  <td x-text="order.symbol"></td>
+                  <td x-text="order.side"></td>
+                  <td x-text="order.orderType"></td>
+                  <td class="right" x-text="fmt(order.qty)"></td>
+                  <td
+                    class="right"
+                    x-text="order.price ? fmt(order.price) : 'Market'"
+                  ></td>
+                  <td x-text="order.orderStatus"></td>
+                  <td x-text="ts(order.createdTime)"></td>
+                  <td>
+                    <button @click="cancelOrder(order.orderId, order.symbol)">
+                      Cancel
+                    </button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="orders.length === 0">
+                <td colspan="8" class="muted">No active orders</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
     <script>
-      function pnlGuardApp() {
+      function dashboard() {
         return {
-          // ======= State =======
-          environment: 'testnet',
-          proxyUrl: 'http://localhost:8080',
+          // ====== CONFIG ======
+          env: 'testnet',
+          baseUrl: 'http://127.0.0.1:8080/proxy',
+          token: 'put_a_long_random_token_here', // <-- set to your PROXY_BEARER_TOKEN
+          auto: true,
+          intervalMs: 5000,
 
-          minProfitPct: 0.2, // %
-          maxDrawdownPct: 25, // %
-          makerFeePct: -0.04, // %
-          checkIntervalSec: 2, // seconds
+          // ====== STATE ======
+          loading: false,
+          error: null,
+          connected: false,
+          lastUpdated: null,
+          positions: [],
+          orders: [],
+          wallet: null,
+          _timer: null,
 
-          running: false,
-          pollTimer: null,
-
-          positions: {}, // id -> { ...pos, pnl }
-          peakProfits: {}, // id -> peak percent
-          logs: [], // {time, msg, type}
-          totalSaved: 0,
-          totalRebates: 0,
-          positionsClosed: 0,
-          accountBalance: 0,
-          tradeIdCounter: 1000,
-
-          // ======= Lifecycle =======
-          init() {
-            this.log('App ready', 'info');
+          // ====== LIFECYCLE ======
+          async init() {
+            await this.fetchAll();
+            this._schedule();
           },
-
-          // ======= Utils / Formatters =======
-          cfg() {
-            return {
-              minProfit: this.minProfitPct / 100,
-              maxDrawdown: this.maxDrawdownPct / 100,
-              makerFee: this.makerFeePct / 100,
-              env: this.environment,
-              proxy: this.proxyUrl
-            };
+          toggleAuto() {
+            this.auto = !this.auto;
+            this._schedule();
           },
-          fmtUSD(v) {
-            v = Number(v || 0);
-            return (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(2);
-          },
-          fmtPct(v) {
-            v = Number(v || 0);
-            return v.toFixed(2) + '%';
-          },
-          fmtPrice(v) {
-            v = Number(v || 0);
-            return '$' + v.toFixed(4);
-          },
-          nowStr() {
-            return new Date().toLocaleTimeString();
-          },
-          log(msg, type = 'info') {
-            this.logs.push({ time: this.nowStr(), msg, type });
-            if (this.logs.length > 500) this.logs.shift();
+          _schedule() {
+            if (this._timer) clearInterval(this._timer);
+            if (this.auto) {
+              this._timer = setInterval(() => this.fetchAll(), this.intervalMs);
+            }
           },
 
-          // ======= API =======
-          async makeRequest(endpoint, method = 'GET', params = {}) {
-            const { env, proxy } = this.cfg();
-            const headers = {
+          // ====== HELPERS ======
+          hdrs(endpoint, isPost = false) {
+            const h = {
+              Authorization: this.token ? `Bearer ${this.token}` : '',
               'X-Target-Endpoint': endpoint,
-              'X-Target-Env': env,
-              'Content-Type': 'application/json'
+              'X-Target-Env': this.env
             };
-            const qs = new URLSearchParams(params).toString();
-            const url = `${proxy}/proxy?${qs}`;
+            if (isPost) h['Content-Type'] = 'application/json';
+            return h;
+          },
+          fmt(x) {
+            if (x === null || x === undefined) return '';
+            const n = Number(x);
+            if (!isFinite(n)) return String(x);
+            return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+          },
+          ts(ms) {
+            if (!ms) return '';
+            const d = new Date(parseInt(ms));
+            return d.toLocaleString();
+          },
+          pnlPct(pos) {
+            const upnl = parseFloat(pos.unrealisedPnl || 0);
+            const val = parseFloat(pos.positionValue || 0);
+            if (!val) return 0;
+            return (upnl / val) * 100;
+          },
+
+          // ====== FETCHERS ======
+          async fetchAll() {
+            this.loading = true;
+            this.error = null;
             try {
-              const res = await fetch(url, {
-                method,
-                headers,
-                body: method === 'POST' ? JSON.stringify(params) : null
-              });
-              if (!res.ok) throw new Error(`HTTP ${res.status}`);
-              return await res.json();
+              await Promise.all([
+                this.fetchWallet(),
+                this.fetchPositions(),
+                this.fetchOrders()
+              ]);
+              this.connected = true;
+              this.lastUpdated = new Date().toLocaleTimeString();
             } catch (e) {
-              this.log(`API Error: ${e.message}`, 'error');
-              throw e;
+              this.error = e?.message || String(e);
+              this.connected = false;
+            } finally {
+              this.loading = false;
             }
           },
 
-          async testConnection() {
-            try {
-              this.log('Testing connection...', 'info');
-              const r = await this.makeRequest('/v5/market/time');
-              if (r?.retCode === 0) {
-                this.log('✅ Connection successful!', 'success');
-                await this.getAccountBalance();
-                const positions = await this.fetchPositions();
-                this.log(`Found ${positions.length} open positions`, 'info');
-                return true;
-              } else {
-                this.log(`❌ API Error: ${r?.retMsg || 'Unknown'}`, 'error');
-              }
-            } catch (e) {
-              this.log(`❌ Connection failed: ${e.message}`, 'error');
-            }
-            return false;
-          },
-
-          async getAccountBalance() {
-            try {
-              const r = await this.makeRequest(
-                '/v5/account/wallet-balance',
-                'GET',
-                { accountType: 'UNIFIED' }
-              );
-              if (r?.retCode === 0) {
-                const usdt = r.result?.list?.[0]?.coin?.find(
-                  c => c.coin === 'USDT'
-                );
-                if (usdt)
-                  this.accountBalance = parseFloat(usdt.walletBalance || 0);
-              }
-            } catch {
-              this.log('Balance check failed', 'error');
+          async fetchWallet() {
+            const url = `${this.baseUrl}?accountType=UNIFIED`;
+            const res = await fetch(url, {
+              headers: this.hdrs('/v5/account/wallet-balance')
+            });
+            if (res.status === 401)
+              throw new Error('401 Unauthorized: check PROXY_BEARER_TOKEN');
+            const data = await res.json();
+            if (data.retCode === 0 && data.result?.list?.length) {
+              this.wallet = data.result.list[0];
+            } else if (data.retMsg) {
+              throw new Error(data.retMsg);
             }
           },
 
           async fetchPositions() {
-            try {
-              const r = await this.makeRequest('/v5/position/list', 'GET', {
-                category: 'linear',
-                settleCoin: 'USDT'
-              });
-              return r?.retCode === 0 ? r.result?.list || [] : [];
-            } catch {
-              return [];
-            }
-          },
-
-          // ======= PnL & Monitoring =======
-          calcPnL(pos) {
-            const size = parseFloat(pos.size);
-            const avg = parseFloat(pos.avgPrice);
-            const mark = parseFloat(pos.markPrice);
-            if (!size || !avg || !mark) return null;
-
-            const { makerFee } = this.cfg();
-            const gross =
-              pos.side === 'Buy' ? (mark - avg) * size : (avg - mark) * size;
-
-            // Approx rebate on both entry/exit marks (simple estimate)
-            const rebates = Math.abs(makerFee) * size * (avg + mark);
-            const net = gross + rebates;
-            const netPct = (net / (avg * size)) * 100;
-
-            return {
-              grossPnl: gross,
-              totalRebates: rebates,
-              netPnl: net,
-              netProfitPct: netPct
-            };
-          },
-
-          async updatePositions() {
-            const arr = await this.fetchPositions();
-            const currentIds = new Set();
-
-            for (const p of arr) {
-              if (parseFloat(p.size) === 0) continue;
-              const id = `${p.symbol}_${p.side}`;
-              currentIds.add(id);
-
-              const pnl = this.calcPnL(p);
-              if (!pnl) continue;
-
-              if (!this.positions[id])
-                this.log(`New position: ${p.symbol} ${p.side}`, 'info');
-              this.positions[id] = { ...this.positions[id], ...p, pnl };
-
-              const { minProfit, maxDrawdown } = this.cfg();
-              if (pnl.netProfitPct > minProfit * 100) {
-                const peak = (this.peakProfits[id] = Math.max(
-                  this.peakProfits[id] || 0,
-                  pnl.netProfitPct
-                ));
-                const drawdown =
-                  peak > 0 ? (peak - pnl.netProfitPct) / peak : 0;
-
-                if (drawdown > maxDrawdown) {
-                  await this.closePosition(
-                    this.positions[id],
-                    pnl,
-                    peak,
-                    drawdown
-                  );
-                }
-              }
-            }
-
-            // cleanup missing
-            Object.keys(this.positions).forEach(id => {
-              if (!currentIds.has(id)) {
-                delete this.positions[id];
-                delete this.peakProfits[id];
-              }
+            const url = `${this.baseUrl}?category=linear&settleCoin=USDT`;
+            const res = await fetch(url, {
+              headers: this.hdrs('/v5/position/list')
             });
-          },
-
-          async closePosition(pos, pnl, peak, drawdown) {
-            try {
-              const side = pos.side === 'Buy' ? 'Sell' : 'Buy';
-              const mark = parseFloat(pos.markPrice);
-              const offset = side === 'Sell' ? 0.9999 : 1.0001;
-              const limitPrice = (mark * offset).toFixed(4);
-
-              const r = await this.makeRequest('/v5/order/create', 'POST', {
-                category: 'linear',
-                symbol: pos.symbol,
-                side,
-                orderType: 'Limit',
-                qty: pos.size,
-                price: String(limitPrice),
-                timeInForce: 'PostOnly',
-                reduceOnly: true
-              });
-
-              if (r?.retCode === 0) {
-                this.totalSaved += pnl.netPnl;
-                this.totalRebates += pnl.totalRebates;
-                this.positionsClosed++;
-
-                this.tradeIdCounter += 1;
-                this.logs.push({
-                  time: new Date().toISOString(),
-                  msg: `Closed ${pos.symbol}: Saved ${this.fmtUSD(
-                    pnl.netPnl
-                  )} | Peak ${peak.toFixed(2)}% | DD ${(drawdown * 100).toFixed(
-                    2
-                  )}%`,
-                  type: 'success'
-                });
-
-                this.log(`✅ Close submitted for ${pos.symbol}`, 'success');
-              } else {
-                this.log(`❌ Close failed: ${r?.retMsg || 'Unknown'}`, 'error');
-              }
-            } catch (e) {
-              this.log(`❌ Close error: ${e.message}`, 'error');
+            if (res.status === 401)
+              throw new Error('401 Unauthorized: check PROXY_BEARER_TOKEN');
+            const data = await res.json();
+            if (data.retCode === 0) {
+              this.positions = data.result?.list || [];
+            } else if (data.retMsg) {
+              throw new Error(data.retMsg);
             }
           },
 
-          async manualClose(id) {
-            const pos = this.positions[id];
-            if (!pos) return;
-            if (!confirm(`Close ${pos.symbol} ${pos.side} position?`)) return;
-
-            const pnl = pos.pnl || this.calcPnL(pos);
-            const peak = this.peakProfits[id] || (pnl ? pnl.netProfitPct : 0);
-            await this.closePosition(pos, pnl, peak, 0);
+          async fetchOrders() {
+            const url = `${this.baseUrl}?category=linear&settleCoin=USDT`;
+            const res = await fetch(url, {
+              headers: this.hdrs('/v5/order/realtime')
+            });
+            if (res.status === 401)
+              throw new Error('401 Unauthorized: check PROXY_BEARER_TOKEN');
+            const data = await res.json();
+            if (data.retCode === 0) {
+              this.orders = data.result?.list || [];
+            } else if (data.retMsg) {
+              throw new Error(data.retMsg);
+            }
           },
 
-          // ======= Controls =======
-          async start() {
-            if (this.running) return;
-            this.running = true;
-            this.log('PnL Guard started', 'success');
-
-            await this.getAccountBalance();
-            await this.updatePositions();
-
-            this.pollTimer = setInterval(
-              () => this.updatePositions(),
-              this.checkIntervalSec * 1000
-            );
-          },
-
-          stop() {
-            if (!this.running) return;
-            this.running = false;
-            if (this.pollTimer) clearInterval(this.pollTimer);
-            this.pollTimer = null;
-            this.log('PnL Guard stopped', 'error');
-          },
-
-          downloadLog() {
-            const lines = this.logs.map(l => JSON.stringify(l)).join('\n');
-            const blob = new Blob([lines], { type: 'text/plain' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `PNL_GUARD_${
-              new Date().toISOString().split('T')[0]
-            }.log`;
-            a.click();
+          async cancelOrder(orderId, symbol) {
+            if (!confirm('Cancel order?')) return;
+            const body = JSON.stringify({
+              category: 'linear',
+              symbol,
+              orderId
+            });
+            const res = await fetch(this.baseUrl, {
+              method: 'POST',
+              headers: this.hdrs('/v5/order/cancel', true),
+              body
+            });
+            if (res.status === 401) {
+              alert('401 Unauthorized: check token');
+              return;
+            }
+            const data = await res.json();
+            if (data.retCode === 0) {
+              await this.fetchOrders();
+            } else {
+              alert('Failed: ' + (data.retMsg || 'Unknown error'));
+            }
           }
         };
       }
