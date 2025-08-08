@@ -12,22 +12,16 @@ load_dotenv()
 class TradeLogger:
     def __init__(self, bot_name, symbol):
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
-
-        self.LIVE_TRADING = False  # Enable actual trading
-        self.account_balance = 1000.0  # Default balance
-        self.pending_order = False
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
         self.open_trades = {}
         self.trade_id = 1000
         
-        # Emergency stop tracking
+        # Trading limits
         self.daily_pnl = 0
         self.consecutive_losses = 0
-        self.max_daily_loss = 50  # $50 max daily loss
+        self.max_daily_loss = 50
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/{bot_name}_{symbol}.log"
@@ -41,93 +35,83 @@ class TradeLogger:
         slippage = 0  # PostOnly = zero slippage
         
         log_entry = {
-        "id": trade_id,
-        "bot": self.bot_name,
-        "symbol": self.symbol,
-        "side": "LONG" if side == "BUY" else "SHORT",
-        "action": "OPEN",
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "expected_price": round(expected_price, 4),
-        "actual_price": round(actual_price, 4),
-        "slippage": round(slippage, 6),  # Always 0 with PostOnly
-        "qty": round(qty, 6),
-        "stop_loss": round(stop_loss, 4),
-        "take_profit": round(take_profit, 4),
-        "currency": self.currency,
-        "info": info
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if side == "BUY" else "SHORT",
+            "action": "OPEN",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "expected_price": round(expected_price, 4),
+            "actual_price": round(actual_price, 4),
+            "slippage": round(slippage, 6),
+            "qty": round(qty, 6),
+            "stop_loss": round(stop_loss, 4),
+            "take_profit": round(take_profit, 4),
+            "currency": self.currency,
+            "info": info
         }
         
         self.open_trades[trade_id] = {
-        "entry_time": datetime.now(),
-        "entry_price": actual_price,
-        "side": side,
-        "qty": qty,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit
+            "entry_time": datetime.now(),
+            "entry_price": actual_price,
+            "side": side,
+            "qty": qty,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
         }
         
         with open(self.log_file, "a") as f:
-            pass
             f.write(json.dumps(log_entry) + "\n")
         
-            return trade_id, log_entry
+        return trade_id, log_entry
     
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason, fees_entry=-0.01, fees_exit=-0.01):
         if trade_id not in self.open_trades:
-            pass
             return None
             
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
-        
         slippage = 0  # PostOnly = zero slippage
         
-        if trade["side"] == "BUY":
-            pass
-            gross_pnl = (actual_exit - trade["entry_price"]) * trade["qty"]
-            else:
-            gross_pnl = (trade["entry_price"] - actual_exit) * trade["qty"]
+        gross_pnl = ((actual_exit - trade["entry_price"]) * trade["qty"] 
+                    if trade["side"] == "BUY" 
+                    else (trade["entry_price"] - actual_exit) * trade["qty"])
         
         # Maker rebates (negative fees = rebate)
         entry_rebate = abs(trade["entry_price"] * trade["qty"] * fees_entry / 100)
         exit_rebate = abs(actual_exit * trade["qty"] * fees_exit / 100)
         total_rebates = entry_rebate + exit_rebate
-        net_pnl = gross_pnl + total_rebates  # Add rebates to profit
+        net_pnl = gross_pnl + total_rebates
         
         # Update daily PnL
         self.daily_pnl += net_pnl
-        if net_pnl < 0:
-            pass
-            self.consecutive_losses += 1
-            else:
-            self.consecutive_losses = 0
+        self.consecutive_losses = self.consecutive_losses + 1 if net_pnl < 0 else 0
         
         log_entry = {
-        "id": trade_id,
-        "bot": self.bot_name,
-        "symbol": self.symbol,
-        "side": "LONG" if trade["side"] == "BUY" else "SHORT",
-        "action": "CLOSE",
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "duration_sec": int(duration),
-        "entry_price": round(trade["entry_price"], 4),
-        "expected_exit": round(expected_exit, 4),
-        "actual_exit": round(actual_exit, 4),
-        "slippage": round(slippage, 6),  # Always 0 with PostOnly
-        "qty": round(trade["qty"], 6),
-        "gross_pnl": round(gross_pnl, 2),
-        "fee_rebates": {
-        "entry": round(entry_rebate, 2),
-        "exit": round(exit_rebate, 2),
-        "total": round(total_rebates, 2)
-        },
-        "net_pnl": round(net_pnl, 2),
-        "reason": reason,
-        "currency": self.currency
+            "id": trade_id,
+            "bot": self.bot_name,
+            "symbol": self.symbol,
+            "side": "LONG" if trade["side"] == "BUY" else "SHORT",
+            "action": "CLOSE",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "duration_sec": int(duration),
+            "entry_price": round(trade["entry_price"], 4),
+            "expected_exit": round(expected_exit, 4),
+            "actual_exit": round(actual_exit, 4),
+            "slippage": round(slippage, 6),
+            "qty": round(trade["qty"], 6),
+            "gross_pnl": round(gross_pnl, 2),
+            "fee_rebates": {
+                "entry": round(entry_rebate, 2),
+                "exit": round(exit_rebate, 2),
+                "total": round(total_rebates, 2)
+            },
+            "net_pnl": round(net_pnl, 2),
+            "reason": reason,
+            "currency": self.currency
         }
         
         with open(self.log_file, "a") as f:
-            pass
             f.write(json.dumps(log_entry) + "\n")
         
         del self.open_trades[trade_id]
@@ -135,11 +119,6 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
-        self.LIVE_TRADING = False  # Enable actual trading
-        self.account_balance = 1000.0  # Default balance
-        self.pending_order = False
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
         self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -151,29 +130,29 @@ class EMARSIBot:
         self.position = None
         self.pending_order = None
         self.price_data = pd.DataFrame()
-        self.account_balance = 0
+        self.account_balance = 1000.0
         
         # Configuration with ZERO SLIPPAGE settings
         self.config = {
-        'ema_fast': 5,
-        'ema_slow': 13,
-        'rsi_period': 5,
-        'rsi_oversold': 30,
-        'rsi_overbought': 70,
-        'risk_per_trade': 1.0,
-        'maker_offset_pct': 0.02,  # Offset for PostOnly orders
-        'maker_fee': -0.01,  # Rebate for maker orders
-        'net_take_profit': 0.86,
-        'net_stop_loss': 0.43,
-        'order_timeout': 30,  # Timeout for limit orders
-        'min_notional': 5,
-        'limit_order_retries': 3
+            'ema_fast': 5,
+            'ema_slow': 13,
+            'rsi_period': 5,
+            'rsi_oversold': 30,
+            'rsi_overbought': 70,
+            'risk_per_trade': 1.0,
+            'maker_offset_pct': 0.02,
+            'maker_fee': -0.01,
+            'net_take_profit': 0.86,
+            'net_stop_loss': 0.43,
+            'order_timeout': 30,
+            'min_notional': 5,
+            'limit_order_retries': 3
         }
         
         self.tick_size = 0.01
         self.qty_step = 0.01
         
-        # Trade cooldown to prevent duplicates
+        # Trade cooldown
         self.last_trade_time = 0
         self.trade_cooldown = 30
         
@@ -187,136 +166,109 @@ class EMARSIBot:
         except:
             return False
     
-        async def execute_limit_order(self, side, qty, price, is_reduce=False):
+    async def execute_limit_order(self, side, qty, price, is_reduce=False):
         """Execute limit order with PostOnly for ZERO slippage"""
         formatted_qty = self.format_qty(qty)
         
         for retry in range(self.config['limit_order_retries']):
-            pass
             # Calculate limit price with offset
-            if side == "Buy":
-                pass
-                limit_price = price * (1 - self.config['maker_offset_pct']/100)
-                else:
-                limit_price = price * (1 + self.config['maker_offset_pct']/100)
-            
+            limit_price = (price * (1 - self.config['maker_offset_pct']/100) if side == "Buy" 
+                          else price * (1 + self.config['maker_offset_pct']/100))
             limit_price = self.format_price(limit_price)
             
             params = {
-            "category": "linear",
-            "symbol": self.symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": formatted_qty,
-            "price": str(limit_price),
-            "timeInForce": "PostOnly"  # This ensures ZERO slippage
+                "category": "linear",
+                "symbol": self.symbol,
+                "side": side,
+                "orderType": "Limit",
+                "qty": formatted_qty,
+                "price": str(limit_price),
+                "timeInForce": "PostOnly"
             }
             
             if is_reduce:
-                pass
                 params["reduceOnly"] = True
             
             try:
                 order = self.exchange.place_order(**params)
                 
                 if order.get('retCode') == 0:
-                    pass
                     order_id = order['result']['orderId']
                     
                     # Wait for fill
                     start_time = time.time()
                     while time.time() - start_time < self.config['order_timeout']:
-                        pass
                         await asyncio.sleep(1)
                         
-                        # Check order status
                         order_status = self.exchange.get_open_orders(
-                        category="linear",
-                        symbol=self.symbol,
-                        orderId=order_id
+                            category="linear",
+                            symbol=self.symbol,
+                            orderId=order_id
                         )
                         
-                        if order_status['retCode'] == 0:
-                            pass
-                            if not order_status['result']['list']:
-                                pass
-                                # Order filled with ZERO slippage
-                                return limit_price
+                        if order_status['retCode'] == 0 and not order_status['result']['list']:
+                            return limit_price  # Order filled with ZERO slippage
                     
                     # Cancel unfilled order
                     try:
                         self.exchange.cancel_order(
-                        category="linear",
-                        symbol=self.symbol,
-                        orderId=order_id
+                            category="linear",
+                            symbol=self.symbol,
+                            orderId=order_id
                         )
                     except:
                         pass
             except Exception as e:
-                pass
                 print(f"❌ Order attempt {retry+1} failed: {e}")
             
             # Get fresh price for next attempt
             if retry < self.config['limit_order_retries'] - 1:
-                pass
                 await asyncio.sleep(2)
                 await self.get_market_data()
                 price = float(self.price_data['close'].iloc[-1])
         
-                return None
+        return None
     
-                        async def get_account_balance(self):
+    async def get_account_balance(self):
         try:
             result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if result.get('retCode') == 0:
-                pass
                 balance_list = result['result']['list']
                 if balance_list:
-                    pass
                     for coin in balance_list[0]['coin']:
-                        pass
                         if coin['coin'] == 'USDT':
-                            pass
                             self.account_balance = float(coin['availableToWithdraw'])
                             return True
-                        return False
         except:
             self.account_balance = 1000
-            return False
+        return False
     
-                async def get_instrument_info(self):
+    async def get_instrument_info(self):
         try:
             result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
             if result.get('retCode') == 0:
-                pass
                 info = result['result']['list'][0]
                 self.tick_size = float(info['priceFilter']['tickSize'])
                 self.qty_step = float(info['lotSizeFilter']['qtyStep'])
                 return True
-            return False
         except:
-            return False
+            pass
+        return False
     
     def calculate_position_size(self, price, stop_loss_price):
         if self.account_balance <= 0:
-            pass
             return 0
         
         risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
         stop_distance = abs(price - stop_loss_price)
         
         if stop_distance == 0:
-            pass
             return 0
         
         position_size = risk_amount / stop_distance
         notional = position_size * price
         
-        if notional < self.config['min_notional']:
-            pass
-            return 0
-        
-        return position_size
+        return position_size if notional >= self.config['min_notional'] else 0
     
     def format_price(self, price):
         return round(price / self.tick_size) * self.tick_size
@@ -325,22 +277,19 @@ class EMARSIBot:
         formatted = round(qty / self.qty_step) * self.qty_step
         return f"{formatted:.2f}"
     
-            async def check_pending_orders(self):
-
+    async def check_pending_orders(self):
         # Clear pending orders after timeout
         if self.pending_order and time.time() - self.last_trade_time > 30:
-            pass
             self.pending_order = False
             print("✓ Cleared stale pending order")
+            
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
-                pass
                 return False
             
             order_list = orders['result']['list']
             if not order_list:
-                pass
                 self.pending_order = None
                 return False
             
@@ -351,7 +300,6 @@ class EMARSIBot:
     
     def calculate_indicators(self, df):
         if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
-            pass
             return None
         
         close = df['close']
@@ -363,55 +311,49 @@ class EMARSIBot:
         gain = delta.where(delta > 0, 0).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
         rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
-
-            # Handle flat market
-            if pd.isna(rsi) or rsi == 0:
-                rsi = 50.0  # Neutral RSI for flat market
         
-                return {
-        'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
-        'rsi': rsi if pd.notna(rsi) else 50,
-        'ema_fast': ema_fast,
-        'ema_slow': ema_slow
+        # Handle flat market
+        if pd.isna(rsi) or rsi == 0:
+            rsi = 50.0
+        
+        return {
+            'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
+            'rsi': rsi if pd.notna(rsi) else 50,
+            'ema_fast': ema_fast,
+            'ema_slow': ema_slow
         }
     
     def generate_signal(self, df):
         if self.position:
-            pass
             return None
         
         # Check trade cooldown
         time_since_last = datetime.now().timestamp() - self.last_trade_time
         if time_since_last < self.trade_cooldown:
-            pass
             return None
         
         indicators = self.calculate_indicators(df)
         if not indicators:
-            pass
             return None
         
         price = float(df['close'].iloc[-1])
         
         # Strong signal requirements
         if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
-            pass
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
-            pass
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None
     
-            async def get_market_data(self):
+    async def get_market_data(self):
         try:
             klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
             if klines.get('retCode') != 0:
-                pass
                 return False
             
             df = pd.DataFrame(klines['result']['list'], 
-            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             
@@ -420,11 +362,10 @@ class EMARSIBot:
         except:
             return False
     
-            async def check_position(self):
+    async def check_position(self):
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
-                pass
                 pos_list = positions['result']['list']
                 self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
         except:
@@ -432,127 +373,104 @@ class EMARSIBot:
     
     def should_close(self):
         if not self.position:
-            pass
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
         entry_price = float(self.position.get('avgPrice', 0))
         
         if entry_price == 0:
-            pass
             return False, ""
         
         is_long = self.position.get('side') == "Buy"
-        
-        if is_long:
-            pass
-            profit_pct = (current_price - entry_price) / entry_price * 100
-            else:
-            profit_pct = (entry_price - current_price) / entry_price * 100
+        profit_pct = ((current_price - entry_price) / entry_price * 100 if is_long 
+                     else (entry_price - current_price) / entry_price * 100)
         
         if profit_pct >= self.config['net_take_profit']:
-            pass
             return True, "take_profit"
         if profit_pct <= -self.config['net_stop_loss']:
-            pass
             return True, "stop_loss"
         
         # Exit on opposite EMA crossover
         indicators = self.calculate_indicators(self.price_data)
         if indicators:
-            pass
-            if is_long and indicators['trend'] == 'DOWN':
-                pass
-                return True, "ema_crossover"
-            elif not is_long and indicators['trend'] == 'UP':
-                pass
+            if (is_long and indicators['trend'] == 'DOWN') or (not is_long and indicators['trend'] == 'UP'):
                 return True, "ema_crossover"
         
-            return False, ""
+        return False, ""
     
-            async def execute_trade(self, signal):
-                await self.check_position()
+    async def execute_trade(self, signal):
+        await self.check_position()
         if self.position:
-            pass
             print("⚠️ Position already exists, skipping trade")
             return
             
         if await self.check_pending_orders():
-            pass
             print("⚠️ Pending order exists, skipping trade")
             return
         
-            time_since_last = datetime.now().timestamp() - self.last_trade_time
+        time_since_last = datetime.now().timestamp() - self.last_trade_time
         if time_since_last < self.trade_cooldown:
-            pass
             print(f"⚠️ Trade cooldown active, wait {self.trade_cooldown - time_since_last:.0f}s")
             return
         
-            await self.get_account_balance()
+        await self.get_account_balance()
         
-                        market_price = signal['price']
-                        is_buy = signal['action'] == 'BUY'
+        market_price = signal['price']
+        is_buy = signal['action'] == 'BUY'
+        stop_loss_price = (market_price * (1 - self.config['net_stop_loss']/100) if is_buy 
+                          else market_price * (1 + self.config['net_stop_loss']/100))
         
-        if is_buy:
-            pass
-            stop_loss_price = market_price * (1 - self.config['net_stop_loss']/100)
-            else:
-            stop_loss_price = market_price * (1 + self.config['net_stop_loss']/100)
-        
-                        qty = self.calculate_position_size(market_price, stop_loss_price)
+        qty = self.calculate_position_size(market_price, stop_loss_price)
         
         if qty < self.qty_step:
-            pass
             print(f"⚠️ Position size too small: {qty}")
             return
         
         # Execute with ZERO slippage
-                            actual_price = await self.execute_limit_order(
-                        "Buy" if is_buy else "Sell",
-                    qty,
-                market_price
-                )
+        actual_price = await self.execute_limit_order(
+            "Buy" if is_buy else "Sell",
+            qty,
+            market_price
+        )
         
         if actual_price:
-            pass
             self.last_trade_time = datetime.now().timestamp()
             
-            take_profit = actual_price * (1 + self.config['net_take_profit']/100) if is_buy else actual_price * (1 - self.config['net_take_profit']/100)
+            take_profit = (actual_price * (1 + self.config['net_take_profit']/100) if is_buy 
+                         else actual_price * (1 - self.config['net_take_profit']/100))
             
             self.current_trade_id, _ = self.logger.log_trade_open(
-            side=signal['action'],
-            expected_price=market_price,
-            actual_price=actual_price,
-            qty=qty,
-            stop_loss=stop_loss_price,
-            take_profit=take_profit,
-            info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
+                side=signal['action'],
+                expected_price=market_price,
+                actual_price=actual_price,
+                qty=qty,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit,
+                info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
             )
             
             print(f"✅ {signal['action']}: {self.format_qty(qty)} @ ${actual_price:.2f}")
             print(f"   📊 RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.0f}")
             print(f"   ✅ ZERO SLIPPAGE with PostOnly")
     
-                async def close_position(self, reason):
+    async def close_position(self, reason):
         if not self.position:
-            pass
             return
         
-            qty = float(self.position['size'])
+        qty = float(self.position['size'])
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         current_price = float(self.price_data['close'].iloc[-1])
         
         actual_price = await self.execute_limit_order(side, qty, current_price, is_reduce=True)
         
         if actual_price and self.current_trade_id:
-            pass
             self.logger.log_trade_close(
-            trade_id=self.current_trade_id,
-            expected_exit=current_price,
-            actual_exit=actual_price,
-            reason=reason,
-            fees_entry=self.config['maker_fee'],
-            fees_exit=self.config['maker_fee']
+                trade_id=self.current_trade_id,
+                expected_exit=current_price,
+                actual_exit=actual_price,
+                reason=reason,
+                fees_entry=self.config['maker_fee'],
+                fees_exit=self.config['maker_fee']
             )
             self.current_trade_id = None
             
@@ -560,87 +478,68 @@ class EMARSIBot:
     
     def show_status(self):
         if len(self.price_data) == 0:
-            pass
             return
         
         current_price = float(self.price_data['close'].iloc[-1])
         status_parts = [f"📊 BNB: ${current_price:.2f}", f"💰 Balance: ${self.account_balance:.0f}"]
         
         if self.position:
-            pass
             entry = float(self.position.get('avgPrice', 0))
             side = self.position.get('side', '')
             size = float(self.position.get('size', 0))
             pnl = float(self.position.get('unrealisedPnl', 0))
             status_parts.append(f"📍 {side}: {size:.2f} @ ${entry:.2f} | PnL: ${pnl:.2f}")
-            else:
+        else:
             indicators = self.calculate_indicators(self.price_data)
             if indicators:
-                pass
-                signal_status = ""
                 if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
-                    pass
                     signal_status = "🟢 BUY SIGNAL"
-                    elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
-                        pass
+                elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
                     signal_status = "🔴 SELL SIGNAL"
-                    else:
+                else:
                     signal_status = "⚪ NO SIGNAL"
-                    
+                
                 status_parts.append(f"RSI: {indicators['rsi']:.1f} | Trend: {indicators['trend']} | {signal_status}")
         
         if self.last_trade_time > 0:
-            pass
             time_since_last = datetime.now().timestamp() - self.last_trade_time
             if time_since_last < self.trade_cooldown:
-                pass
                 status_parts.append(f"⏰ Cooldown: {self.trade_cooldown - time_since_last:.0f}s")
         
-            print(" | ".join(status_parts), end='\r')
+        print(" | ".join(status_parts), end='\r')
     
-                async def run_cycle(self):
+    async def run_cycle(self):
         # Emergency stop check
         if self.logger.daily_pnl < -self.logger.max_daily_loss:
-            pass
             print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f} exceeded limit")
             if self.position:
-                pass
                 await self.close_position("emergency_stop")
-                return
-        
-        if not await self.get_market_data():
-            pass
             return
         
-                await self.check_position()
-            await self.check_pending_orders()
+        if not await self.get_market_data():
+            return
+        
+        await self.check_position()
+        await self.check_pending_orders()
         
         if self.position:
-            pass
             should_close, reason = self.should_close()
             if should_close:
-                pass
                 await self.close_position(reason)
-                elif not self.pending_order:
-                    pass
-                signal = self.generate_signal(self.price_data)
-        if signal and self.LIVE_TRADING and not self.pending_order:
-            pass
-            await self.execute_trade(signal)
+        elif not self.pending_order:
+            signal = self.generate_signal(self.price_data)
             if signal:
-                pass
                 await self.execute_trade(signal)
         
-            self.show_status()
+        self.show_status()
     
-                async def run(self):
+    async def run(self):
         if not self.connect():
-            pass
             print("❌ Failed to connect")
             return
         
-            await self.get_account_balance()
-            await self.get_instrument_info()
+        await self.get_account_balance()
+        await self.get_instrument_info()
         
         print(f"🔧 EMA + RSI Bot for {self.symbol} - ZERO SLIPPAGE VERSION")
         print(f"✅ FEATURES:")
@@ -652,38 +551,22 @@ class EMARSIBot:
         print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
         
         while True:
-            pass
             try:
                 await self.run_cycle()
                 await asyncio.sleep(1)
             except KeyboardInterrupt:
-                pass
                 print("\n🛑 Bot stopped")
                 try:
                     self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
                 except:
                     pass
                 if self.position:
-                    pass
-        # Check for position closing conditions
-        if self.position:
-            pass
-            pnl = self.position.get('unrealisedPnl', 0)
-            if pnl > 20 or pnl < -10:  # Close on profit/loss:
-                pass
-                await self.close_position("pnl_threshold")
-                elif time.time() - self.last_trade_time > 3600:  # Close after 1 hour:
-                    pass
-                await self.close_position("timeout")
-                pass
-                await self.close_position("manual_stop")
+                    await self.close_position("manual_stop")
                 break
             except Exception as e:
-                pass
                 print(f"❌ Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    pass
     bot = EMARSIBot()
     asyncio.run(bot.run())
