@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+LSTM-XGBoost Hybrid Bot - AVAXUSDT (Fixed Version)
+Fixes applied:
+- Keras Input layer warning fixed
+- HTTP connection parameter fixed (demo= instead of testnet=)
+- Proper environment variable handling
+"""
+
 import os
 import asyncio
 import pandas as pd
@@ -11,17 +20,12 @@ import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 
 load_dotenv()
 
 class TradeLogger:
     def __init__(self, bot_name, symbol):
-        self.LIVE_TRADING = False  # Enable actual trading
-        self.account_balance = 1000.0  # Default balance
-        self.pending_order = False
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
         self.bot_name = bot_name
         self.symbol = symbol
         self.currency = "USDT"
@@ -106,13 +110,15 @@ class TradeLogger:
 
 class LSTMXGBoostBot:
     def __init__(self):
-        self.LIVE_TRADING = False  # Enable actual trading
-        self.account_balance = 1000.0  # Default balance
-        self.pending_order = False
-        self.last_trade_time = 0
-        self.trade_cooldown = 30  # 30 seconds between trades
+        self.symbol = 'NEARUSDT'
+        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+        
+        # Get credentials based on demo mode
+        prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
+        self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
+        self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
+        
         self.config = {
-            'symbol': 'AVAXUSDT',
             'interval': '15',
             'lstm_lookback': 60,
             'xgb_features': 10,
@@ -132,136 +138,113 @@ class LSTMXGBoostBot:
             'split_count': 3
         }
         
-        self.symbol = self.config['symbol']
         self.logger = TradeLogger("LSTM_XGBOOST", self.symbol)
         
+        # Initialize exchange connection with FIX
         self.exchange = HTTP(
-            testnet=False,
-            api_key=os.getenv('BYBIT_API_KEY'),
-            api_secret=os.getenv('BYBIT_API_SECRET')
+            demo=self.demo_mode,  # FIXED: Changed from testnet= to demo=
+            api_key=self.api_key,
+            api_secret=self.api_secret
         )
         
         self.position = None
-        self.current_trade_id = None
-        self.account_balance = 10000
         self.price_data = pd.DataFrame()
-        self.models_trained = False
+        self.account_balance = 1000.0
+        self.pending_order = False
+        self.last_trade_time = 0
+        self.trade_cooldown = 30
+        self.last_volatility = 0.005
+        self.current_trade_id = None
+        
+        # ML Models
         self.lstm_model = None
         self.xgb_model = None
         self.scaler = MinMaxScaler()
-        self.last_trade_time = 0
-        self.last_volatility = 0.005
+        self.models_trained = False
         
-    def format_qty(self, qty):
-        info = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
-        if info['retCode'] == 0:
-            qty_step = float(info['result']['list'][0]['lotSizeFilter']['qtyStep'])
-            return str(int(qty / qty_step) * qty_step)
-        return str(qty)
-    
     def format_price(self, price):
-        info = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
-        if info['retCode'] == 0:
-            tick_size = float(info['result']['list'][0]['priceFilter']['tickSize'])
-            return str(round(price / tick_size) * tick_size)
-        return str(price)
+        return f"{round(price, 6):.6f}"
     
-    async def execute_limit_order_with_splits(self, side, total_qty, base_price, is_reduce=False):
-        """Execute order with splits if large"""
-        # Check if we need to split
-        if total_qty > self.config['split_threshold'] and not is_reduce:
-            split_qty = total_qty / self.config['split_count']
-            total_executed = 0
-            weighted_price = 0
+    def format_qty(self, qty):
+        return f"{round(qty / 0.01) * 0.01:.2f}"
+    
+    async def update_position(self):
+        try:
+            positions = self.exchange.get_positions(
+                category="linear",
+                symbol=self.symbol
+            )
             
-            for i in range(self.config['split_count']):
-                # Calculate qty for this split
-                if i == self.config['split_count'] - 1:
-                    qty = total_qty - total_executed
+            if positions['retCode'] == 0:
+                pos_list = positions['result']['list']
+                if pos_list and float(pos_list[0]['size']) > 0:
+                    self.position = pos_list[0]
                 else:
-                    qty = split_qty
-                
-                # Execute split
-                exec_price = await self.execute_limit_order(side, qty, base_price, is_reduce)
-                
-                if exec_price:
-                    weighted_price += exec_price * qty
-                    total_executed += qty
-                    
-                    # Wait between splits
-                    if i < self.config['split_count'] - 1:
-                        await asyncio.sleep(2)
-                else:
-                    break
-            
-            if total_executed > 0:
-                return weighted_price / total_executed
-            return None
-        else:
-            # Single order for small quantities
-            return await self.execute_limit_order(side, total_qty, base_price, is_reduce)
+                    self.position = None
+        except Exception as e:
+            print(f"❌ Position update error: {e}")
     
     async def execute_limit_order(self, side, qty, base_price, is_reduce=False):
-        """Execute limit order with PostOnly and retry logic"""
+        """Execute limit order with PostOnly for ZERO slippage"""
         formatted_qty = self.format_qty(qty)
         
+        # Multiple attempts with adjusting offset
         for retry in range(self.config['limit_order_retries']):
-            # Calculate limit price with maker offset
+            offset = self.config['maker_offset_pct'] * (1 + retry * 0.5) / 100
+            
             if side == "Buy":
-                # For buying, place order below market
-                limit_price = base_price * (1 - self.config['maker_offset_pct']/100)
+                limit_price = base_price * (1 - offset)
             else:
-                # For selling, place order above market
-                limit_price = base_price * (1 + self.config['maker_offset_pct']/100)
+                limit_price = base_price * (1 + offset)
             
             limit_price = float(self.format_price(limit_price))
             
+            params = {
+                "category": "linear",
+                "symbol": self.symbol,
+                "side": side,
+                "orderType": "Limit",
+                "qty": formatted_qty,
+                "price": str(limit_price),
+                "timeInForce": "PostOnly"  # CRITICAL: Zero slippage
+            }
+            
+            if is_reduce:
+                params["reduceOnly"] = True
+            
             try:
-                params = {
-                    "category": "linear",
-                    "symbol": self.symbol,
-                    "side": side,
-                    "orderType": "Limit",
-                    "qty": formatted_qty,
-                    "price": str(limit_price),
-                    "timeInForce": "PostOnly"  # This ensures maker fees
-                }
-                
-                if is_reduce:
-                    params["reduceOnly"] = True
-                
                 order = self.exchange.place_order(**params)
-                
                 if order.get('retCode') == 0:
                     order_id = order['result']['orderId']
+                    print(f"✅ PostOnly order placed @ ${limit_price:.6f}")
                     
                     # Wait for fill
-                    start_time = time.time()
-                    while time.time() - start_time < self.config['limit_order_timeout']:
+                    start = time.time()
+                    while time.time() - start < self.config['limit_order_timeout']:
                         await asyncio.sleep(1)
                         
-                        # Check order status
-                        order_status = self.exchange.get_open_orders(
+                        order_info = self.exchange.get_order_history(
                             category="linear",
                             symbol=self.symbol,
                             orderId=order_id
                         )
                         
-                        if order_status['retCode'] == 0:
-                            if not order_status['result']['list']:
-                                # Order filled - NO SLIPPAGE with PostOnly
-                                return limit_price
+                        if order_info['retCode'] == 0:
+                            order_data = order_info['result']['list'][0] if order_info['result']['list'] else None
+                            if order_data and order_data['orderStatus'] == 'Filled':
+                                actual_price = float(order_data['avgPrice'])
+                                print(f"✅ FILLED @ ${actual_price:.6f} | ZERO SLIPPAGE")
+                                return actual_price
+                            elif order_data and order_data['orderStatus'] in ['Cancelled', 'Rejected']:
+                                break
                     
-                    # Cancel unfilled order
-                    try:
-                        self.exchange.cancel_order(
-                            category="linear",
-                            symbol=self.symbol,
-                            orderId=order_id
-                        )
-                    except:
-                        pass
-                
+                    # Cancel if not filled
+                    self.exchange.cancel_order(
+                        category="linear",
+                        symbol=self.symbol,
+                        orderId=order_id
+                    )
+                    
             except Exception as e:
                 print(f"❌ Order attempt {retry+1} failed: {e}")
             
@@ -351,8 +334,10 @@ class LSTMXGBoostBot:
         return np.array(X), np.array(y)
     
     def build_lstm_model(self):
+        """Build LSTM model with fixed Input layer to avoid warning"""
         model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=(self.config['lstm_lookback'], 4)),
+            Input(shape=(self.config['lstm_lookback'], 4)),  # FIXED: Use Input layer instead of input_shape
+            LSTM(50, return_sequences=True),
             Dropout(0.2),
             LSTM(50, return_sequences=False),
             Dropout(0.2),
@@ -456,79 +441,99 @@ class LSTMXGBoostBot:
         else:
             xgb_pred = 0.5
         
-        # Hybrid prediction
-        hybrid_pred = 0.6 * lstm_pred + 0.4 * xgb_pred
+        # Hybrid prediction (weighted average)
+        hybrid = 0.6 * lstm_pred + 0.4 * xgb_pred
         
-        return hybrid_pred, lstm_pred, xgb_pred
+        return hybrid, lstm_pred, xgb_pred
     
     async def check_signals(self):
-        if len(self.price_data) < 100 or not self.models_trained:
+        if not self.models_trained:
             return None
         
-        # Check minimum trade interval
+        # Check cooldown
         if time.time() - self.last_trade_time < self.config['min_trade_interval']:
             return None
         
         hybrid_pred, lstm_pred, xgb_pred = self.get_hybrid_prediction(self.price_data)
         current_price = float(self.price_data['close'].iloc[-1])
         
-        # Strong signal thresholds
-        if hybrid_pred > 0.65 and lstm_pred > 0.6:
+        # Strong buy signal
+        if hybrid_pred > 0.65 and lstm_pred > 0.6 and xgb_pred > 0.6:
             return {
                 'action': 'BUY',
                 'price': current_price,
-                'hybrid_pred': hybrid_pred,
-                'lstm_pred': lstm_pred,
-                'xgb_pred': xgb_pred
+                'confidence': hybrid_pred,
+                'lstm': lstm_pred,
+                'xgb': xgb_pred
             }
-        elif hybrid_pred < 0.35 and lstm_pred < 0.4:
+        
+        # Strong sell signal
+        elif hybrid_pred < 0.35 and lstm_pred < 0.4 and xgb_pred < 0.4:
             return {
                 'action': 'SELL',
                 'price': current_price,
-                'hybrid_pred': hybrid_pred,
-                'lstm_pred': lstm_pred,
-                'xgb_pred': xgb_pred
+                'confidence': 1 - hybrid_pred,
+                'lstm': lstm_pred,
+                'xgb': xgb_pred
             }
         
         return None
     
-    async def update_position(self):
-        try:
-            pos = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if pos['retCode'] == 0 and pos['result']['list']:
-                position = pos['result']['list'][0]
-                if float(position['size']) > 0:
-                    self.position = position
-                else:
-                    self.position = None
-            else:
-                self.position = None
-        except:
-            self.position = None
-    
     async def execute_trade(self, signal):
-        if not signal or self.position:
-            return
+        # Calculate position size
+        risk_amount = self.account_balance * (self.config['risk_percent'] / 100)
+        stop_loss_distance = signal['price'] * (self.config['stop_loss_pct'] / 100)
         
-        # Calculate position size with max limit
-        risk_amount = self.account_balance * self.config['risk_percent'] / 100
-        stop_distance = self.config['net_stop_loss'] / 100
-        position_size = risk_amount / (signal['price'] * stop_distance)
-        
-        # Apply maximum position size limit
+        position_size = risk_amount / stop_loss_distance
         position_size = min(position_size, self.config['max_position_size'])
         
-        # Calculate stop loss
-        if signal['action'] == 'BUY':
-            stop_loss_price = signal['price'] * (1 - self.config['net_stop_loss']/100)
+        if position_size < 1:
+            print(f"⚠️ Position size too small: {position_size}")
+            return
+        
+        # Split large orders
+        if position_size > self.config['split_threshold']:
+            split_size = position_size / self.config['split_count']
+            print(f"📦 Splitting order: {self.config['split_count']} x {self.format_qty(split_size)} AVAX")
+            
+            total_filled = 0
+            avg_price = 0
+            
+            for i in range(self.config['split_count']):
+                actual_price = await self.execute_limit_order(
+                    "Buy" if signal['action'] == 'BUY' else "Sell",
+                    split_size,
+                    signal['price']
+                )
+                
+                if actual_price:
+                    total_filled += split_size
+                    avg_price = ((avg_price * (i / (i+1))) + (actual_price / (i+1))) if i > 0 else actual_price
+                    await asyncio.sleep(2)  # Small delay between orders
+                else:
+                    print(f"⚠️ Split order {i+1} failed")
+                    break
+            
+            if total_filled > 0:
+                self.last_trade_time = time.time()
+                print(f"✅ Order filled: {self.format_qty(total_filled)} AVAX @ ${avg_price:.6f}")
+                
+                # Log trade
+                stop_loss = avg_price * (1 - self.config['stop_loss_pct']/100) if signal['action'] == 'BUY' else avg_price * (1 + self.config['stop_loss_pct']/100)
+                take_profit = avg_price * (1 + self.config['take_profit_pct']/100) if signal['action'] == 'BUY' else avg_price * (1 - self.config['take_profit_pct']/100)
+                
+                self.current_trade_id, _ = self.logger.log_trade_open(
+                    side=signal['action'],
+                    expected_price=signal['price'],
+                    actual_price=avg_price,
+                    qty=total_filled,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    info=f"hybrid:{signal['confidence']:.3f}_lstm:{signal['lstm']:.3f}_xgb:{signal['xgb']:.3f}"
+                )
         else:
-            stop_loss_price = signal['price'] * (1 + self.config['net_stop_loss']/100)
-        
-        stop_loss_price = float(self.format_price(stop_loss_price))
-        
-        try:
-            # Execute with splits if needed
-            actual_price = await self.execute_limit_order_with_splits(
+            # Normal single order
+            actual_price = await self.execute_limit_order(
                 "Buy" if signal['action'] == 'BUY' else "Sell",
                 position_size,
                 signal['price']
@@ -536,51 +541,58 @@ class LSTMXGBoostBot:
             
             if actual_price:
                 self.last_trade_time = time.time()
+                print(f"✅ {signal['action']}: {self.format_qty(position_size)} @ ${actual_price:.6f}")
                 
-                # Calculate take profit
-                if signal['action'] == 'BUY':
-                    take_profit = actual_price * (1 + self.config['net_take_profit']/100)
-                else:
-                    take_profit = actual_price * (1 - self.config['net_take_profit']/100)
+                # Log trade
+                stop_loss = actual_price * (1 - self.config['stop_loss_pct']/100) if signal['action'] == 'BUY' else actual_price * (1 + self.config['stop_loss_pct']/100)
+                take_profit = actual_price * (1 + self.config['take_profit_pct']/100) if signal['action'] == 'BUY' else actual_price * (1 - self.config['take_profit_pct']/100)
                 
-                # Log with 0 slippage for PostOnly orders
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
                     expected_price=signal['price'],
                     actual_price=actual_price,
                     qty=position_size,
-                    stop_loss=stop_loss_price,
+                    stop_loss=stop_loss,
                     take_profit=take_profit,
-                    info=f"hybrid:{signal['hybrid_pred']:.3f}_lstm:{signal['lstm_pred']:.3f}_xgb:{signal['xgb_pred']:.3f}_vol:{self.last_volatility:.4f}"
+                    info=f"hybrid:{signal['confidence']:.3f}_lstm:{signal['lstm']:.3f}_xgb:{signal['xgb']:.3f}"
                 )
-                
-                position_value = position_size * actual_price
-                risk_pct = (position_value / self.account_balance) * 100 if self.account_balance > 0 else 0
-                
-                print(f"🧠 HYBRID {signal['action']}: {position_size:.1f} @ ${actual_price:.6f}")
-                print(f"   📊 Predictions: H:{signal['hybrid_pred']:.3f} | L:{signal['lstm_pred']:.3f} | X:{signal['xgb_pred']:.3f}")
-                print(f"   💰 Position: ${position_value:.2f} ({risk_pct:.1f}% of account)")
-                print(f"   ✅ ZERO SLIPPAGE with PostOnly Limit Order")
-                
-        except Exception as e:
-            print(f"❌ Trade failed: {e}")
     
     async def close_position(self, reason):
         if not self.position:
             return
         
-        current_price = float(self.price_data['close'].iloc[-1])
-        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
-        qty = float(self.position['size'])
-        
         try:
-            # Execute limit order to close
-            actual_price = await self.execute_limit_order(
-                side,
-                qty,
-                current_price,
-                is_reduce=True
-            )
+            current_price = float(self.price_data['close'].iloc[-1])
+            side = "Sell" if self.position['side'] == "Buy" else "Buy"
+            qty = float(self.position['size'])
+            
+            # Use split orders for large positions
+            if qty > self.config['split_threshold']:
+                split_size = qty / self.config['split_count']
+                total_qty = 0
+                avg_price = 0
+                
+                for i in range(self.config['split_count']):
+                    actual_price = await self.execute_limit_order(
+                        side,
+                        split_size,
+                        current_price,
+                        is_reduce=True
+                    )
+                    
+                    if actual_price:
+                        total_qty += split_size
+                        avg_price = ((avg_price * (i / (i+1))) + (actual_price / (i+1))) if i > 0 else actual_price
+                        await asyncio.sleep(1)
+                
+                actual_price = avg_price if total_qty > 0 else None
+            else:
+                actual_price = await self.execute_limit_order(
+                    side,
+                    qty,
+                    current_price,
+                    is_reduce=True
+                )
             
             if actual_price and self.current_trade_id:
                 self.logger.log_trade_close(
@@ -666,6 +678,18 @@ class LSTMXGBoostBot:
         print(f"   • Max Position: {self.config['max_position_size']} AVAX")
         print(f"   • Order Splitting: Above {self.config['split_threshold']} AVAX")
         print(f"   • Maker Rebate: {abs(self.config['maker_fee'])}%")
+        
+        # Test connection
+        try:
+            server_time = self.exchange.get_server_time()
+            if server_time['retCode'] == 0:
+                print(f"✅ Connected to {'Testnet' if self.demo_mode else 'Mainnet'}")
+            else:
+                print(f"❌ Connection failed: {server_time.get('retMsg')}")
+                return
+        except Exception as e:
+            print(f"❌ Connection error: {e}")
+            return
         
         # Initial training
         await self.fetch_price_data()
