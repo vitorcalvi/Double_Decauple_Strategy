@@ -54,6 +54,7 @@ class UnifiedLogger:
         return trade_id, log_entry
 
 class EmaRsiTrader:
+# Fixed constructor credential loading
     def __init__(self):
         self.demo_mode = True  # Set to False for live trading
         self.symbol = "XRPUSDT"
@@ -63,10 +64,17 @@ class EmaRsiTrader:
         self.position_data = {}
         self.price_data = pd.DataFrame()
         
-        prefix = "DEMO_" if self.demo_mode else "LIVE_"
+        # Fixed credential loading - matches your .env file
+        prefix = "TESTNET_" if self.demo_mode else "LIVE_"
         self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
         
+        # Debug credential loading
+        print(f"📌 Looking for: {prefix}BYBIT_API_KEY")
+        print(f"📌 API Key loaded: {self.api_key[:8]+'...' if self.api_key else '❌ MISSING'}")
+        print(f"📌 API Secret loaded: {'✅ FOUND' if self.api_secret else '❌ MISSING'}")
+        
+        # Your existing config...
         self.config = {
             'ema_fast': 10,
             'ema_slow': 21,
@@ -94,13 +102,53 @@ class EmaRsiTrader:
         self.entry_price = None
         self.trailing_stop = None
         self.last_ema_state = None
-    
+
     def connect(self):
+        """Fixed authentication function based on working reference"""
         try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            return self.exchange.get_server_time().get('retCode') == 0
-        except:
+            # Check if credentials exist
+            if not self.api_key or not self.api_secret:
+                print(f"❌ API credentials missing")
+                print(f"   Required: {'TESTNET_' if self.demo_mode else 'LIVE_'}BYBIT_API_KEY")
+                print(f"   Required: {'TESTNET_' if self.demo_mode else 'LIVE_'}BYBIT_API_SECRET")
+                return False
+            
+            # Create exchange connection
+            self.exchange = HTTP(
+                demo=self.demo_mode, 
+                api_key=self.api_key, 
+                api_secret=self.api_secret
+            )
+            
+            # Test basic connectivity
+            server_time = self.exchange.get_server_time()
+            if server_time.get('retCode') != 0:
+                print(f"❌ Failed to connect to exchange: {server_time.get('retMsg')}")
+                return False
+            
+            print(f"✅ Connected to {'Demo' if self.demo_mode else 'Live'} Bybit")
+            
+            # Test authentication with wallet balance call
+            try:
+                wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
+                if wallet.get('retCode') == 401:
+                    print("❌ API Authentication failed!")
+                    print("   Check your API key and secret")
+                    return False
+                elif wallet.get('retCode') != 0:
+                    print(f"⚠️ Auth warning: {wallet.get('retMsg')}")
+                    
+                print("✅ API authentication successful")
+                return True
+                
+            except Exception as auth_e:
+                print(f"❌ Authentication test failed: {auth_e}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Connection error: {e}")
             return False
+
     
     async def get_account_balance(self):
         try:
