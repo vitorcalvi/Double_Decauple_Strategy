@@ -66,9 +66,11 @@ class EmaRsiTrader:
         self.price_data = pd.DataFrame()
         
         # Fixed credential loading - matches your .env file
-        prefix = "TESTNET_" if self.demo_mode else "LIVE_"
-        self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
+        prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
+        self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')      # Gets TESTNET_BYBIT_API_KEY
         self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
+        self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
+
         
         # Debug credential loading
         print(f"📌 Looking for: {prefix}BYBIT_API_KEY")
