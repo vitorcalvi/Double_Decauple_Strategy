@@ -136,7 +136,7 @@ class RMISupertrendBot:
             'supertrend_period': 10,
             'supertrend_multiplier': 3.0,
             'rmi_oversold': 30,
-            'rmi_overbought': 70,
+            'rmi_overbought': 60,
             'risk_per_trade_pct': 2.0,
             'stop_loss_pct': 0.45,
             'take_profit_pct': 2.0,

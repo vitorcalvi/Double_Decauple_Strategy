@@ -359,7 +359,7 @@ class MLGridBot:
         # Find nearest grid level
         for level in self.grid_levels:
             distance_pct = abs(current_price - level['price']) / level['price'] * 100
-            if distance_pct < 0.1 and level != self.last_grid_level:
+            if distance_pct < 0.25 and level != self.last_grid_level:
                 self.last_grid_level = level
                 return {
                     'action': level['side'],

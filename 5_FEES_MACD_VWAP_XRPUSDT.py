@@ -82,8 +82,8 @@ class EmaRsiTrader:
             'ema_fast': 10,
             'ema_slow': 21,
             'rsi_period': 14,
-            'rsi_long_threshold': 40,   # matches logic below
-            'rsi_short_threshold': 60,  # matches logic below
+            'rsi_long_threshold': 45,   # matches logic below
+            'rsi_short_threshold': 55,  # matches logic below
             'stop_loss_pct': 0.5,
             'take_profit_pct': 1.5,
             'trailing_stop_pct': 0.7,
