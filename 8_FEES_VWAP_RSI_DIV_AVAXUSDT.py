@@ -334,14 +334,33 @@ class VWAPRSIDivergenceBot:
             return False
     
     async def check_position(self):
+        """Enhanced position check with state cleanup"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and float(pos_list[0]['size']) > 0 else None
+            if positions.get('retCode') != 0:
+                self.position = None
+                return False
+                
+            pos_list = positions['result']['list']
+            
+            # Clear position if empty
+            if not pos_list or float(pos_list[0].get('size', 0)) == 0:
+                if self.position:  # Was set but now closed
+                    print("✅ Position closed - clearing state")
+                    self.position = None
+                    self.pending_order = None  # Also clear pending
+                return False
+                
+            # Valid position exists
+            self.position = pos_list[0]
+            return True
+            
         except Exception as e:
             print(f"❌ Position check error: {e}")
-    
+            self.position = None
+            self.pending_order = None
+            return False
+
     def should_close(self):
         if not self.position:
             return False, ""

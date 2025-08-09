@@ -323,21 +323,34 @@ class EmaRsiTrader:
         except:
             return False
     
+
     async def check_position(self):
+        """Enhanced position check with state cleanup"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                if pos_list and float(pos_list[0]['size']) > 0:
-                    self.position = pos_list[0]
-                    if not self.entry_price:
-                        self.entry_price = float(self.position.get('avgPrice', 0))
-                else:
+            if positions.get('retCode') != 0:
+                self.position = None
+                return False
+                
+            pos_list = positions['result']['list']
+            
+            # Clear position if empty
+            if not pos_list or float(pos_list[0].get('size', 0)) == 0:
+                if self.position:  # Was set but now closed
+                    print("✅ Position closed - clearing state")
                     self.position = None
-                    self.entry_price = None
-                    self.trailing_stop = None
-        except:
-            pass
+                    self.pending_order = None  # Also clear pending
+                return False
+                
+            # Valid position exists
+            self.position = pos_list[0]
+            return True
+            
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
+            self.position = None
+            self.pending_order = None
+            return False
     
     def should_close(self):
         if not self.position or not self.entry_price:

@@ -425,31 +425,34 @@ class DynamicGridBot:
             print(f"❌ Market data error: {e}")
             return False
 
-    async def check_position(self) -> None:
-        if not self.private_ok:
-            self.position = None
-            return
+    async def check_position(self):
+        """Enhanced position check with state cleanup"""
         try:
-            res = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if res.get("retCode") == 0:
-                pos_list = res["result"].get("list", [])
-                self.position = pos_list[0] if pos_list and float(pos_list[0].get("size", 0)) > 0 else None
-            else:
-                print(
-                    f"❌ Position check failed (retCode={res.get('retCode')}): {res.get('retMsg')}"
-                )
-                # If unauthorized, disable private calls to avoid spam
-                if str(res.get("retCode")) in {"10005", "10006"}:
-                    self.private_ok = False
+            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
+            if positions.get('retCode') != 0:
+                self.position = None
+                return False
+                
+            pos_list = positions['result']['list']
+            
+            # Clear position if empty
+            if not pos_list or float(pos_list[0].get('size', 0)) == 0:
+                if self.position:  # Was set but now closed
+                    print("✅ Position closed - clearing state")
+                    self.position = None
+                    self.pending_order = None  # Also clear pending
+                return False
+                
+            # Valid position exists
+            self.position = pos_list[0]
+            return True
+            
         except Exception as e:
-            msg = str(e)
-            print(f"❌ Position check error: {msg}")
-            if "ErrCode: 401" in msg or "Unauthorized" in msg:
-                self.private_ok = False
-                print(
-                    "🔕 Disabling private endpoints after auth error. Running market‑data only.\n"
-                    "   Fix keys/permissions and restart to re‑enable trading."
-                )
+            print(f"❌ Position check error: {e}")
+            self.position = None
+            self.pending_order = None
+            return False
+
 
     def should_close(self) -> tuple[bool, str]:
         if not self.position or len(self.price_data) == 0:
