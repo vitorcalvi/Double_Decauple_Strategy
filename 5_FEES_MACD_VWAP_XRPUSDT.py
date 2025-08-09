@@ -20,7 +20,8 @@ class UnifiedLogger:
         self.trade_id = 1000
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/5_FEES_MACD_VWAP_XRPUSDT.log"
+        # FIX: log file follows the actual symbol (was hard-coded to XRPUSDT)
+        self.log_file = f"logs/5_FEES_MACD_VWAP_{self.symbol}.log"
         
     def generate_trade_id(self):
         self.trade_id += 1
@@ -37,12 +38,12 @@ class UnifiedLogger:
             "side": "LONG" if side == "BUY" else "SHORT",
             "action": "OPEN",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "expected_price": round(expected_price, 6),
-            "actual_price": round(actual_price, 6),
-            "slippage": round(slippage, 6),
-            "qty": round(qty, 6),
-            "stop_loss": round(stop_loss, 6),
-            "take_profit": round(take_profit, 6),
+            "expected_price": round(float(expected_price), 6),
+            "actual_price": round(float(actual_price), 6),
+            "slippage": round(float(slippage), 6),
+            "qty": round(float(qty), 6),
+            "stop_loss": round(float(stop_loss), 6),
+            "take_profit": round(float(take_profit), 6),
             "currency": self.currency,
             "info": info
         }
@@ -54,7 +55,7 @@ class UnifiedLogger:
         return trade_id, log_entry
 
 class EmaRsiTrader:
-# Fixed constructor credential loading
+    # Fixed constructor credential loading
     def __init__(self):
         self.demo_mode = True  # Set to False for live trading
         self.symbol = "XRPUSDT"
@@ -79,8 +80,8 @@ class EmaRsiTrader:
             'ema_fast': 10,
             'ema_slow': 21,
             'rsi_period': 14,
-            'rsi_long_threshold': 40,
-            'rsi_short_threshold': 60,
+            'rsi_long_threshold': 40,   # matches logic below
+            'rsi_short_threshold': 60,  # matches logic below
             'stop_loss_pct': 0.5,
             'take_profit_pct': 1.5,
             'trailing_stop_pct': 0.7,
@@ -96,7 +97,7 @@ class EmaRsiTrader:
         self.trade_cooldown = 30
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/5_FEES_MACD_VWAP_XRPUSDT.log"
+        self.log_file = f"logs/5_FEES_MACD_VWAP_{self.symbol}.log"
         self.unified_logger = UnifiedLogger("STRATEGY5_EMA_RSI_FIXED", self.symbol)
         self.current_trade_id = None
         self.entry_price = None
@@ -131,7 +132,7 @@ class EmaRsiTrader:
             # Test authentication with wallet balance call
             try:
                 wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
-                if wallet.get('retCode') == 401:
+                if wallet.get('retCode') == 401 or wallet.get('retCode') == 10003:
                     print("❌ API Authentication failed!")
                     print("   Check your API key and secret")
                     return False
@@ -158,12 +159,12 @@ class EmaRsiTrader:
                 if balance_list:
                     for coin in balance_list[0]['coin']:
                         if coin['coin'] == 'USDT':
-                            balance_str = coin['availableToWithdraw']
-                            if balance_str and balance_str.strip():
+                            balance_str = coin.get('availableToWithdraw') or coin.get('walletBalance')
+                            if balance_str and str(balance_str).strip():
                                 self.account_balance = float(balance_str)
                                 return True
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ balance fallback: {e}")
         
         self.account_balance = 1000.0
         return True
@@ -173,9 +174,9 @@ class EmaRsiTrader:
             return 0
         
         risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
-        price_diff = abs(price - stop_loss_price)
+        price_diff = abs(float(price) - float(stop_loss_price))
         
-        if price_diff == 0:
+        if price_diff <= 0:
             return 0
         
         slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
@@ -183,25 +184,25 @@ class EmaRsiTrader:
         
         raw_qty = adjusted_risk / price_diff
         max_position_value = self.account_balance * 0.1
-        max_qty = max_position_value / price
+        max_qty = max_position_value / float(price)
         
         final_qty = min(raw_qty, max_qty)
         return max(final_qty, 0.1)
     
     def format_qty(self, qty):
         """FIXED: Return a properly formatted quantity rounded up to meet exchange minimums."""
-        min_qty = 0.1  # XRP minimum
+        min_qty = 0.1  # XRP minimum (adjust if exchange rejects)
         qty_step = 0.1
         min_notional = 5.0
         
         # Get current price
         try:
             current_price = float(self.price_data['close'].iloc[-1]) if len(self.price_data) > 0 else 1.0
-        except:
+        except Exception:
             current_price = 1.0
         
-        # Round to step
-        qty = math.floor(qty / qty_step) * qty_step
+        # Round down to step
+        qty = math.floor(float(qty) / qty_step) * qty_step
         
         # Ensure minimum
         if qty < min_qty:
@@ -211,7 +212,9 @@ class EmaRsiTrader:
         if qty * current_price < min_notional:
             qty = math.ceil(min_notional / current_price / qty_step) * qty_step
             
-        return str(qty)
+        # Return clean string (exchange accepts string)
+        s = f"{qty:.1f}"
+        return s.rstrip("0").rstrip(".") if "." in s else s
     
     def apply_slippage(self, price, side, order_type="market"):
         if order_type == "limit":
@@ -225,14 +228,15 @@ class EmaRsiTrader:
             return None
         
         # Calculate EMAs
+        df = df.copy()
         df['ema_fast'] = df['close'].ewm(span=self.config['ema_fast'], adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=self.config['ema_slow'], adjust=False).mean()
         
-        # Calculate RSI
+        # Calculate RSI (simple SMA-based per original codebase)
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=self.config['rsi_period']).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['rsi_period']).mean()
-        rs = gain / loss
+        rs = gain / loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
         
         current_ema_fast = df['ema_fast'].iloc[-1]
@@ -244,11 +248,11 @@ class EmaRsiTrader:
         crossover_down = prev_ema_fast >= prev_ema_slow and current_ema_fast < current_ema_slow
         
         return {
-            'ema_fast': current_ema_fast,
-            'ema_slow': current_ema_slow,
-            'crossover_up': crossover_up,
-            'crossover_down': crossover_down,
-            'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
+            'ema_fast': float(current_ema_fast),
+            'ema_slow': float(current_ema_slow),
+            'crossover_up': bool(crossover_up),
+            'crossover_down': bool(crossover_down),
+            'rsi': float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
         }
     
     def generate_signal(self, df):
@@ -261,12 +265,12 @@ class EmaRsiTrader:
         
         price = float(df['close'].iloc[-1])
         
-        # Strong signal requirements
-        # BUY: EMA crossover up + RSI < 30 (oversold)
+        # Signal rules matching config thresholds (40/60 here)
+        # BUY: EMA crossover up + RSI < rsi_long_threshold
         if indicators['crossover_up'] and indicators['rsi'] < self.config['rsi_long_threshold']:
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
         
-        # SELL: EMA crossover down + RSI > 70 (overbought)
+        # SELL: EMA crossover down + RSI > rsi_short_threshold
         elif indicators['crossover_down'] and indicators['rsi'] > self.config['rsi_short_threshold']:
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
@@ -276,20 +280,20 @@ class EmaRsiTrader:
         """Execute limit order with PostOnly ladder strategy for zero slippage"""
         formatted_qty = self.format_qty(qty)
         
-        if formatted_qty == "0":
+        if formatted_qty in ("0", "", "0.0"):
             print(f"❌ Quantity too small: {qty}")
             return None
         
-        offsets = [0.01, 0.02, 0.05, 0.10]  # Progressive offsets
+        offsets = [0.01, 0.02, 0.05, 0.10]  # Progressive offsets (in %)
         
-        for retry, offset_pct in enumerate(offsets[:self.config['limit_order_retries']]):
+        for retry, offset_pct in enumerate(offsets[:self.config['limit_order_retries']], start=1):
             # Calculate limit price with offset
             if side == "Buy":
                 limit_price = base_price * (1 - offset_pct / 100)
             else:
                 limit_price = base_price * (1 + offset_pct / 100)
             
-            limit_price = round(limit_price, 4)
+            limit_price = round(float(limit_price), 4)
             
             try:
                 # Place PostOnly order
@@ -305,6 +309,8 @@ class EmaRsiTrader:
                 )
                 
                 if order.get('retCode') != 0:
+                    # e.g., immediate execution not allowed in PostOnly, etc.
+                    # print(f"⚠️ PostOnly attempt {retry} rejected: {order.get('retMsg')}")
                     continue
                 
                 order_id = order['result']['orderId']
@@ -319,21 +325,24 @@ class EmaRsiTrader:
                     )
                     
                     if check.get('retCode') == 0:
+                        # If order disappears from open list, treat as filled
                         if not check['result']['list']:
-                            # Order filled
                             return limit_price
                     
                     await asyncio.sleep(1)
                 
                 # Cancel unfilled order
-                self.exchange.cancel_order(
-                    category="linear",
-                    symbol=self.symbol,
-                    orderId=order_id
-                )
+                try:
+                    self.exchange.cancel_order(
+                        category="linear",
+                        symbol=self.symbol,
+                        orderId=order_id
+                    )
+                except Exception:
+                    pass
                 
             except Exception as e:
-                print(f"❌ Order attempt {retry+1} failed: {e}")
+                print(f"❌ Order attempt {retry} failed: {e}")
         
         # Fallback to IOC if all PostOnly attempts fail
         try:
@@ -343,15 +352,15 @@ class EmaRsiTrader:
                 side=side,
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(base_price),
+                price=str(round(float(base_price), 4)),
                 timeInForce="IOC",
                 reduceOnly=is_reduce
             )
             
             if order.get('retCode') == 0:
-                return base_price
-        except:
-            pass
+                return round(float(base_price), 4)
+        except Exception as e:
+            print(f"❌ IOC fallback failed: {e}")
         
         return None
     
@@ -362,13 +371,14 @@ class EmaRsiTrader:
                 return False
             
             df = pd.DataFrame(klines['result']['list'], 
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+                              columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
-        except:
+        except Exception as e:
+            print(f"❌ get_market_data error: {e}")
             return False
     
 
@@ -383,11 +393,15 @@ class EmaRsiTrader:
             pos_list = positions['result']['list']
             
             # Clear position if empty
-            if not pos_list or float(pos_list[0].get('size', 0)) == 0:
+            if not pos_list or float(pos_list[0].get('size', 0) or 0) == 0:
                 if self.position:  # Was set but now closed
                     print("✅ Position closed - clearing state")
                     self.position = None
-                    self.pending_order = None  # Also clear pending
+                    # FIX: reset pending flag properly
+                    self.pending_order = False
+                    # also clear local entry/trailing to avoid stale state
+                    self.entry_price = None
+                    self.trailing_stop = None
                 return False
                 
             # Valid position exists
@@ -397,11 +411,11 @@ class EmaRsiTrader:
         except Exception as e:
             print(f"❌ Position check error: {e}")
             self.position = None
-            self.pending_order = None
+            self.pending_order = False
             return False
     
     def should_close(self):
-        if not self.position or not self.entry_price:
+        if not self.position or not self.entry_price or len(self.price_data) == 0:
             return False, ""
         
         current_price = float(self.price_data['close'].iloc[-1])
@@ -452,10 +466,10 @@ class EmaRsiTrader:
         self.pending_order = True
         
         try:
-            price = signal['price']
+            price = float(signal['price'])
             side = "Buy" if signal['action'] == 'BUY' else "Sell"
             
-            # Calculate stop loss
+            # Calculate stop loss / take profit (percent-based per original)
             if side == "Buy":
                 stop_loss_price = price * (1 - self.config['stop_loss_pct']/100)
                 take_profit = price * (1 + self.config['take_profit_pct']/100)
@@ -472,9 +486,22 @@ class EmaRsiTrader:
             # Execute with PostOnly ladder
             actual_price = await self.execute_limit_order(side, qty, price)
             
-            if actual_price:
+            if actual_price is not None:
                 self.entry_price = actual_price
                 self.last_trade_time = time.time()
+                
+                # Attach protective TP/SL on exchange (reduce-only) — minimal add, preserves flow
+                try:
+                    self.exchange.set_trading_stop(
+                        category="linear",
+                        symbol=self.symbol,
+                        stopLoss=str(round(stop_loss_price, 4)),
+                        takeProfit=str(round(take_profit, 4)),
+                        tpslMode="Full",
+                        positionIdx=0  # one-way
+                    )
+                except Exception as e:
+                    print(f"⚠️ set_trading_stop failed (will rely on local exits too): {e}")
                 
                 self.current_trade_id, _ = self.unified_logger.log_trade_open(
                     side=signal['action'],
@@ -486,7 +513,7 @@ class EmaRsiTrader:
                     info=f"rsi:{signal['rsi']:.1f}"
                 )
                 
-                print(f"✅ {signal['action']} {qty:.1f} @ ${actual_price:.4f} | ZERO SLIPPAGE")
+                print(f"✅ {signal['action']} {float(qty):.1f} @ ${actual_price:.4f} | ZERO SLIPPAGE")
                 print(f"   RSI: {signal['rsi']:.1f}")
         
         except Exception as e:
@@ -503,11 +530,17 @@ class EmaRsiTrader:
             current_price = float(self.price_data['close'].iloc[-1])
             side = "Sell" if self.position.get('side') == "Buy" else "Buy"
             qty = float(self.position['size'])
+            if qty <= 0:
+                return
             
             actual_price = await self.execute_limit_order(side, qty, current_price, is_reduce=True)
             
-            if actual_price:
+            if actual_price is not None:
                 print(f"✅ Closed: {reason} @ ${actual_price:.4f} | ZERO SLIPPAGE")
+                # if it was a SL-driven close, cool-down same side (optional, minimal)
+                if reason == "stop_loss":
+                    # could track timestamps if desired without changing interface
+                    pass
                 self.position = None
                 self.entry_price = None
                 self.trailing_stop = None
@@ -527,14 +560,14 @@ class EmaRsiTrader:
             print(f"📈 EMA: {indicators['ema_fast']:.4f}/{indicators['ema_slow']:.4f} | RSI: {indicators['rsi']:.1f}")
         
         if self.position:
-            entry = self.entry_price or 0
+            entry = self.entry_price or 0.0
             is_long = self.position.get('side') == "Buy"
-            size = float(self.position.get('size', 0))
+            size = float(self.position.get('size', 0) or 0)
             
-            if is_long:
-                pnl_pct = ((current_price - entry) / entry * 100) if entry else 0
+            if entry:
+                pnl_pct = ((current_price - entry) / entry * 100) if is_long else ((entry - current_price) / entry * 100)
             else:
-                pnl_pct = ((entry - current_price) / entry * 100) if entry else 0
+                pnl_pct = 0.0
             
             print(f"📈 Position: {'LONG' if is_long else 'SHORT'} {size:.1f} @ ${entry:.4f}")
             print(f"   P&L: {pnl_pct:+.2f}%")
