@@ -1,3 +1,5 @@
+#2_FEES_EMA_RSI_BNBUSDT.py
+
 import os
 import asyncio
 import pandas as pd
@@ -323,7 +325,7 @@ class EMARSIBot:
             'ema_fast': ema_fast,
             'ema_slow': ema_slow
         }
-    
+
     def generate_signal(self, df):
         if self.position:
             return None
@@ -339,10 +341,16 @@ class EMARSIBot:
         
         price = float(df['close'].iloc[-1])
         
-        # Strong signal requirements
-        if indicators['trend'] == 'UP' and indicators['rsi'] < self.config['rsi_oversold']:
+        # SIMPLIFIED: Use RSI extremes as primary signal
+        if indicators['rsi'] < 30:  # Strong oversold
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
-        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > self.config['rsi_overbought']:
+        elif indicators['rsi'] > 70:  # Strong overbought
+            return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
+        
+        # SECONDARY: Use trend confirmation with relaxed RSI
+        if indicators['trend'] == 'UP' and indicators['rsi'] < 45:
+            return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi']}
+        elif indicators['trend'] == 'DOWN' and indicators['rsi'] > 55:
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi']}
         
         return None

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Bybit Web Dashboard - With actual fee tracking from executed orders
+Bybit Plotly Dashboard - With actual fee tracking from executed orders
 """
 
 import os
 import time
 import threading
 from datetime import datetime
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import dash
+from dash import dcc, html, Input, Output, callback, dash_table
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
 load_dotenv(override=True)
-
-app = Flask(__name__)
-CORS(app)
 
 class BybitDataProvider:
     def __init__(self, demo_mode=True):
@@ -40,53 +40,43 @@ class BybitDataProvider:
     def get_position_fees(self, symbol, size, avg_price):
         """Get actual fees paid for current position from recent executed orders"""
         try:
-            # Get filled orders for this symbol
             orders = self.exchange.get_order_history(
                 category="linear",
                 symbol=symbol,
                 orderStatus="Filled",
-                limit=200  # Increased to catch more orders
+                limit=200
             )
             
             if orders.get("retCode") != 0:
-                # Fallback to estimate
-                maker_fee_rate = 0.0002  # 0.02% limit order
+                maker_fee_rate = 0.0002
                 return size * avg_price * maker_fee_rate
             
-            # Calculate total fees from recent orders that match position size
             total_fees = 0
             total_qty = 0
-            
-            # Get orders sorted by time (most recent first)
             order_list = orders.get("result", {}).get("list", [])
             
             for order in order_list:
                 order_qty = self.safe_float(order.get("cumExecQty"))
                 order_fee = self.safe_float(order.get("cumExecFee"))
                 
-                # Add fees from orders until we match position size
                 if total_qty < size:
-                    # Check if this order contributes to current position
                     qty_to_count = min(order_qty, size - total_qty)
                     fee_proportion = qty_to_count / order_qty if order_qty > 0 else 0
-                    
                     total_fees += abs(order_fee * fee_proportion)
                     total_qty += qty_to_count
                     
                     if total_qty >= size:
                         break
             
-            # If we couldn't find enough orders, estimate remaining fees
             if total_qty < size:
                 remaining_qty = size - total_qty
-                maker_fee_rate = 0.0002  # 0.02% for limit orders
+                maker_fee_rate = 0.0002
                 total_fees += remaining_qty * avg_price * maker_fee_rate
             
             return total_fees
             
         except Exception as e:
             print(f"Error getting fees for {symbol}: {e}")
-            # Fallback: estimate based on limit order fee
             maker_fee_rate = 0.0002
             return size * avg_price * maker_fee_rate
     
@@ -95,20 +85,14 @@ class BybitDataProvider:
         if size <= 0:
             return entry_price
         
-        # Use actual fees paid + estimated exit fee
         entry_fee_paid = fees
-        # Estimate exit fee at limit order rate (0.02%)
         exit_fee_estimate = size * entry_price * 0.0002
         total_fees = entry_fee_paid + exit_fee_estimate
-        
-        # Calculate fee impact per unit
         fee_per_unit = total_fees / size
         
         if side == "Buy":
-            # For long: need price to go up to cover fees
             return entry_price + fee_per_unit
         else:
-            # For short: need price to go down to cover fees  
             return entry_price - fee_per_unit
     
     def fetch_data(self):
@@ -126,25 +110,15 @@ class BybitDataProvider:
                             side = p.get("side", "")
                             avg_price = self.safe_float(p.get("avgPrice"))
                             mark_price = self.safe_float(p.get("markPrice"))
-                            
-                            # Use unrealisedPnl from API if available
                             unrealized_pnl = self.safe_float(p.get("unrealisedPnl"))
                             
-                            # If not available, calculate it
                             if unrealized_pnl == 0:
                                 is_buy = side == "Buy"
                                 unrealized_pnl = (mark_price - avg_price) * size if is_buy else (avg_price - mark_price) * size
                             
-                            # Get actual fees for this position
                             fees = self.get_position_fees(symbol, size, avg_price)
-                            
-                            # Calculate break-even
                             breakeven = self.calculate_breakeven(avg_price, size, fees, side)
-                            
-                            # Net PnL after estimated fees
                             net_pnl = unrealized_pnl - fees
-                            
-                            # PnL percentage
                             position_value = avg_price * size
                             pnl_pct = (unrealized_pnl / position_value) * 100 if position_value > 0 else 0
                             
@@ -197,11 +171,7 @@ class BybitDataProvider:
     def close_position(self, symbol):
         """Close a specific position"""
         try:
-            # Get current position
-            pos_resp = self.exchange.get_positions(
-                category="linear",
-                symbol=symbol
-            )
+            pos_resp = self.exchange.get_positions(category="linear", symbol=symbol)
             
             if pos_resp.get("retCode") != 0:
                 return {"success": False, "message": "Failed to get position"}
@@ -214,7 +184,6 @@ class BybitDataProvider:
             side = "Sell" if position.get("side") == "Buy" else "Buy"
             qty = position.get("size")
             
-            # Place market order to close
             order_resp = self.exchange.place_order(
                 category="linear",
                 symbol=symbol,
@@ -232,7 +201,7 @@ class BybitDataProvider:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
-# Initialize and start background updates
+# Initialize provider
 provider = BybitDataProvider(demo_mode=True)
 
 def update_loop():
@@ -242,190 +211,192 @@ def update_loop():
 
 threading.Thread(target=update_loop, daemon=True).start()
 
-@app.route('/')
-def index():
-    return '''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bybit Dashboard</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: #0a0e27; color: #fff; padding: 20px; }
-        .container { max-width: 1600px; margin: 0 auto; }
-        .header { background: linear-gradient(135deg, #667eea, #764ba2); padding: 20px; border-radius: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
-        .mode { background: rgba(255,255,255,0.2); padding: 5px 15px; border-radius: 20px; font-weight: bold; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
-        .card { background: #1a1f3a; padding: 20px; border-radius: 10px; border: 1px solid #2a3050; }
-        .label { color: #8892b0; font-size: 12px; text-transform: uppercase; margin-bottom: 5px; }
-        .value { font-size: 24px; font-weight: bold; }
-        .positive { color: #00d4aa; }
-        .negative { color: #f6465d; }
-        table { width: 100%; background: #1a1f3a; border-radius: 10px; overflow: hidden; border: 1px solid #2a3050; border-collapse: collapse; }
-        th { background: #0f1529; padding: 12px; text-align: left; color: #8892b0; font-size: 11px; text-transform: uppercase; white-space: nowrap; }
-        td { padding: 12px; border-top: 1px solid #2a3050; font-size: 14px; }
-        tr:hover { background: rgba(102, 126, 234, 0.1); }
-        .buy { color: #00d4aa; font-weight: bold; }
-        .sell { color: #f6465d; font-weight: bold; }
-        .update { text-align: center; color: #8892b0; margin-top: 20px; font-size: 12px; }
-        .total { background: #0f1529; font-weight: bold; }
-        .btn-close { 
-            background: #f6465d; 
-            color: white; 
-            border: none; 
-            padding: 6px 12px; 
-            border-radius: 5px; 
-            cursor: pointer; 
-            font-size: 12px;
-            font-weight: bold;
-            transition: all 0.2s;
-        }
-        .btn-close:hover { background: #d73547; transform: scale(1.05); }
-        .btn-close:disabled { background: #666; cursor: not-allowed; opacity: 0.5; }
-        .fees { color: #ffa500; }
-        .breakeven { color: #9b59b6; }
-        .note { background: #1f2547; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 12px; color: #8892b0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>📈 Bybit Position Dashboard</h1>
-            <div class="mode" id="mode">TESTNET</div>
-        </div>
-        <div class="note">ℹ️ Fees shown are actual fees paid for current positions (limit orders: 0.02%, market orders: 0.055%)</div>
-        <div class="stats" id="stats"></div>
-        <table>
-            <thead>
-                <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Size</th>
-                    <th>Entry</th>
-                    <th>Mark</th>
-                    <th>Unrealized PnL</th>
-                    <th>Fees Paid</th>
-                    <th>Net PnL</th>
-                    <th>PnL %</th>
-                    <th>Break-even</th>
-                    <th>Value</th>
-                    <th>Liq Price</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody id="positions"></tbody>
-        </table>
-        <div class="update" id="update">Loading...</div>
-    </div>
-    <script>
-        const fmt = (n, d=2) => n?.toFixed(d) || '0.00';
-        const cls = (v) => v >= 0 ? 'positive' : 'negative';
-        
-        async function closePosition(symbol) {
-            if (!confirm(`Close position for ${symbol}?`)) return;
-            
-            const btn = document.getElementById(`btn-${symbol}`);
-            btn.disabled = true;
-            btn.textContent = 'Closing...';
-            
-            try {
-                const response = await fetch('/api/close', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({symbol})
-                });
-                const result = await response.json();
-                
-                if (result.success) {
-                    alert(result.message);
-                } else {
-                    alert(`Error: ${result.message}`);
-                    btn.disabled = false;
-                    btn.textContent = 'Close';
-                }
-            } catch (e) {
-                alert('Failed to close position');
-                btn.disabled = false;
-                btn.textContent = 'Close';
-            }
-        }
-        
-        async function update() {
-            try {
-                const data = await (await fetch('/api/data')).json();
-                
-                document.getElementById('mode').textContent = data.demo_mode ? 'TESTNET' : 'LIVE';
-                
-                const totalFees = data.positions.reduce((sum, p) => sum + p.fees, 0);
-                
-                document.getElementById('stats').innerHTML = `
-                    <div class="card"><div class="label">Equity</div><div class="value">${fmt(data.account.equity)}</div></div>
-                    <div class="card"><div class="label">Available</div><div class="value">${fmt(data.account.available)}</div></div>
-                    <div class="card"><div class="label">Unrealized PnL</div><div class="value ${cls(data.account.unrealized_pnl)}">${fmt(data.account.unrealized_pnl)}</div></div>
-                    <div class="card"><div class="label">Total Fees Paid</div><div class="value fees">${fmt(totalFees)}</div></div>
-                    <div class="card"><div class="label">Positions</div><div class="value">${data.position_count}</div></div>
-                `;
-                
-                const tbody = document.getElementById('positions');
-                if (data.positions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center">No open positions</td></tr>';
-                } else {
-                    tbody.innerHTML = data.positions.map(p => `
-                        <tr>
-                            <td><b>${p.symbol}</b></td>
-                            <td class="${p.side.toLowerCase()}">${p.side}</td>
-                            <td>${fmt(p.size, 4)}</td>
-                            <td>$${fmt(p.avg_price, 4)}</td>
-                            <td>$${fmt(p.mark_price, 4)}</td>
-                            <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(p.pnl)}</td>
-                            <td class="fees">$${fmt(p.fees)}</td>
-                            <td class="${cls(p.net_pnl)}">${p.net_pnl >= 0 ? '+' : ''}$${fmt(p.net_pnl)}</td>
-                            <td class="${cls(p.pnl_pct)}">${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%</td>
-                            <td class="breakeven">$${fmt(p.breakeven, 4)}</td>
-                            <td>$${fmt(p.value)}</td>
-                            <td>${p.liq_price > 0 ? '$' + fmt(p.liq_price, 4) : '—'}</td>
-                            <td>
-                                <button class="btn-close" id="btn-${p.symbol}" onclick="closePosition('${p.symbol}')">Close</button>
-                            </td>
-                        </tr>
-                    `).join('') + `
-                        <tr class="total">
-                            <td colspan="7">TOTAL</td>
-                            <td class="${cls(data.total_pnl)}">${data.total_pnl >= 0 ? '+' : ''}$${fmt(data.total_pnl)}</td>
-                            <td colspan="5"></td>
-                        </tr>
-                    `;
-                }
-                
-                document.getElementById('update').textContent = `Last update: ${data.last_update}`;
-            } catch (e) {
-                console.error(e);
-            }
-        }
-        
-        setInterval(update, 2000);
-        update();
-    </script>
-</body>
-</html>'''
+# Initialize Dash app
+app = dash.Dash(__name__)
+app.title = "Bybit Dashboard"
 
-@app.route('/api/data')
-def get_data():
-    return jsonify(provider.data)
+app.layout = html.Div([
+    dcc.Interval(id='interval-component', interval=2000, n_intervals=0),
+    
+    # Header
+    html.Div([
+        html.H1("📈 Bybit Position Dashboard", style={'color': '#fff', 'margin': 0}),
+        html.Div(id="mode-badge", style={'background': 'rgba(255,255,255,0.2)', 'padding': '5px 15px', 'border-radius': '20px', 'font-weight': 'bold'})
+    ], style={'background': 'linear-gradient(135deg, #667eea, #764ba2)', 'padding': '20px', 'border-radius': '10px', 'margin-bottom': '20px', 'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center'}),
+    
+    # Info note
+    html.Div("ℹ️ Fees shown are actual fees paid for current positions (limit orders: 0.02%, market orders: 0.055%)", 
+             style={'background': '#1f2547', 'padding': '10px', 'border-radius': '5px', 'margin-bottom': '20px', 'font-size': '12px', 'color': '#8892b0'}),
+    
+    # Stats cards
+    html.Div(id="stats-cards", style={'display': 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(200px, 1fr))', 'gap': '15px', 'margin-bottom': '30px'}),
+    
+    # Positions table
+    html.Div(id="positions-table"),
+    
+    # PnL Chart
+    html.Div([
+        html.H3("PnL Distribution", style={'color': '#fff', 'margin-bottom': '10px'}),
+        dcc.Graph(id="pnl-chart")
+    ], style={'margin-top': '30px'}),
+    
+    # Update timestamp
+    html.Div(id="update-time", style={'text-align': 'center', 'color': '#8892b0', 'margin-top': '20px', 'font-size': '12px'})
+    
+], style={'font-family': 'system-ui, -apple-system, sans-serif', 'background': '#0a0e27', 'color': '#fff', 'padding': '20px', 'min-height': '100vh'})
 
-@app.route('/api/close', methods=['POST'])
-def close_position():
-    try:
-        symbol = request.json.get('symbol')
-        if not symbol:
-            return jsonify({"success": False, "message": "Symbol required"})
+@app.callback(
+    [Output('mode-badge', 'children'),
+     Output('stats-cards', 'children'),
+     Output('positions-table', 'children'),
+     Output('pnl-chart', 'figure'),
+     Output('update-time', 'children')],
+    [Input('interval-component', 'n_intervals')]
+)
+def update_dashboard(n):
+    data = provider.data
+    
+    # Mode badge
+    mode = "TESTNET" if data.get("demo_mode", True) else "LIVE"
+    
+    # Stats cards
+    account = data.get("account", {})
+    total_fees = sum(p.get("fees", 0) for p in data.get("positions", []))
+    
+    stats_cards = [
+        html.Div([
+            html.Div("Equity", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
+            html.Div(f"${account.get('equity', 0):.2f}", style={'font-size': '24px', 'font-weight': 'bold'})
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
         
-        result = provider.close_position(symbol)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)})
+        html.Div([
+            html.Div("Available", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
+            html.Div(f"${account.get('available', 0):.2f}", style={'font-size': '24px', 'font-weight': 'bold'})
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
+        
+        html.Div([
+            html.Div("Unrealized PnL", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
+            html.Div(f"${account.get('unrealized_pnl', 0):.2f}", 
+                    style={'font-size': '24px', 'font-weight': 'bold', 'color': '#00d4aa' if account.get('unrealized_pnl', 0) >= 0 else '#f6465d'})
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
+        
+        html.Div([
+            html.Div("Total Fees Paid", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
+            html.Div(f"${total_fees:.2f}", style={'font-size': '24px', 'font-weight': 'bold', 'color': '#ffa500'})
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
+        
+        html.Div([
+            html.Div("Positions", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
+            html.Div(str(data.get("position_count", 0)), style={'font-size': '24px', 'font-weight': 'bold'})
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'})
+    ]
+    
+    # Positions table
+    positions = data.get("positions", [])
+    if not positions:
+        table = html.Div("No open positions", style={'text-align': 'center', 'padding': '40px', 'background': '#1a1f3a', 'border-radius': '10px', 'border': '1px solid #2a3050'})
+    else:
+        # Prepare data for table
+        table_data = []
+        for p in positions:
+            table_data.append({
+                'Symbol': p['symbol'],
+                'Side': p['side'],
+                'Size': f"{p['size']:.4f}",
+                'Entry': f"${p['avg_price']:.4f}",
+                'Mark': f"${p['mark_price']:.4f}",
+                'Unrealized PnL': f"${p['pnl']:.2f}",
+                'Fees Paid': f"${p['fees']:.2f}",
+                'Net PnL': f"${p['net_pnl']:.2f}",
+                'PnL %': f"{p['pnl_pct']:.2f}%",
+                'Break-even': f"${p['breakeven']:.4f}",
+                'Value': f"${p['value']:.2f}",
+                'Liq Price': f"${p['liq_price']:.4f}" if p['liq_price'] > 0 else "—"
+            })
+        
+        # Add total row
+        total_pnl = data.get("total_pnl", 0)
+        table_data.append({
+            'Symbol': 'TOTAL',
+            'Side': '',
+            'Size': '',
+            'Entry': '',
+            'Mark': '',
+            'Unrealized PnL': '',
+            'Fees Paid': '',
+            'Net PnL': f"${total_pnl:.2f}",
+            'PnL %': '',
+            'Break-even': '',
+            'Value': '',
+            'Liq Price': ''
+        })
+        
+        table = dash_table.DataTable(
+            data=table_data,
+            columns=[{"name": i, "id": i} for i in table_data[0].keys()],
+            style_table={'background': '#1a1f3a', 'border': '1px solid #2a3050', 'border-radius': '10px', 'overflow': 'hidden'},
+            style_header={'background': '#0f1529', 'color': '#8892b0', 'font-size': '11px', 'text-transform': 'uppercase', 'padding': '12px', 'font-weight': 'bold'},
+            style_cell={'background': '#1a1f3a', 'color': '#fff', 'padding': '12px', 'font-size': '14px', 'border': '1px solid #2a3050'},
+            style_data_conditional=[
+                {
+                    'if': {'row_index': len(positions)},  # Total row
+                    'background': '#0f1529',
+                    'font-weight': 'bold'
+                },
+                {
+                    'if': {'filter_query': '{Side} = Buy'},
+                    'color': '#00d4aa'
+                },
+                {
+                    'if': {'filter_query': '{Side} = Sell'},
+                    'color': '#f6465d'
+                }
+            ]
+        )
+    
+    # PnL Chart
+    if positions:
+        df = pd.DataFrame(positions)
+        
+        # Create bar chart for PnL by symbol
+        fig = go.Figure()
+        
+        colors = ['#00d4aa' if pnl >= 0 else '#f6465d' for pnl in df['net_pnl']]
+        
+        fig.add_trace(go.Bar(
+            x=df['symbol'],
+            y=df['net_pnl'],
+            marker_color=colors,
+            text=[f"${pnl:.2f}" for pnl in df['net_pnl']],
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            title="Net PnL by Position",
+            xaxis_title="Symbol",
+            yaxis_title="Net PnL ($)",
+            plot_bgcolor='#1a1f3a',
+            paper_bgcolor='#1a1f3a',
+            font=dict(color='#fff'),
+            showlegend=False
+        )
+        
+        fig.update_xaxes(gridcolor='#2a3050')
+        fig.update_yaxes(gridcolor='#2a3050', zeroline=True, zerolinecolor='#8892b0')
+    else:
+        fig = go.Figure()
+        fig.update_layout(
+            title="No positions to display",
+            plot_bgcolor='#1a1f3a',
+            paper_bgcolor='#1a1f3a',
+            font=dict(color='#fff')
+        )
+    
+    # Update time
+    update_time = f"Last update: {data.get('last_update', 'Never')}"
+    
+    return mode, stats_cards, table, fig, update_time
 
 if __name__ == '__main__':
-    print("🚀 Starting Fixed Dashboard → http://localhost:5501")
-    app.run(host='0.0.0.0', port=5501, debug=False)
+    print("🚀 Starting Plotly Dashboard → http://localhost:8050")
+    app.run(host='0.0.0.0', port=8050, debug=False)

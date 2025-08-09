@@ -193,8 +193,11 @@ class EMAMACDRSIBot:
             'macd_hist_min': -0.05,    # Allow slightly negative MACD for more signals
         }
 
-        self.tick_size = 0.01
-        self.qty_step = 0.01
+        # These will be set from API instrument info
+        self.tick_size = None
+        self.qty_step = None
+        self.min_order_qty = None
+        self.max_order_qty = None
 
         self.last_trade_time: float = 0.0
         self.logger = TradeLogger("EMA_MACD_RSI", self.symbol)
@@ -207,13 +210,46 @@ class EMAMACDRSIBot:
     def connect(self) -> bool:
         try:
             self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            # Some pybit clients don't have get_server_time; if so, consider connection ok
-            try:
-                resp = self.exchange.get_server_time()
-                return (resp or {}).get('retCode', 0) == 0
-            except Exception:
-                return True
-        except Exception:
+            # Get instrument specifications
+            return self.fetch_instrument_specs()
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            return False
+
+    def fetch_instrument_specs(self) -> bool:
+        """Fetch and set the correct instrument specifications from Bybit API"""
+        try:
+            result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
+            if result.get('retCode') != 0:
+                print(f"❌ Failed to get instrument info: {result.get('retMsg', 'Unknown error')}")
+                return False
+            
+            instrument = result['result']['list'][0]
+            
+            # Extract lot size filter
+            lot_filter = instrument['lotSizeFilter']
+            self.qty_step = float(lot_filter['qtyStep'])
+            self.min_order_qty = float(lot_filter['minOrderQty'])
+            self.max_order_qty = float(lot_filter['maxOrderQty'])
+            
+            # Extract price filter
+            price_filter = instrument['priceFilter']
+            self.tick_size = float(price_filter['tickSize'])
+            
+            # Update config with actual minimum notional
+            if 'minNotionalValue' in lot_filter:
+                self.config['min_notional'] = float(lot_filter['minNotionalValue'])
+            
+            print(f"✅ Instrument specs for {self.symbol}:")
+            print(f"   Qty step: {self.qty_step}")
+            print(f"   Min qty: {self.min_order_qty}")
+            print(f"   Max qty: {self.max_order_qty}")
+            print(f"   Tick size: {self.tick_size}")
+            print(f"   Min notional: {self.config['min_notional']}")
+            
+            return True
+        except Exception as e:
+            print(f"❌ Error fetching instrument specs: {e}")
             return False
 
     async def get_account_balance(self) -> bool:
@@ -263,6 +299,8 @@ class EMAMACDRSIBot:
     # Formatting helpers
     # -------------
     def format_price(self, price: float, side: str = None) -> float:
+        if self.tick_size is None:
+            raise ValueError("Tick size not set. Call connect() first.")
         # Round towards safer fill for the side
         if side == 'BUY':
             return math.floor(price / self.tick_size) * self.tick_size
@@ -272,9 +310,13 @@ class EMAMACDRSIBot:
             return round(price / self.tick_size) * self.tick_size
 
     def format_qty(self, qty: float) -> float:
+        if self.qty_step is None:
+            raise ValueError("Quantity step not set. Call connect() first.")
         return math.floor(qty / self.qty_step) * self.qty_step
 
     def format_qty_str(self, qty: float) -> str:
+        if self.qty_step is None:
+            raise ValueError("Quantity step not set. Call connect() first.")
         # Format quantity to avoid scientific notation
         if self.qty_step >= 1:
             return str(int(self.format_qty(qty)))
@@ -286,7 +328,18 @@ class EMAMACDRSIBot:
         risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100.0)
         max_qty = risk_amount / price
         qty = self.format_qty(max_qty)
-        return qty if qty * price >= self.config['min_notional'] else 0.0
+        
+        # Ensure quantity meets minimum requirements
+        qty = max(qty, self.min_order_qty)
+        
+        # Ensure quantity doesn't exceed maximum
+        qty = min(qty, self.max_order_qty)
+        
+        # Check if notional value meets minimum
+        if qty * price < self.config['min_notional']:
+            return 0.0
+            
+        return qty
 
     def estimate_execution_price(self, market_price: float, side: str, is_limit: bool = True) -> float:
         if is_limit:
@@ -537,6 +590,8 @@ class EMAMACDRSIBot:
                     f"✅ {signal['action']}: {qty_str} @ ${limit_price:.2f} | "
                     f"RSI: {signal['rsi']:.1f} | MACD: {signal['macd']:.3f} | Balance: ${self.account_balance:.0f}"
                 )
+            else:
+                print(f"❌ Trade failed: {order.get('retMsg', 'Unknown error')}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
 
@@ -597,6 +652,8 @@ class EMAMACDRSIBot:
                     )
                     self.current_trade_id = None
                 print(f"✅ Closed: {reason} @ ${execution_price:.2f}")
+            else:
+                print(f"❌ Close failed: {order.get('retMsg', 'Unknown error')}")
         except Exception as e:
             print(f"❌ Close failed: {e}")
 
