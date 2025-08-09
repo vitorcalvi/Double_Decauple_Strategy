@@ -79,14 +79,14 @@ class EmaRsiTrader:
             'ema_fast': 10,
             'ema_slow': 21,
             'rsi_period': 14,
-            'rsi_long_threshold': 30,
-            'rsi_short_threshold': 70,
+            'rsi_long_threshold': 40,
+            'rsi_short_threshold': 60,
             'stop_loss_pct': 0.5,
             'take_profit_pct': 1.5,
             'trailing_stop_pct': 0.7,
             'risk_per_trade_pct': 2.0,
             'expected_slippage_pct': 0.02,
-            'maker_offset_pct': 0.02,
+            'maker_offset_pct': 0.08,
             'limit_order_timeout': 30,
             'limit_order_retries': 3
         }

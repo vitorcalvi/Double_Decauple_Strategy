@@ -481,9 +481,11 @@ class EMARSIBot:
             print(f"✅ {signal['action']}: {self.format_qty(qty)} @ ${actual_price:.2f}")
             print(f"   📊 RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.0f}")
             print(f"   ✅ ZERO SLIPPAGE with PostOnly")
-    
+
     async def close_position(self, reason):
-        if not self.position:
+        # Re-check position exists before closing
+        if not await self.check_position():
+            print("✅ Position already closed")
             return
         
         qty = float(self.position['size'])
