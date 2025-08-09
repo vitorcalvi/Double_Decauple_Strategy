@@ -54,7 +54,7 @@ class TradeLogger:
         self.open_trades[trade_id] = {
             "entry_time": datetime.now(),
             "entry_price": actual_price,
-            "side": side,
+            "side": side,  # 'BUY' or 'SELL'
             "qty": qty,
             "stop_loss": stop_loss,
             "take_profit": take_profit
@@ -71,15 +71,15 @@ class TradeLogger:
 
         trade = self.open_trades[trade_id]
         duration = (datetime.now() - trade["entry_time"]).total_seconds()
-        slippage = 0  # PostOnly = zero slippage
+        slippage = 0  # maker assumption
 
         gross_pnl = ((actual_exit - trade["entry_price"]) * trade["qty"]
-                    if trade["side"] == "BUY"
-                    else (trade["entry_price"] - actual_exit) * trade["qty"])
+                     if trade["side"] == "BUY"
+                     else (trade["entry_price"] - actual_exit) * trade["qty"])
 
-        # Correct maker rebate calculation
+        # Maker rebates (0.04% each side by default)
         entry_rebate = trade["entry_price"] * trade["qty"] * abs(fees_entry) / 100
-        exit_rebate = actual_exit * trade["qty"] * abs(fees_exit) / 100
+        exit_rebate  = actual_exit * trade["qty"] * abs(fees_exit) / 100
         total_rebates = entry_rebate + exit_rebate
         net_pnl = gross_pnl + total_rebates
 
@@ -96,12 +96,16 @@ class TradeLogger:
             "ts": datetime.now(timezone.utc).isoformat(),
             "duration_sec": int(duration),
             "entry_price": round(trade["entry_price"], 4),
-            "expected_exit": round(expected_exit, 4),
-            "actual_exit": round(actual_exit, 4),
+            "expected_exit": round(expected_exit, 4),  # target (tp/stop) at signal time
+            "actual_exit": round(actual_exit, 4),      # fill price
             "slippage": round(slippage, 4),
             "qty": round(trade["qty"], 6),
             "gross_pnl": round(gross_pnl, 2),
-            "fee_rebates": {"entry": round(entry_rebate, 2), "exit": round(exit_rebate, 2), "total": round(total_rebates, 2)},
+            "fee_rebates": {
+                "entry": round(entry_rebate, 2),
+                "exit": round(exit_rebate, 2),
+                "total": round(total_rebates, 2)
+            },
             "net_pnl": round(net_pnl, 2),
             "reason": reason,
             "currency": self.currency
@@ -113,8 +117,9 @@ class TradeLogger:
         del self.open_trades[trade_id]
         return log_entry
 
+
 class LiquiditySweepBot:
-    """Fixed Liquidity Sweep Strategy"""
+    """Fixed Liquidity Sweep Strategy with protective Stop-Market (reduce-only)"""
 
     def __init__(self):
         self.symbol = 'DOGEUSDT'
@@ -149,8 +154,8 @@ class LiquiditySweepBot:
             'retracement_ratio': 0.5,
             'risk_per_trade_pct': 2.0,
             'lookback': 100,
-            'maker_offset_pct': 0.01,
-            'maker_fee_pct': -0.04,
+            'maker_offset_pct': 0.01,   # note: tiny vs tick; see note in comments
+            'maker_fee_pct': -0.04,     # maker rebate %
             'gross_take_profit': 1.5,
             'gross_stop_loss': 0.5,
             'net_take_profit': 1.58,
@@ -194,51 +199,42 @@ class LiquiditySweepBot:
         return True
 
     def calculate_position_size(self, price, stop_loss_price):
-        """Calculate position size based on risk percentage"""
+        """Risk-based position sizing"""
         if self.account_balance <= 0:
             return 0
 
         risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
         price_diff = abs(price - stop_loss_price)
-
         if price_diff == 0:
             return 0
 
-        # Include slippage in calculation
         slippage_factor = 1 + (self.config['expected_slippage_pct'] / 100)
         adjusted_risk = risk_amount / slippage_factor
-
         qty = adjusted_risk / price_diff
-        return max(qty, 1)  # Minimum 1 DOGE
+        return max(qty, 1)  # minimum 1 DOGE
 
     def format_qty(self, qty):
-        """Format quantity for DOGE with proper precision"""
+        """DOGE precision: integer contracts"""
         if qty < 1:
             return "0"
         return str(int(round(qty)))
 
     def apply_slippage(self, price, side, order_type="market"):
-        """Apply realistic slippage modeling"""
         if order_type == "limit":
-            return price  # No slippage for limit orders
-
-        slippage_pct = self.config['expected_slippage_pct'] / 100
-
-        return price * (1 + slippage_pct) if side in ["BUY", "Buy"] else price * (1 - slippage_pct)
+            return price
+        s = self.config['expected_slippage_pct'] / 100
+        return price * (1 + s) if side in ["BUY", "Buy"] else price * (1 - s)
 
     async def check_pending_orders(self):
-        """Check for any pending orders"""
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
                 self.pending_order = None
                 return False
-
             order_list = orders['result']['list']
             if order_list and len(order_list) > 0:
                 self.pending_order = order_list[0]
                 return True
-
             self.pending_order = None
             return False
         except Exception as e:
@@ -246,7 +242,6 @@ class LiquiditySweepBot:
             return False
 
     async def check_position(self):
-        """Check current position status"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') == 0:
@@ -263,38 +258,31 @@ class LiquiditySweepBot:
         return False
 
     def identify_liquidity_pools(self, df):
-        """Identify liquidity pools"""
         if len(df) < self.config['liquidity_lookback']:
             return
-
         window = 5
         highs = df['high'].rolling(window=window, center=True).max()
         lows = df['low'].rolling(window=window, center=True).min()
-
         self.liquidity_pools['highs'].clear()
         self.liquidity_pools['lows'].clear()
-
         for i in range(len(df) - 10, max(0, len(df) - self.config['liquidity_lookback']), -1):
-            # Check significant high
             if df['high'].iloc[i] == highs.iloc[i]:
-                is_significant = (
+                is_sig = (
                     all(df['high'].iloc[max(0, i-3):i] < df['high'].iloc[i]) and
                     all(df['high'].iloc[i+1:min(len(df), i+4)] < df['high'].iloc[i])
                 )
-                if is_significant:
+                if is_sig:
                     self.liquidity_pools['highs'].append({
                         'price': df['high'].iloc[i],
                         'index': i,
                         'volume': df['volume'].iloc[i]
                     })
-
-            # Check significant low
             if df['low'].iloc[i] == lows.iloc[i]:
-                is_significant = (
+                is_sig = (
                     all(df['low'].iloc[max(0, i-3):i] > df['low'].iloc[i]) and
                     all(df['low'].iloc[i+1:min(len(df), i+4)] > df['low'].iloc[i])
                 )
-                if is_significant:
+                if is_sig:
                     self.liquidity_pools['lows'].append({
                         'price': df['low'].iloc[i],
                         'index': i,
@@ -302,46 +290,35 @@ class LiquiditySweepBot:
                     })
 
     def detect_liquidity_sweep(self, df):
-        """Detect liquidity sweep"""
         if len(df) < 3:
             return None
-
         current_high = df['high'].iloc[-1]
         current_low = df['low'].iloc[-1]
         current_close = df['close'].iloc[-1]
         current_volume = df['volume'].iloc[-1]
         avg_volume = df['volume'].iloc[-20:].mean()
 
-        # Check sweep above liquidity
         for pool in self.liquidity_pools['highs']:
             sweep_level = pool['price'] * (1 + self.config['sweep_threshold'] / 100)
-
             if current_high > sweep_level and current_close < pool['price']:
                 return {
                     'type': 'bearish_sweep',
                     'swept_level': pool['price'],
                     'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
                 }
-
-        # Check sweep below liquidity
         for pool in self.liquidity_pools['lows']:
             sweep_level = pool['price'] * (1 - self.config['sweep_threshold'] / 100)
-
             if current_low < sweep_level and current_close > pool['price']:
                 return {
                     'type': 'bullish_sweep',
                     'swept_level': pool['price'],
                     'volume_ratio': current_volume / avg_volume if avg_volume > 0 else 1
                 }
-
         return None
 
     def generate_signal(self, df):
-        """Generate trading signal"""
         if len(df) < self.config['lookback'] or self.position:
             return None
-
-        # Check for duplicate signals
         current_price = df['close'].iloc[-1]
         if self.last_signal_price != 0:
             price_change_pct = abs(current_price - self.last_signal_price) / self.last_signal_price * 100
@@ -350,12 +327,10 @@ class LiquiditySweepBot:
 
         self.identify_liquidity_pools(df)
         sweep = self.detect_liquidity_sweep(df)
-
         if not sweep:
             return None
 
         action = 'BUY' if sweep['type'] == 'bullish_sweep' else 'SELL' if sweep['type'] == 'bearish_sweep' else None
-
         if action:
             self.last_signal_price = current_price
             return {
@@ -364,11 +339,9 @@ class LiquiditySweepBot:
                 'swept_level': sweep['swept_level'],
                 'volume_ratio': sweep['volume_ratio']
             }
-
         return None
 
     async def get_market_data(self):
-        """Retrieve market data"""
         try:
             klines = self.exchange.get_kline(
                 category="linear",
@@ -376,18 +349,15 @@ class LiquiditySweepBot:
                 interval=self.config['timeframe'],
                 limit=self.config['lookback']
             )
-
             if klines.get('retCode') != 0:
                 return False
 
             df = pd.DataFrame(klines['result']['list'], columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
             ])
-
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col])
-
             self.price_data = df.sort_values('timestamp').reset_index(drop=True)
             return True
         except Exception as e:
@@ -395,83 +365,78 @@ class LiquiditySweepBot:
             return False
 
     def should_close(self):
-        """Check if position should be closed"""
+        """Only handle take-profit here; the STOP is handled by attached SL on-exchange."""
         if not self.position:
             return False, ""
-
         current_price = float(self.price_data['close'].iloc[-1])
         entry_price = float(self.position.get('avgPrice', 0))
         side = self.position.get('side', '')
-
         if entry_price == 0:
             return False, ""
-
-        # Calculate NET targets with slippage
-        if side == "Buy":
-            profit_pct = (current_price - entry_price) / entry_price * 100
-        else:
-            profit_pct = (entry_price - current_price) / entry_price * 100
-
+        profit_pct = ((current_price - entry_price) / entry_price * 100) if side == "Buy" \
+                     else ((entry_price - current_price) / entry_price * 100)
         if profit_pct >= self.config['net_take_profit']:
             return True, "take_profit"
-        if profit_pct <= -self.config['net_stop_loss']:
-            return True, "stop_loss"
-
+        # do NOT close on stop here; protective SL will fire automatically on exchange
         return False, ""
 
     async def execute_trade(self, signal):
-        """Execute trade with proper sizing and slippage"""
-        # Check trade cooldown
-        current_time = time.time()
-        if current_time - self.last_trade_time < self.trade_cooldown:
-            remaining = self.trade_cooldown - (current_time - self.last_trade_time)
-            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
+        """Execute entry as PostOnly + attach Stop-Market (reduce-only) via stopLoss fields."""
+        now = time.time()
+        if now - self.last_trade_time < self.trade_cooldown:
+            return
+        if now - self.last_order_time < self.order_cooldown:
             return
 
-        if current_time - self.last_order_time < self.order_cooldown:
-            return
-
-        # Get account balance
         await self.get_account_balance()
 
-        # Calculate stop loss price for position sizing
-        stop_loss_price = (signal['price'] * (1 - self.config['net_stop_loss'] / 100) if signal['action'] == 'BUY'
-                          else signal['price'] * (1 + self.config['net_stop_loss'] / 100))
-
-        # Calculate position size based on risk
+        # compute stop for sizing
+        stop_loss_price = (signal['price'] * (1 - self.config['net_stop_loss'] / 100)
+                           if signal['action'] == 'BUY'
+                           else signal['price'] * (1 + self.config['net_stop_loss'] / 100))
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
         formatted_qty = self.format_qty(qty)
-
         if formatted_qty == "0":
             print(f"❌ Position size too small: {qty}")
             return
 
-        # Apply maker offset for rebate
+        # Price improvement for maker (note: maker_offset_pct may be < 1 tick on DOGE)
         offset_mult = 1 - self.config['maker_offset_pct']/100 if signal['action'] == 'BUY' else 1 + self.config['maker_offset_pct']/100
         limit_price = round(signal['price'] * offset_mult, 4)
-
-        # Model expected slippage for limit orders
         expected_fill_price = self.apply_slippage(limit_price, signal['action'], "limit")
 
+        # Targets
+        net_tp = (expected_fill_price * (1 + self.config['net_take_profit']/100)
+                  if signal['action'] == 'BUY'
+                  else expected_fill_price * (1 - self.config['net_take_profit']/100))
+        net_sl = (expected_fill_price * (1 - self.config['net_stop_loss']/100)
+                  if signal['action'] == 'BUY'
+                  else expected_fill_price * (1 + self.config['net_stop_loss']/100))
+
         try:
+            # ENTRY with attached Stop-Market (reduce-only) protective stop
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price)
+                price=str(limit_price),
+                timeInForce="PostOnly",          # ensure maker
+                # --- Protective SL attached to entry (Stop-Market) ---
+                stopLoss=str(round(net_sl, 4)),
+                slOrderType="Market",
+                slTriggerBy="LastPrice",
+                tpslMode="Full"
+                # (OPTIONAL) you can also attach takeProfit with Market type similarly:
+                # takeProfit=str(round(net_tp, 4)),
+                # tpOrderType="Market",
+                # tpTriggerBy="LastPrice",
             )
 
             if order.get('retCode') == 0:
-                self.last_trade_time = current_time
-                self.last_order_time = current_time
-
-                # Calculate targets
-                net_tp = (expected_fill_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY'
-                         else expected_fill_price * (1 - self.config['net_take_profit']/100))
-                net_sl = (expected_fill_price * (1 - self.config['net_stop_loss']/100) if signal['action'] == 'BUY'
-                         else expected_fill_price * (1 + self.config['net_stop_loss']/100))
+                self.last_trade_time = now
+                self.last_order_time = now
 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -484,17 +449,16 @@ class LiquiditySweepBot:
                 )
 
                 risk_amount = self.account_balance * (self.config['risk_per_trade_pct'] / 100)
-
                 print(f"✅ FIXED {signal['action']}: {formatted_qty} DOGE @ ${limit_price:.4f}")
                 print(f"   💰 Risk: ${risk_amount:.2f} ({self.config['risk_per_trade_pct']}% of ${self.account_balance:.2f})")
+                print(f"   🔒 Protective SL (Stop-Market): {net_sl:.4f} (reduce-only)")
                 print(f"   🎯 Liquidity Swept: ${signal['swept_level']:.4f}")
-                print(f"   📊 Expected Slippage: {self.config['expected_slippage_pct']}%")
 
         except Exception as e:
             print(f"❌ Trade failed: {e}")
 
     async def close_position(self, reason):
-        """Close position with maker order"""
+        """Close position with maker limit when taking profit or manual exit."""
         if not self.position:
             return
 
@@ -502,26 +466,22 @@ class LiquiditySweepBot:
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = float(self.position['size'])
 
-        # Calculate limit price with offset
+        # maker limit for TP/manual
         offset_mult = 1 + self.config['maker_offset_pct']/100 if side == "Sell" else 1 - self.config['maker_offset_pct']/100
         limit_price = round(current_price * offset_mult, 4)
-
-        # Model expected slippage
         expected_fill_price = self.apply_slippage(limit_price, side, "limit")
 
         try:
-            # FIXED: Added missing qty parameter
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty),  # FIXED: Added qty parameter
+                qty=self.format_qty(qty),
                 price=str(limit_price),
                 timeInForce="PostOnly",
                 reduceOnly=True
             )
-
             if order.get('retCode') == 0:
                 if self.current_trade_id:
                     self.logger.log_trade_close(
@@ -533,20 +493,15 @@ class LiquiditySweepBot:
                         fees_exit=self.config['maker_fee_pct']
                     )
                     self.current_trade_id = None
-
                 print(f"✅ Closed: {reason}")
                 self.position = None
-
         except Exception as e:
             print(f"❌ Close failed: {e}")
 
     def show_status(self):
-        """Show current status"""
         if len(self.price_data) == 0:
             return
-
         current_price = float(self.price_data['close'].iloc[-1])
-
         print(f"\n🎯 FIXED Liquidity Sweep Bot - {self.symbol}")
         print(f"💰 Price: ${current_price:.4f} | Balance: ${self.account_balance:.2f}")
         print(f"⚡ Risk per trade: {self.config['risk_per_trade_pct']}%")
@@ -557,18 +512,15 @@ class LiquiditySweepBot:
             side = self.position.get('side', '')
             size = self.position.get('size', '0')
             pnl = float(self.position.get('unrealisedPnl', 0))
-
             emoji = "🟢" if side == "Buy" else "🔴"
             print(f"{emoji} {side}: {size} DOGE @ ${entry_price:.4f} | PnL: ${pnl:.2f}")
         elif self.pending_order:
             print(f"⏳ Pending order: {self.pending_order.get('side')} @ ${self.pending_order.get('price')}")
         else:
             print("🔍 Scanning for liquidity sweeps...")
-
         print("-" * 60)
 
     async def run_cycle(self):
-        """Run one trading cycle"""
         # Emergency stop check
         if self.logger.daily_pnl < -self.logger.max_daily_loss:
             print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f} exceeded limit")
@@ -583,8 +535,10 @@ class LiquiditySweepBot:
 
         if self.position:
             should_close, reason = self.should_close()
-            if should_close:
+            if should_close and reason == "take_profit":
                 await self.close_position(reason)
+            # If stop is hit, exchange SL (Stop-Market) will close it automatically.
+            # You may poll realized PnL or order history to log that event if desired.
         else:
             signal = self.generate_signal(self.price_data)
             if signal:
@@ -593,18 +547,17 @@ class LiquiditySweepBot:
         self.show_status()
 
     async def run(self):
-        """Main bot loop"""
         if not self.connect():
             print("❌ Failed to connect")
             return
 
         print(f"🎯 FIXED Liquidity Sweep Bot - {self.symbol}")
         print("✅ FIXES APPLIED:")
-        print(f"   • Position sizing: Risk-based ({self.config['risk_per_trade_pct']}% per trade)")
-        print(f"   • Fee calculations: Correct maker rebates")
+        print("   • Entry: PostOnly maker with attached Stop-Market (reduce-only)")
+        print("   • Stop: on-exchange SL (Market) — no limit-at-stop risk")
+        print(f"   • Fee calculations: Correct maker rebates ({self.config['maker_fee_pct']}%)")
         print(f"   • Slippage modeling: {self.config['expected_slippage_pct']}% expected")
-        print(f"   • Account balance: Dynamic checking")
-        print(f"   • Close position: Fixed missing qty parameter")
+        print("   • Account balance: Dynamic checking")
 
         try:
             while True:

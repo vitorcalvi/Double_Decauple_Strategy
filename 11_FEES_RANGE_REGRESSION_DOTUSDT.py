@@ -253,10 +253,15 @@ class RangeBalancingBot:
             if wallet.get('retCode') == 0:
                 for coin in wallet['result']['list'][0]['coin']:
                     if coin['coin'] == 'USDT':
-                        self.account_balance = float(coin['availableToWithdraw'])
+                        balance_str = coin.get('availableToWithdraw', '0')
+                        # Handle empty string or invalid values
+                        if balance_str and balance_str != '':
+                            self.account_balance = float(balance_str)
+                        # Keep existing balance if empty
                         break
         except Exception as e:
             print(f"⚠️ Balance update error: {e}")
+
     
     def calculate_position_size(self, price, stop_loss_price):
         if self.account_balance <= 0:
@@ -546,7 +551,7 @@ class RangeBalancingBot:
                 symbol=self.symbol,
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
-                qty=formatted_qty,
+                qty=self.format_qty(qty),
                 price=str(limit_price,
                 timeInForce="PostOnly")
             )

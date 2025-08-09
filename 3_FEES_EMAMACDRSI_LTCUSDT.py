@@ -156,7 +156,8 @@ class TradeLogger:
 # ---------------------------
 class EMAMACDRSIBot:
     def __init__(self):
-        self.symbol = 'LTCUSDT'
+        # More volatile alternatives: SOLUSDT, AVAXUSDT, ADAUSDT, DOTUSDT
+        self.symbol = 'LTCUSDT'  # Change to 'SOLUSDT' for higher volatility
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
 
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -176,8 +177,8 @@ class EMAMACDRSIBot:
             'macd_slow': 26,
             'macd_signal': 9,
             'rsi_period': 7,            # slightly longer to reduce 1m noise
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
+            'rsi_oversold': 35,         # Relaxed from 30 to 35
+            'rsi_overbought': 65,        # Tightened from 70 to 65
             'risk_per_trade': 1.0,
             'maker_offset_pct': 0.01,  # 1bp limit offset for maker
             'slippage_pct': 0.02,      # 2bp expected slippage for market
@@ -189,7 +190,7 @@ class EMAMACDRSIBot:
             'min_hold_bars': 3,        # require at least N bars before opposite-signal exit
             'maker_fee_bps': 2.0,      # estimated; replace with realized from fills if available
             'taker_fee_bps': 5.0,      # estimated; replace with realized from fills if available
-            'macd_hist_min': 0.0,      # threshold to avoid micro flips; keep 0 to preserve behavior
+            'macd_hist_min': -0.05,    # Allow slightly negative MACD for more signals
         }
 
         self.tick_size = 0.01
@@ -218,69 +219,74 @@ class EMAMACDRSIBot:
     async def get_account_balance(self) -> bool:
         try:
             result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-            if result.get('retCode') == 0:
-                balance_list = result['result']['list']
-                if balance_list:
-                    for coin in balance_list[0]['coin']:
-                        if coin['coin'] == 'USDT':
-                            self.account_balance = _safe_float(coin.get('availableToWithdraw'), 1000.0)
-                            return True
+            if result.get('retCode') != 0:
+                return False
+            coins = result['result']['list'][0]['coin']
+            for coin_data in coins:
+                if coin_data['coin'] == 'USDT':
+                    self.account_balance = _safe_float(coin_data['walletBalance'], 1000.0)
+                    return True
+            return False
         except Exception:
-            self.account_balance = 1000.0
-        return False
+            return False
 
-    async def get_instrument_info(self) -> bool:
+    async def get_positions(self) -> bool:
         try:
-            result = self.exchange.get_instruments_info(category="linear", symbol=self.symbol)
-            if result.get('retCode') == 0:
-                info = result['result']['list'][0]
-                self.tick_size = _safe_float(info['priceFilter']['tickSize'], 0.01)
-                self.qty_step = _safe_float(info['lotSizeFilter']['qtyStep'], 0.01)
-                return True
+            result = self.exchange.get_positions(category="linear", symbol=self.symbol)
+            if result.get('retCode') != 0:
+                return False
+            pos_list = result['result']['list']
+            if pos_list and _safe_float(pos_list[0].get('size'), 0.0) > 0:
+                self.position = pos_list[0]
+            else:
+                self.position = None
+            return True
         except Exception:
-            pass
-        return False
+            return False
+
+    async def get_price_data(self, interval: str = '1', limit: int = 100) -> bool:
+        try:
+            result = self.exchange.get_kline(category="linear", symbol=self.symbol, interval=interval, limit=limit)
+            if result.get('retCode') != 0:
+                return False
+            data = result['result']['list']
+            self.price_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            self.price_data['timestamp'] = pd.to_datetime(pd.to_numeric(self.price_data['timestamp']), unit='ms')
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                self.price_data[col] = pd.to_numeric(self.price_data[col])
+            self.price_data = self.price_data.sort_values('timestamp').reset_index(drop=True)
+            return True
+        except Exception:
+            return False
 
     # -------------
     # Formatting helpers
     # -------------
-    def _round_to_tick(self, price: float, side: Optional[str] = None) -> float:
-        if self.tick_size <= 0:
-            return round(price, 4)
-        steps = price / self.tick_size
-        if side == 'BUY':  # ensure we don't cross when posting maker BUY
-            steps = math.floor(steps)
-        elif side == 'SELL':  # ensure we don't cross when posting maker SELL
-            steps = math.ceil(steps)
+    def format_price(self, price: float, side: str = None) -> float:
+        # Round towards safer fill for the side
+        if side == 'BUY':
+            return math.floor(price / self.tick_size) * self.tick_size
+        elif side == 'SELL':
+            return math.ceil(price / self.tick_size) * self.tick_size
         else:
-            steps = round(steps)
-        return steps * self.tick_size
-
-    def format_price(self, price: float, side: Optional[str] = None) -> float:
-        return self._round_to_tick(price, side=side)
+            return round(price / self.tick_size) * self.tick_size
 
     def format_qty(self, qty: float) -> float:
-        if self.qty_step <= 0:
-            return round(qty, 2)
-        steps = max(1, round(qty / self.qty_step))
-        return steps * self.qty_step
+        return math.floor(qty / self.qty_step) * self.qty_step
 
     def format_qty_str(self, qty: float) -> str:
-        return f"{self.format_qty(qty):.2f}"
+        # Format quantity to avoid scientific notation
+        if self.qty_step >= 1:
+            return str(int(self.format_qty(qty)))
+        else:
+            decimals = len(str(self.qty_step).split('.')[-1])
+            return f"{self.format_qty(qty):.{decimals}f}"
 
-    # -------------
-    # Sizing & Prices
-    # -------------
-    def calculate_position_size(self, price: float, stop_loss_price: float) -> float:
-        if self.account_balance <= 0:
-            return 0.0
-        risk_amount = self.account_balance * self.config['risk_per_trade'] / 100.0
-        stop_distance = abs(price - stop_loss_price)
-        if stop_distance <= 0:
-            return 0.0
-        position_size = risk_amount / stop_distance
-        notional = position_size * price
-        return position_size if notional >= self.config['min_notional'] else 0.0
+    def calculate_position_size(self, price: float) -> float:
+        risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100.0)
+        max_qty = risk_amount / price
+        qty = self.format_qty(max_qty)
+        return qty if qty * price >= self.config['min_notional'] else 0.0
 
     def estimate_execution_price(self, market_price: float, side: str, is_limit: bool = True) -> float:
         if is_limit:
@@ -392,124 +398,103 @@ class EMAMACDRSIBot:
         price = float(df['close'].iloc[-1])
 
         # Buy: Trend UP + MACD UP + RSI low
-        if (
-            indicators['trend'] == 'UP'
-            and indicators['macd_cross'] == 'UP'
-            and indicators['rsi'] < self.config['rsi_oversold']
-        ):
+        # Relaxed: Allow 2 out of 3 conditions with strong RSI
+        trend_up = indicators['trend'] == 'UP'
+        macd_up = indicators['macd_cross'] == 'UP'
+        rsi_oversold = indicators['rsi'] < self.config['rsi_oversold']
+        
+        # Original strict conditions
+        if trend_up and macd_up and rsi_oversold:
+            return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi'], 'macd': indicators['histogram']}
+        
+        # Relaxed: Strong RSI signal with at least one other confirmation
+        if indicators['rsi'] < 25 and (trend_up or macd_up):
             return {'action': 'BUY', 'price': price, 'rsi': indicators['rsi'], 'macd': indicators['histogram']}
 
         # Sell: Trend DOWN + MACD DOWN + RSI high
-        if (
-            indicators['trend'] == 'DOWN'
-            and indicators['macd_cross'] == 'DOWN'
-            and indicators['rsi'] > self.config['rsi_overbought']
-        ):
+        trend_down = indicators['trend'] == 'DOWN'
+        macd_down = indicators['macd_cross'] == 'DOWN'
+        rsi_overbought = indicators['rsi'] > self.config['rsi_overbought']
+        
+        # Original strict conditions
+        if trend_down and macd_down and rsi_overbought:
+            return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi'], 'macd': indicators['histogram']}
+        
+        # Relaxed: Strong RSI signal with at least one other confirmation
+        if indicators['rsi'] > 75 and (trend_down or macd_down):
             return {'action': 'SELL', 'price': price, 'rsi': indicators['rsi'], 'macd': indicators['histogram']}
 
         return None
 
-    # -------------
-    # Market data & positions
-    # -------------
-    async def get_market_data(self) -> bool:
-        try:
-            klines = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=50)
-            if klines.get('retCode') != 0:
-                return False
-            df = pd.DataFrame(
-                klines['result']['list'],
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
-            )
-            df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            self.price_data = df.sort_values('timestamp').reset_index(drop=True)
-            return True
-        except Exception:
-            return False
-
-    async def check_position(self):
-        try:
-            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') == 0:
-                pos_list = positions['result']['list']
-                self.position = pos_list[0] if pos_list and _safe_float(pos_list[0].get('size'), 0.0) > 0 else None
-        except Exception:
-            pass
-
-    # -------------
-    # Exit rules
-    # -------------
-    def _bars_since_entry(self) -> int:
-        if self.entry_bar_time is None or self.price_data.empty:
-            return 0
-        return int((self.price_data['timestamp'] > self.entry_bar_time).sum())
-
-    def should_close(self) -> (bool, str):
+    def check_exit_conditions(self) -> Optional[str]:
         if not self.position or self.price_data.empty:
-            return False, ""
+            return None
 
         current_price = float(self.price_data['close'].iloc[-1])
         entry_price = _safe_float(self.position.get('avgPrice'), 0.0)
-        if entry_price <= 0:
-            return False, ""
-
+        unrealized_pnl = _safe_float(self.position.get('unrealisedPnl'), 0.0)
         is_long = self.position.get('side') == "Buy"
-        profit_pct = (
-            (current_price - entry_price) / entry_price * 100.0 if is_long
-            else (entry_price - current_price) / entry_price * 100.0
-        )
 
-        # Hard TP/SL first
-        if profit_pct >= self.config['net_take_profit']:
-            return True, "take_profit"
-        if profit_pct <= -self.config['net_stop_loss']:
-            return True, "stop_loss"
+        # Check minimum hold time (only if we have bar time)
+        if self.entry_bar_time is not None:
+            bars_held = (self.price_data['timestamp'] > self.entry_bar_time).sum()
+            if bars_held < self.config['min_hold_bars']:
+                return None
 
-        # Stabilized opposite-signal exit: require min bars since entry
-        bars = self._bars_since_entry()
-        if bars < self.config['min_hold_bars']:
-            return False, ""
+        # Stop-loss
+        if is_long:
+            stop_price = entry_price * (1 - self.config['net_stop_loss']/100.0)
+            if current_price <= stop_price:
+                return 'stop_loss'
+        else:
+            stop_price = entry_price * (1 + self.config['net_stop_loss']/100.0)
+            if current_price >= stop_price:
+                return 'stop_loss'
 
-        indicators = self.calculate_indicators(self.price_data)
-        if indicators:
-            if is_long and (indicators['trend'] == 'DOWN' and indicators['macd_cross'] == 'DOWN'):
-                return True, "trend_reversal"
-            if (not is_long) and (indicators['trend'] == 'UP' and indicators['macd_cross'] == 'UP'):
-                return True, "trend_reversal"
+        # Take-profit
+        if is_long:
+            tp_price = entry_price * (1 + self.config['net_take_profit']/100.0)
+            if current_price >= tp_price:
+                return 'take_profit'
+        else:
+            tp_price = entry_price * (1 - self.config['net_take_profit']/100.0)
+            if current_price <= tp_price:
+                return 'take_profit'
 
-        return False, ""
+        # Trend reversal (opposite signal after minimum hold)
+        if self.entry_bar_time is not None:
+            bars_held = (self.price_data['timestamp'] > self.entry_bar_time).sum()
+            if bars_held >= self.config['min_hold_bars']:
+                indicators = self.calculate_indicators(self.price_data)
+                if indicators:
+                    if is_long:
+                        if (
+                            indicators['trend'] == 'DOWN' and
+                            indicators['macd_cross'] == 'DOWN' and
+                            indicators['rsi'] > self.config['rsi_overbought']
+                        ):
+                            return 'trend_reversal'
+                    else:
+                        if (
+                            indicators['trend'] == 'UP' and
+                            indicators['macd_cross'] == 'UP' and
+                            indicators['rsi'] < self.config['rsi_oversold']
+                        ):
+                            return 'trend_reversal'
+
+        return None
 
     # -------------
-    # Execution
+    # Trading operations
     # -------------
     async def execute_trade(self, signal: Dict[str, float]):
-        await self.check_position()
-        if self.position:
-            print("⚠️ Position already exists, skipping trade")
+        if not signal or self.position:
             return
-        if await self.check_pending_orders():
-            print("⚠️ Pending order exists, skipping trade")
-            return
-
-        time_since_last = datetime.now().timestamp() - self.last_trade_time
-        if time_since_last < self.config['trade_cooldown_sec']:
-            remaining = self.config['trade_cooldown_sec'] - time_since_last
-            print(f"⚠️ Trade cooldown active, wait {remaining:.0f}s")
-            return
-
-        await self.get_account_balance()
 
         market_price = signal['price']
-        is_buy = signal['action'] == 'BUY'
-        stop_loss_price = (
-            market_price * (1 - self.config['net_stop_loss']/100.0) if is_buy
-            else market_price * (1 + self.config['net_stop_loss']/100.0)
-        )
-
-        qty = self.calculate_position_size(market_price, stop_loss_price)
+        qty = self.calculate_position_size(market_price)
         if qty <= 0:
-            print("⚠️ Position size too small or zero")
+            print(f"⚠️ Position size too small: ${qty * market_price:.2f}")
             return
 
         limit_price = self.estimate_execution_price(market_price, signal['action'], is_limit=True)
@@ -519,20 +504,23 @@ class EMAMACDRSIBot:
             order = self.exchange.place_order(
                 category="linear",
                 symbol=self.symbol,
-                side="Buy" if is_buy else "Sell",
+                side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=qty_str,
                 price=str(limit_price),
-                timeInForce="PostOnly"
+                timeInForce="PostOnly",  # Ensure we get maker fees
             )
             if order.get('retCode') == 0:
                 self.pending_order = order['result']
                 self.last_trade_time = datetime.now().timestamp()
 
-                take_profit = (
-                    limit_price * (1 + self.config['net_take_profit']/100.0) if is_buy
-                    else limit_price * (1 - self.config['net_take_profit']/100.0)
-                )
+                # Calculate TP/SL after accounting for net fees
+                if signal['action'] == 'BUY':
+                    stop_loss_price = limit_price * (1 - self.config['net_stop_loss']/100.0)
+                    take_profit = limit_price * (1 + self.config['net_take_profit']/100.0)
+                else:
+                    stop_loss_price = limit_price * (1 + self.config['net_stop_loss']/100.0)
+                    take_profit = limit_price * (1 - self.config['net_take_profit']/100.0)
 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -642,74 +630,66 @@ class EMAMACDRSIBot:
                     indicators['rsi'] < self.config['rsi_oversold']
                 ):
                     sig = "🟢 BUY SIGNAL"
+                elif indicators['rsi'] < 25 and (indicators['trend'] == 'UP' or indicators['macd_cross'] == 'UP'):
+                    sig = "🟡 WEAK BUY"
                 elif (
                     indicators['trend'] == 'DOWN' and indicators['macd_cross'] == 'DOWN' and
                     indicators['rsi'] > self.config['rsi_overbought']
                 ):
                     sig = "🔴 SELL SIGNAL"
-                parts.append(
-                    f"RSI: {indicators['rsi']:.1f} | MACD: {indicators['macd_cross']} | "
-                    f"Trend: {indicators['trend']} | {sig}"
-                )
+                elif indicators['rsi'] > 75 and (indicators['trend'] == 'DOWN' or indicators['macd_cross'] == 'DOWN'):
+                    sig = "🟠 WEAK SELL"
+                parts.append(f"{sig} | RSI: {indicators['rsi']:.1f} | MACD: {indicators['histogram']:.3f} | Trend: {indicators['trend']}")
 
-        if self.last_trade_time > 0:
-            remaining = self.config['trade_cooldown_sec'] - (datetime.now().timestamp() - self.last_trade_time)
-            if remaining > 0:
-                parts.append(f"⏰ Cooldown: {remaining:.0f}s")
-
-        print(" | ".join(parts), end='\r')
-
-    async def run_cycle(self):
-        if not await self.get_market_data():
-            return
-        await self.check_position()
-        await self.check_pending_orders()
-
-        if self.position:
-            should_close, reason = self.should_close()
-            if should_close:
-                await self.close_position(reason)
-        elif not self.pending_order:
-            signal = self.generate_signal(self.price_data)
-            if signal:
-                await self.execute_trade(signal)
-
-        self.show_status()
+        print(" | ".join(parts))
 
     async def run(self):
-        if not self.connect():
-            print("❌ Failed to connect")
-            return
-        await self.get_account_balance()
-        await self.get_instrument_info()
+        print(f"🚀 Starting EMA+MACD+RSI Bot ({'TESTNET' if self.demo_mode else 'LIVE'} mode)")
 
-        print(f"🔧 EMA + MACD + RSI bot for {self.symbol}")
-        print("✅ Strategy:")
-        print(f"   • EMA: {self.config['ema_fast']}/{self.config['ema_slow']}")
-        print(f"   • MACD: {self.config['macd_fast']}/{self.config['macd_slow']}/{self.config['macd_signal']}")
-        print(f"   • RSI: {self.config['rsi_period']} | <{self.config['rsi_oversold']} BUY | >{self.config['rsi_overbought']} SELL")
-        print(f"   • Trade cooldown: {self.config['trade_cooldown_sec']}s")
-        print(f"💰 Account Balance: ${self.account_balance:.2f}")
-        print(f"🎯 TP: {self.config['net_take_profit']:.2f}% | SL: {self.config['net_stop_loss']:.2f}%")
+        if not self.connect():
+            print("❌ Failed to connect to exchange")
+            return
+
+        print("✅ Connected to Bybit")
 
         while True:
             try:
-                await self.run_cycle()
-                await asyncio.sleep(1)
-            except KeyboardInterrupt:
-                print("\n🛑 Bot stopped")
-                try:
-                    self.exchange.cancel_all_orders(category="linear", symbol=self.symbol)
-                except Exception:
-                    pass
-                if self.position:
-                    await self.close_position("manual_stop")
-                break
+                # Update market data
+                await self.get_price_data()
+                await self.get_account_balance()
+                await self.get_positions()
+
+                # Check pending orders (may have expired)
+                if await self.check_pending_orders():
+                    self.show_status()
+                    await asyncio.sleep(5)
+                    continue
+
+                # Check exit conditions
+                exit_reason = self.check_exit_conditions()
+                if exit_reason:
+                    await self.close_position(exit_reason)
+                # Check entry signals
+                elif not self.position:
+                    signal = self.generate_signal(self.price_data)
+                    if signal:
+                        await self.execute_trade(signal)
+
+                self.show_status()
+                await asyncio.sleep(15)
+
             except Exception as e:
                 print(f"❌ Error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(30)
+
+
+# ---------------------------
+# Main
+# ---------------------------
+async def main():
+    bot = EMAMACDRSIBot()
+    await bot.run()
 
 
 if __name__ == "__main__":
-    bot = EMAMACDRSIBot()
-    asyncio.run(bot.run())
+    asyncio.run(main())

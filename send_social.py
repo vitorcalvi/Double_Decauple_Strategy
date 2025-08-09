@@ -21,86 +21,76 @@ btc_daily = 0.79  # BTC average daily return
 spy_risk = 1.2   # SPY typical daily volatility
 btc_risk = 3.5   # BTC typical daily volatility
 
+# Calculate RR ratios for comparison
+spy_rr = round(spy_daily / spy_risk, 2) if spy_risk > 0 else 0
+btc_rr = round(btc_daily / btc_risk, 2) if btc_risk > 0 else 0
+
 # Trade quality
 trade_quality = "🔥 EXCELLENT" if rr_ratio >= 3 else "✅ GOOD" if rr_ratio >= 2 else "⚠️ RISKY"
 
 # ---- CHART URLs ----
-def qc(params): return "https://quickchart.io/chart?" + u.urlencode({"c": json.dumps(params), "width": 800, "height": 600, "backgroundColor": "white"})
+def qc(params): return "https://quickchart.io/chart?" + u.urlencode({"c": json.dumps(params), "width": 800, "height": 350, "backgroundColor": "white"})
+
+# Calculate RR ratios for display
+spy_rr_display = f"{spy_rr}:1" if spy_rr > 0 else "Poor"
+btc_rr_display = f"{btc_rr}:1" if btc_rr > 0 else "Poor"
+trade_rr_display = f"{rr_ratio}:1"
 
 # Simple risk vs reward chart
 risk_reward_chart = qc({
   "type": "horizontalBar",
   "data": {
     "labels": [
-      "── Current Strategy ──",
-      "REWARD",
-      "RISK",
-      "",
-      "── SPY100 ──",
-      "REWARD",
-      "RISK",
-      "",
-      "── BTC Holding ──",
-      "REWARD",
-      "RISK"
+      "Current Strategy",
+      "SPY100",
+      "BTC Holding"
     ],
-    "datasets": [{
-      "label": "Performance %",
-      "data": [
-        0,  # Header
-        profit_pct,
-        -loss_pct,
-        0,  # Spacer
-        0,  # Header
-        spy_daily,
-        -spy_risk,
-        0,  # Spacer
-        0,  # Header
-        btc_daily,
-        -btc_risk
-      ],
-      "backgroundColor": [
-        "rgba(0,0,0,0)",         # Transparent header
-        "rgba(34,197,94,0.9)",   # Green for trade reward
-        "rgba(239,68,68,0.9)",   # Red for trade risk
-        "rgba(0,0,0,0)",         # Transparent spacer
-        "rgba(0,0,0,0)",         # Transparent header
-        "rgba(34,197,94,0.7)",   # Light green for SPY reward
-        "rgba(239,68,68,0.7)",   # Light red for SPY risk
-        "rgba(0,0,0,0)",         # Transparent spacer
-        "rgba(0,0,0,0)",         # Transparent header
-        "rgba(34,197,94,0.5)",   # Lighter green for BTC reward
-        "rgba(239,68,68,0.5)"    # Lighter red for BTC risk
-      ],
-      "borderWidth": 0
-    }]
+    "datasets": [
+      {
+        "label": "RISK",
+        "data": [-loss_pct, -spy_risk, -btc_risk],
+        "backgroundColor": "#DC2626",
+        "borderWidth": 0
+      },
+      {
+        "label": "REWARD",
+        "data": [profit_pct, spy_daily, btc_daily],
+        "backgroundColor": "#16A34A",
+        "borderWidth": 0
+      }
+    ]
   },
   "options": {
+    "indexAxis": "y",
     "scales": {
       "x": {
+        "stacked": True,
         "beginAtZero": True,
         "min": -4,
         "max": 8,
         "grid": {
-          "color": "rgba(200,200,200,0.3)"
+          "color": "rgba(200,200,200,0.3)",
+          "drawBorder": False
         },
         "ticks": {
           "stepSize": 2,
           "font": {
             "size": 14
-          }
+          },
+          "callback": "function(value) { return Math.abs(value) + '%'; }"
         }
       },
       "y": {
+        "stacked": True,
         "grid": {
           "display": False
         },
         "ticks": {
           "font": {
-            "size": 13,
-            "weight": "500"
+            "size": 16,
+            "weight": "600"
           },
-          "color": "#666"
+          "color": "#333"
         }
       }
     },
@@ -110,13 +100,42 @@ risk_reward_chart = qc({
         "position": "top",
         "labels": {
           "font": {
-            "size": 16
-          }
+            "size": 14,
+            "weight": "bold"
+          },
+          "usePointStyle": False,
+          "padding": 20,
+          "generateLabels": "function(chart) { return chart.data.datasets.map(function(dataset, i) { return { text: dataset.label, fillStyle: dataset.backgroundColor, hidden: false, index: i }; }); }"
         }
+      },
+      "title": {
+        "display": True,
+        "text": "Risk-Reward Ratios in Trading",
+        "font": {
+          "size": 18,
+          "weight": "bold"
+        },
+        "padding": 20
+      },
+      "tooltip": {
+        "callbacks": {
+          "label": "function(context) { return context.dataset.label + ': ' + Math.abs(context.parsed.x).toFixed(2) + '%'; }"
+        }
+      },
+      "datalabels": {
+        "display": True,
+        "align": "right",
+        "anchor": "end",
+        "formatter": "function(value, context) { if (context.datasetIndex === 1 && context.dataIndex === 0) return '2:1'; if (context.datasetIndex === 1 && context.dataIndex === 1) return '0.03:1'; if (context.datasetIndex === 1 && context.dataIndex === 2) return '0.23:1'; return ''; }",
+        "font": {
+          "size": 14,
+          "weight": "bold"
+        },
+        "color": "#333"
       }
     },
     "layout": {
-      "padding": 20
+      "padding": 30
     },
     "maintainAspectRatio": False,
     "responsive": True
@@ -150,6 +169,6 @@ print(f"Message: {r1.status_code}")
 r2 = requests.post(API("sendPhoto"),json={
   "chat_id":CHAT,
   "photo":risk_reward_chart,
-  "caption":f"📊 Risk-Reward Comparison: Our 2:1 RR beats buy & hold strategies"
+  "caption":f"📊 Trade smarter with {rr_ratio}:1 risk-reward ratio"
 },timeout=15)
 print(f"Chart: {r2.status_code}")

@@ -29,7 +29,7 @@ class TradeLogger:
         self.max_daily_loss = 50
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/13_{bot_name}_{symbol}.log"
         
     def generate_trade_id(self):
         self.trade_id += 1
@@ -111,7 +111,7 @@ class TradeLogger:
 
 class LSTMXGBoostBot:
     def __init__(self):
-        self.symbol = 'GBPUSDT'
+        self.symbol = 'BTCUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -451,14 +451,15 @@ class LSTMXGBoostBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Limit",
-                qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly")
-            )
+            category="linear",
+            symbol=self.symbol,
+            side="Buy" if signal['action'] == 'BUY' else "Sell",
+            orderType="Limit",
+            qty=formatted_qty,
+            price=str(limit_price),        # ← close str() here
+            timeInForce="PostOnly"         # ← belongs to place_order
+        )
+
             
             if order.get('retCode') == 0:
                 self.last_trade_time = time.time()
@@ -498,15 +499,18 @@ class LSTMXGBoostBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side=side,
-                orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
-                price=str(round(current_price * (1.001 if side == "Sell" else 0.999), 6)),
-                timeInForce="PostOnly",
-                reduceOnly=True)
+            category="linear",
+            symbol=self.symbol,
+            side=side,
+            orderType="Limit",
+            qty=self.format_qty(qty),        # ← just format the qty
+            price=str(round(
+                current_price * (1.001 if side == "Sell" else 0.999), 6
+            )),
+            timeInForce="PostOnly",
+            reduceOnly=True
+        )
+
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:

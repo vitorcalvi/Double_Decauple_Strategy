@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "LSTM_XGBOOST", "symbol": "BTCUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-09T12:28:36.920550+00:00", "expected_price": 117113.5, "actual_price": 117125.21135, "slippage": 0, "qty": 0.19, "stop_loss": 117652.274801, "take_profit": 116071.084448, "currency": "USDT", "info": "hybrid:0.443_lstm:0.477_xgb:0.393"}
