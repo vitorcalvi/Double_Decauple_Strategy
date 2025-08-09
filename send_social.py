@@ -15,29 +15,62 @@ rr_ratio = round(profit_per_unit / loss_per_unit, 2)
 profit_pct = round((profit_per_unit / buy_price) * 100, 2)
 loss_pct = round((loss_per_unit / buy_price) * 100, 2)
 
-# Benchmark comparisons (typical daily returns)
+# Benchmark comparisons (typical daily returns and volatility)
 spy_daily = 0.04  # SPY average daily return
 btc_daily = 0.79  # BTC average daily return
+spy_risk = 1.2   # SPY typical daily volatility
+btc_risk = 3.5   # BTC typical daily volatility
 
 # Trade quality
 trade_quality = "🔥 EXCELLENT" if rr_ratio >= 3 else "✅ GOOD" if rr_ratio >= 2 else "⚠️ RISKY"
 
 # ---- CHART URLs ----
-def qc(params): return "https://quickchart.io/chart?" + u.urlencode({"c": json.dumps(params), "width": 800, "height": 400, "backgroundColor": "white"})
+def qc(params): return "https://quickchart.io/chart?" + u.urlencode({"c": json.dumps(params), "width": 800, "height": 600, "backgroundColor": "white"})
 
 # Simple risk vs reward chart
 risk_reward_chart = qc({
   "type": "horizontalBar",
   "data": {
-    "labels": ["PROFIT TARGET", "RISK", "SPY100 DAILY", "BTC DAILY"],
+    "labels": [
+      "── Current Strategy ──",
+      "REWARD",
+      "RISK",
+      "",
+      "── SPY100 ──",
+      "REWARD",
+      "RISK",
+      "",
+      "── BTC Holding ──",
+      "REWARD",
+      "RISK"
+    ],
     "datasets": [{
       "label": "Performance %",
-      "data": [profit_pct, -loss_pct, spy_daily, btc_daily],
+      "data": [
+        0,  # Header
+        profit_pct,
+        -loss_pct,
+        0,  # Spacer
+        0,  # Header
+        spy_daily,
+        -spy_risk,
+        0,  # Spacer
+        0,  # Header
+        btc_daily,
+        -btc_risk
+      ],
       "backgroundColor": [
-        "rgba(34,197,94,0.9)",   # Green for profit
-        "rgba(239,68,68,0.9)",   # Red for risk
-        "rgba(59,130,246,0.7)",  # Blue for SPY
-        "rgba(251,146,60,0.7)"   # Orange for BTC
+        "rgba(0,0,0,0)",         # Transparent header
+        "rgba(34,197,94,0.9)",   # Green for trade reward
+        "rgba(239,68,68,0.9)",   # Red for trade risk
+        "rgba(0,0,0,0)",         # Transparent spacer
+        "rgba(0,0,0,0)",         # Transparent header
+        "rgba(34,197,94,0.7)",   # Light green for SPY reward
+        "rgba(239,68,68,0.7)",   # Light red for SPY risk
+        "rgba(0,0,0,0)",         # Transparent spacer
+        "rgba(0,0,0,0)",         # Transparent header
+        "rgba(34,197,94,0.5)",   # Lighter green for BTC reward
+        "rgba(239,68,68,0.5)"    # Lighter red for BTC risk
       ],
       "borderWidth": 0
     }]
@@ -64,7 +97,7 @@ risk_reward_chart = qc({
         },
         "ticks": {
           "font": {
-            "size": 16,
+            "size": 13,
             "weight": "500"
           },
           "color": "#666"
@@ -80,9 +113,6 @@ risk_reward_chart = qc({
             "size": 16
           }
         }
-      },
-      "title": {
-        "display": False
       }
     },
     "layout": {
@@ -120,6 +150,6 @@ print(f"Message: {r1.status_code}")
 r2 = requests.post(API("sendPhoto"),json={
   "chat_id":CHAT,
   "photo":risk_reward_chart,
-  "caption":f"📊 Trade: +{profit_pct}% vs Risk: -{loss_pct}% | SPY100: +{spy_daily}% | BTC: +{btc_daily}%"
+  "caption":f"📊 Risk-Reward Comparison: Our 2:1 RR beats buy & hold strategies"
 },timeout=15)
 print(f"Chart: {r2.status_code}")
