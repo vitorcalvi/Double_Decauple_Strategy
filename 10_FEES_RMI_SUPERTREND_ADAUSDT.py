@@ -649,12 +649,7 @@ class RMISupertrendBot:
         iteration = 0
         while True:
             try:
-                if self.logger.daily_pnl < -self.logger.max_daily_loss:
-                    print(f"🛑 Daily loss limit reached: ${self.logger.daily_pnl:.2f}")
-                    if self.position:
-                        await self.close_position("DAILY_LIMIT")
-                    await asyncio.sleep(3600)
-                    continue
+                
                 
                 await self.fetch_market_data()
                 self.calculate_indicators()

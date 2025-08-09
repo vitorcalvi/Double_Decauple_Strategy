@@ -301,10 +301,7 @@ class BaseAIBot:
         print('-'*60)
 
     async def run_cycle(self):
-        if self.logger.daily_pnl < -abs(self.logger.max_daily_loss):
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f}");
-            if self.position: await self.close_position('emergency_stop'); return
-        if not await self.get_market_data(): return
+        
         await self.check_position()
         if self.position:
             ok, rsn = self.should_close();

@@ -119,6 +119,7 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
+        
         self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -529,12 +530,6 @@ class EMARSIBot:
         print(" | ".join(status_parts), end='\r')
     
     async def run_cycle(self):
-        # Emergency stop check
-        if self.logger.daily_pnl < -self.logger.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: Daily loss ${abs(self.logger.daily_pnl):.2f} exceeded limit")
-            if self.position:
-                await self.close_position("emergency_stop")
-            return
         
         if not await self.get_market_data():
             return

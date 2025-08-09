@@ -652,12 +652,7 @@ class EMABBTrendBot:
 
     # ---------- main loop ----------
     async def run_cycle(self):
-        if self.logger.daily_pnl < -self.logger.max_daily_loss:
-            print(f"🔴 EMERGENCY STOP: daily PnL {self.logger.daily_pnl:.2f} < -{self.logger.max_daily_loss}")
-            if self.position:
-                await self.close_position("emergency_stop")
-            self._print_monitor()
-            return
+        
 
         if not await self.get_market_data():
             self._print_monitor()
