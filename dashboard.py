@@ -14,6 +14,7 @@ import plotly.express as px
 import pandas as pd
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
+import yfinance as yf
 
 load_dotenv(override=True)
 
@@ -27,6 +28,7 @@ class BybitDataProvider:
             api_secret=os.getenv(f"{prefix}BYBIT_API_SECRET", "")
         )
         self.data = {"positions": [], "account": {}, "last_update": None}
+        self.market_data = {"SPY": {}, "BTC": {}, "last_market_update": None}
     
     def safe_float(self, val, default=0):
         """Convert to float, handling empty strings and None"""
@@ -94,6 +96,47 @@ class BybitDataProvider:
             return entry_price + fee_per_unit
         else:
             return entry_price - fee_per_unit
+    
+    def fetch_market_data(self):
+        """Fetch SPY and BTC real-time data"""
+        try:
+            # Fetch SPY (S&P 500)
+            spy = yf.Ticker("SPY")
+            spy_info = spy.history(period="2d")  # Get 2 days to calculate daily change
+            if len(spy_info) >= 2:
+                spy_current = spy_info['Close'].iloc[-1]
+                spy_previous = spy_info['Close'].iloc[-2]
+                spy_change = spy_current - spy_previous
+                spy_change_pct = (spy_change / spy_previous) * 100
+                
+                self.market_data["SPY"] = {
+                    "price": spy_current,
+                    "change": spy_change,
+                    "change_pct": spy_change_pct,
+                    "previous_close": spy_previous
+                }
+            
+            # Fetch BTC
+            btc = yf.Ticker("BTC-USD")
+            btc_info = btc.history(period="2d")
+            if len(btc_info) >= 2:
+                btc_current = btc_info['Close'].iloc[-1]
+                btc_previous = btc_info['Close'].iloc[-2]
+                btc_change = btc_current - btc_previous
+                btc_change_pct = (btc_change / btc_previous) * 100
+                
+                self.market_data["BTC"] = {
+                    "price": btc_current,
+                    "change": btc_change,
+                    "change_pct": btc_change_pct,
+                    "previous_close": btc_previous
+                }
+            
+            self.market_data["last_market_update"] = datetime.now().strftime('%H:%M:%S')
+            
+        except Exception as e:
+            print(f"Market data fetch error: {e}")
+    
     
     def fetch_data(self):
         try:
@@ -165,6 +208,10 @@ class BybitDataProvider:
                 "last_update": datetime.now().strftime('%H:%M:%S'),
                 "demo_mode": self.demo_mode
             }
+            
+            # Also fetch market data
+            self.fetch_market_data()
+            
         except Exception as e:
             print(f"Fetch error: {e}")
     
@@ -229,7 +276,13 @@ app.layout = html.Div([
              style={'background': '#1f2547', 'padding': '10px', 'border-radius': '5px', 'margin-bottom': '20px', 'font-size': '12px', 'color': '#8892b0'}),
     
     # Stats cards
-    html.Div(id="stats-cards", style={'display': 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(200px, 1fr))', 'gap': '15px', 'margin-bottom': '30px'}),
+    html.Div(id="stats-cards", style={'display': 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(200px, 1fr))', 'gap': '15px', 'margin-bottom': '20px'}),
+    
+    # Market comparison
+    html.Div([
+        html.H3("📊 Buy & Hold vs Trading (Today)", style={'color': '#fff', 'margin-bottom': '15px'}),
+        html.Div(id="market-comparison", style={'display': 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(250px, 1fr))', 'gap': '15px'})
+    ], style={'margin-bottom': '30px'}),
     
     # Positions table
     html.Div(id="positions-table"),
@@ -245,16 +298,18 @@ app.layout = html.Div([
     
 ], style={'font-family': 'system-ui, -apple-system, sans-serif', 'background': '#0a0e27', 'color': '#fff', 'padding': '20px', 'min-height': '100vh'})
 
-@app.callback(
-    [Output('mode-badge', 'children'),
-     Output('stats-cards', 'children'),
-     Output('positions-table', 'children'),
-     Output('pnl-chart', 'figure'),
-     Output('update-time', 'children')],
-    [Input('interval-component', 'n_intervals')]
+@callback(
+    Output('mode-badge', 'children'),
+    Output('stats-cards', 'children'), 
+    Output('market-comparison', 'children'),
+    Output('positions-table', 'children'),
+    Output('pnl-chart', 'figure'),
+    Output('update-time', 'children'),
+    Input('interval-component', 'n_intervals')
 )
 def update_dashboard(n):
     data = provider.data
+    market_data = provider.market_data
     
     # Mode badge
     mode = "TESTNET" if data.get("demo_mode", True) else "LIVE"
@@ -289,6 +344,59 @@ def update_dashboard(n):
             html.Div("Positions", style={'color': '#8892b0', 'font-size': '12px', 'text-transform': 'uppercase', 'margin-bottom': '5px'}),
             html.Div(str(data.get("position_count", 0)), style={'font-size': '24px', 'font-weight': 'bold'})
         ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'})
+    ]
+    
+    # Market comparison cards
+    spy_data = market_data.get("SPY", {})
+    btc_data = market_data.get("BTC", {})
+    total_trading_pnl = data.get("total_pnl", 0)
+    
+    # Calculate trading performance as percentage (assume $10k account for comparison)
+    account_equity = data.get("account", {}).get("equity", 10000)
+    trading_pnl_pct = (total_trading_pnl / account_equity) * 100 if account_equity > 0 else 0
+    
+    market_comparison = [
+        # SPY Card
+        html.Div([
+            html.Div([
+                html.H4("SPY (S&P 500)", style={'margin': 0, 'color': '#fff'}),
+                html.Div("Buy & Hold", style={'color': '#8892b0', 'font-size': '12px'})
+            ]),
+            html.Div([
+                html.Div(f"${spy_data.get('price', 0):.2f}", style={'font-size': '24px', 'font-weight': 'bold', 'color': '#fff'}),
+                html.Div([
+                    html.Span(f"${spy_data.get('change', 0):+.2f} ", style={'color': '#00d4aa' if spy_data.get('change', 0) >= 0 else '#f6465d'}),
+                    html.Span(f"({spy_data.get('change_pct', 0):+.2f}%)", style={'color': '#00d4aa' if spy_data.get('change_pct', 0) >= 0 else '#f6465d'})
+                ], style={'font-size': '14px'})
+            ])
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
+        
+        # BTC Card
+        html.Div([
+            html.Div([
+                html.H4("BTC", style={'margin': 0, 'color': '#fff'}),
+                html.Div("Buy & Hold", style={'color': '#8892b0', 'font-size': '12px'})
+            ]),
+            html.Div([
+                html.Div(f"${btc_data.get('price', 0):,.2f}", style={'font-size': '24px', 'font-weight': 'bold', 'color': '#fff'}),
+                html.Div([
+                    html.Span(f"${btc_data.get('change', 0):+,.2f} ", style={'color': '#00d4aa' if btc_data.get('change', 0) >= 0 else '#f6465d'}),
+                    html.Span(f"({btc_data.get('change_pct', 0):+.2f}%)", style={'color': '#00d4aa' if btc_data.get('change_pct', 0) >= 0 else '#f6465d'})
+                ], style={'font-size': '14px'})
+            ])
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #2a3050'}),
+        
+        # Trading Performance Card
+        html.Div([
+            html.Div([
+                html.H4("Your Trading", style={'margin': 0, 'color': '#fff'}),
+                html.Div("1-Day Positions", style={'color': '#8892b0', 'font-size': '12px'})
+            ]),
+            html.Div([
+                html.Div(f"${total_trading_pnl:+.2f}", style={'font-size': '24px', 'font-weight': 'bold', 'color': '#00d4aa' if total_trading_pnl >= 0 else '#f6465d'}),
+                html.Div(f"({trading_pnl_pct:+.2f}%)", style={'font-size': '14px', 'color': '#00d4aa' if trading_pnl_pct >= 0 else '#f6465d'})
+            ])
+        ], style={'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 'border': '1px solid #764ba2'})  # Different border for trading
     ]
     
     # Positions table
@@ -393,10 +501,11 @@ def update_dashboard(n):
         )
     
     # Update time
-    update_time = f"Last update: {data.get('last_update', 'Never')}"
+    update_time = f"Last update: {data.get('last_update', 'Never')} | Market: {market_data.get('last_market_update', 'Never')}"
     
-    return mode, stats_cards, table, fig, update_time
+    return mode, stats_cards, market_comparison, table, fig, update_time
 
 if __name__ == '__main__':
     print("🚀 Starting Plotly Dashboard → http://localhost:8050")
+    print("📦 Required packages: pip install dash plotly pandas yfinance python-dotenv pybit")
     app.run(host='0.0.0.0', port=8050, debug=False)

@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "DYNAMIC_GRID_FIXED", "symbol": "ETHUSDT", "side": "LONG", "action": "OPEN", "ts": "2025-08-09T15:02:11.493973+00:00", "expected_price": 4203.05, "actual_price": 4203.8906, "slippage": 0.8406, "qty": 2.41, "stop_loss": 4178.6673, "take_profit": 4254.3373, "currency": "USDT", "info": "grid_level:4186.57_risk:0.1%_bal:101317.71"}
