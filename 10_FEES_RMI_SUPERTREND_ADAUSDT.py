@@ -148,7 +148,7 @@ class RMISupertrendBot:
             'max_position_size': 5000,
             'min_trade_interval': 300,
             'order_timeout': 30,
-            'volume_filter': 1.2
+            'volume_filter': 0.5
         }
         
         self.logger = TradeLogger("RMI_SUPERTREND", self.symbol)
@@ -341,7 +341,7 @@ class RMISupertrendBot:
             }
         
         # Additional long: Strong uptrend + RMI not overbought
-        elif supertrend_dir == 1 and rmi < 60 and momentum > 0.01 and rmi > rmi_prev:
+        elif supertrend_dir == 1 and rmi < 60 and momentum > 0.005 and rmi > rmi_prev:
             return {
                 'action': 'BUY',
                 'price': current_price,

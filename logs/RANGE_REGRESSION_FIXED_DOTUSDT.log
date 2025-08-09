@@ -1,0 +1,1 @@
+{"id": 1001, "bot": "RANGE_REGRESSION_FIXED", "symbol": "DOTUSDT", "side": "SHORT", "action": "OPEN", "ts": "2025-08-09T16:18:24.163507+00:00", "expected_price": 4.1024, "actual_price": 4.1028, "slippage": 0, "qty": 2161.7, "stop_loss": 4.1117, "take_profit": 4.0782, "currency": "USDT", "info": "reg:4.0912_bb:4.1056_angle:-0.1_risk:2.0%"}

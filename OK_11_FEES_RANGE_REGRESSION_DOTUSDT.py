@@ -417,7 +417,7 @@ class RangeBalancingBot:
         reg_position = (current_price - self.regression_channel['lower']) / (self.regression_channel['upper'] - self.regression_channel['lower'])
         bb_position = (current_price - bb['lower']) / (bb['upper'] - bb['lower'])
         
-        if reg_position <= 0.1 and bb_position <= 0.2:
+        if reg_position <= 0.2 and bb_position <= 0.3:
             return {
                 'action': 'BUY',
                 'price': current_price,
@@ -425,7 +425,7 @@ class RangeBalancingBot:
                 'bb_band': bb['lower'],
                 'trend_angle': self.regression_channel['angle']
             }
-        elif reg_position >= 0.9 and bb_position >= 0.8:
+        elif reg_position >= 0.8 and bb_position >= 0.7:
             return {
                 'action': 'SELL',
                 'price': current_price,
@@ -567,14 +567,14 @@ class RangeBalancingBot:
         
         try:
             order = self.exchange.place_order(
-                category="linear",
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Limit",
-                qty=self.format_qty(qty),
-                price=str(limit_price,
-                timeInForce="PostOnly")
-            )
+            category="linear",
+            symbol=self.symbol,
+            side="Buy" if signal['action'] == 'BUY' else "Sell",
+            orderType="Limit",
+            qty=self.format_qty(qty),
+            price=str(limit_price),
+            timeInForce="PostOnly"
+        )
             
             if order.get('retCode') == 0:
                 self.last_trade_time = time.time()  # Update last trade time
@@ -627,11 +627,11 @@ class RangeBalancingBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
+                qty=self.format_qty(qty),
                 price=str(limit_price),
                 timeInForce="PostOnly",
-                reduceOnly=True)
+                reduceOnly=True
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
