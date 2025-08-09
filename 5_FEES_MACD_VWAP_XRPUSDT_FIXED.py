@@ -194,67 +194,28 @@ class EMARSIBot:
         final_qty = min(raw_qty, max_qty)
         return max(final_qty, 0.1)
     
-    def format_qty(qty, min_qty=None, step=None, precision=None):
-    """Return a properly formatted quantity **rounded up** to meet exchange minimums.
-    - Rounds up to the nearest step if provided.
-    - Ensures qty >= min_qty if provided.
-    - Applies precision at the end if given.
-    Never returns "0" if a positive qty was requested; returns 0 only if qty <= 0.
-    """
-    try:
-        q = float(qty)
-    except Exception:
-        return format_qty(0 if qty<=0 else qty, min_qty=min_qty if "min_qty" in locals() else None, step=qtyStep if "qtyStep" in locals() else None, precision=None)
-    if q <= 0:
-        return format_qty(0 if qty<=0 else qty, min_qty=min_qty if "min_qty" in locals() else None, step=qtyStep if "qtyStep" in locals() else None, precision=None)
-    if step:
-        # round UP to step
-        steps = int((q + 1e-15) // step)
-        if steps * step < q:
-            steps += 1
-        q = steps * step
-    if min_qty:
-        q = max(q, float(min_qty))
-    if precision is not None:
-        fmt = "{:0." + str(int(precision)) + "f}"
-        out = fmt.format(q)
-    else:
-        out = str(q)
-    # avoid printing tiny scientific notation to strings like '0.0'
-    if float(out) <= 0:
-        # if rounding pushed to zero, bump to min_qty or one step
-        if min_qty:
-            out = str(min_qty if precision is None else ("{:0." + str(int(precision)) + "f}").format(float(min_qty)))
-        elif step:
-            out = str(step if precision is None else ("{:0." + str(int(precision)) + "f}").format(float(step)))
-        else:
-            out = "0"
-    return out
-
-# --- Fill policy improvements ---
-MAKER_OFFSETS_PCT = [0.03, 0.06, 0.10]  # percent offsets for PostOnly ladder
-MAKER_TIMEOUT_SEC = 25  # wait per step before escalating
-USE_IOC_FALLBACK = True
-
-def place_with_maker_ladder(place_limit_func, place_ioc_func, symbol, side, qty, ref_price):
-    """Try PostOnly at progressively better prices; fall back to IOC/market if allowed.
-    - place_limit_func(symbol, side, qty, price, post_only=True) must raise or return False on reject.
-    - place_ioc_func(symbol, side, qty) is used only if USE_IOC_FALLBACK.
-    """
-    last_err = None
-    for off in MAKER_OFFSETS_PCT:
+    # PATCHED: Fixed quantity formatting
+    def format_qty(self, qty):
+        min_qty = 0.1
+        qty_step = 0.1
+        min_notional = 5.0
+        
+        # Get current price
         try:
-            px = ref_price * (1 - off/100.0) if side.lower() == "buy" else ref_price * (1 + off/100.0)
-            ok = place_limit_func(symbol, side, qty, px, post_only=True)
-            if ok:
-                return True
-        except Exception as e:
-            last_err = e
-    if USE_IOC_FALLBACK and place_ioc_func:
-        try:
-            return place_ioc_func(symbol, side, qty)
-        except Exception as e:
-            last_err = e
-    if last_err:
-        raise last_err
-    return False
+            current_price = float(self.last_price) if hasattr(self, 'last_price') else 1.0
+        except:
+            current_price = 1.0
+        
+        # Round to step
+        import math
+        qty = math.floor(qty / qty_step) * qty_step
+        
+        # Ensure minimum
+        if qty < min_qty:
+            qty = min_qty
+            
+        # Check notional
+        if qty * current_price < min_notional:
+            qty = math.ceil(min_notional / current_price / qty_step) * qty_step
+            
+        return qty

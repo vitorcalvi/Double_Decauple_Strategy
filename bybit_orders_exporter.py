@@ -22,7 +22,7 @@ API_KEY = os.getenv(f'{prefix}BYBIT_API_KEY')
 API_SECRET = os.getenv(f'{prefix}BYBIT_API_SECRET')
 
 # Days to fetch (can be overridden by command line argument)
-DAYS_TO_FETCH = 2
+DAYS_TO_FETCH = 1
 if len(sys.argv) > 1:
     try:
         DAYS_TO_FETCH = int(sys.argv[1])
@@ -30,7 +30,7 @@ if len(sys.argv) > 1:
         print(f"Invalid days argument. Using default: {DAYS_TO_FETCH}")
 
 class BybitExporter:
-    def __init__(self, api_key, api_secret, testnet=True, days=2):
+    def __init__(self, api_key, api_secret, testnet=True, days=1):
         """Initialize Bybit session"""
         if not api_key or not api_secret:
             raise ValueError("API_KEY and API_SECRET must be provided")
