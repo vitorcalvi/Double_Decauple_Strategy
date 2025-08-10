@@ -5,7 +5,8 @@ logging.basicConfig(level=logging.CRITICAL)
 for logger in ['werkzeug', 'dash']: logging.getLogger(logger).setLevel(logging.CRITICAL)
 
 import dash
-from dash import dcc, html, Input, Output, dash_table, no_update
+from dash import dcc, html, Input, Output, dash_table, no_update, State, callback_context
+import dash_ag_grid as dag
 import plotly.graph_objects as go
 import pandas as pd
 from dotenv import load_dotenv
@@ -42,6 +43,56 @@ class BybitDataProvider:
             return fees + (sz - covered) * ap * 0.0002
         except: return sz * ap * 0.0002
     
+    def liquidate_position(self, symbol, side, size):
+        try:
+            self.rl()
+            close_side = "Sell" if side == "Buy" else "Buy"
+            order = self.ex.place_order(
+                category="linear",
+                symbol=symbol,
+                side=close_side,
+                orderType="Market",
+                qty=str(size),
+                reduceOnly=True
+            )
+            if order.get("retCode") == 0:
+                return True, "Position liquidated successfully"
+            else:
+                return False, f"Error: {order.get('retMsg', 'Unknown error')}"
+        except Exception as e:
+            return False, f"Exception: {str(e)}"
+    
+    def close_all_limit(self):
+        try:
+            results = []
+            for p in self.data.get("positions", []):
+                self.rl()
+                symbol, side, size, mark_price = p['symbol'], p['side'], p['size'], p['mark_price']
+                close_side = "Sell" if side == "Buy" else "Buy"
+                # Post-only: place order slightly away from mark price
+                offset = mark_price * 0.001  # 0.1% offset
+                limit_price = mark_price + offset if side == "Buy" else mark_price - offset
+                
+                order = self.ex.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=close_side,
+                    orderType="Limit",
+                    qty=str(size),
+                    price=str(round(limit_price, 2)),
+                    reduceOnly=True,
+                    timeInForce="PostOnly"
+                )
+                
+                if order.get("retCode") == 0:
+                    results.append(f"✅ {symbol}")
+                else:
+                    results.append(f"❌ {symbol}: {order.get('retMsg', 'Unknown')}")
+            
+            return True if results else False, ", ".join(results) if results else "No positions to close"
+        except Exception as e:
+            return False, f"Exception: {str(e)}"
+    
     def fetch_market(self, period='24h'):
         try:
             spy = yf.Ticker("SPY").history(period='2d', interval='1d')
@@ -68,6 +119,7 @@ class BybitDataProvider:
                 for p in pos_resp.get("result", {}).get("list", []):
                     if not (sz := self.sf(p.get("size"))): continue
                     sym, side, ap, mp = p.get("symbol", ""), p.get("side", ""), self.sf(p.get("avgPrice")), self.sf(p.get("markPrice"))
+                    lev = self.sf(p.get("leverage", 1))
                     upnl = self.sf(p.get("unrealisedPnl")) or ((mp - ap) if side == "Buy" else (ap - mp)) * sz
                     fee = self.fees(sym, sz, ap)
                     val = ap * sz
@@ -77,7 +129,8 @@ class BybitDataProvider:
                         "pnl": upnl, "fees": fee, "net_pnl": upnl - fee,
                         "breakeven": ap + (be_fee if side == "Buy" else -be_fee),
                         "pnl_pct": (upnl / val * 100) if val else 0,
-                        "value": sz * mp, "liq_price": self.sf(p.get("liqPrice"))
+                        "value": sz * mp, "liq_price": self.sf(p.get("liqPrice")),
+                        "leverage": lev
                     })
             
             self.rl(); acc = self.ex.get_wallet_balance(accountType="UNIFIED", coin="USDT")
@@ -136,7 +189,14 @@ app.layout = html.Div([
                  style={'display': 'flex', 'gap': '20px', 'align-items': 'center'})
     ], style={'background': 'linear-gradient(135deg, #667eea, #764ba2)', 'padding': '20px', 'border-radius': '10px', 'margin-bottom': '20px', 'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center'}),
     html.Div(id="stats"), html.Div([html.H3("📊 Performance", style={'color': '#fff'}), html.Div(id="perf")], style={'margin': '20px 0'}),
-    html.Div(id="pos"), html.Div([html.H3("PnL Chart", style={'color': '#fff'}), dcc.Graph(id="chart")]), html.Div(id="foot")
+    html.Div([
+        html.Button("🚫 Close All (Limit Post-Only)", id="close-all-btn", 
+                   style={'background': '#ff9800', 'color': '#fff', 'border': 'none', 'padding': '10px 20px', 
+                          'border-radius': '5px', 'cursor': 'pointer', 'margin-bottom': '10px', 'font-weight': 'bold'}),
+        html.Div(id="pos")
+    ]),
+    html.Div([html.H3("PnL Chart", style={'color': '#fff'}), dcc.Graph(id="chart")]), html.Div(id="foot"),
+    html.Div(id="liq-msg", style={'color': '#fff', 'margin': '10px 0'})
 ], style={'font-family': 'system-ui', 'background': '#0a0e27', 'color': '#fff', 'padding': '20px', 'min-height': '100vh'})
 
 @app.callback([Output('mode', 'children'), Output('stats', 'children'), Output('perf', 'children'), Output('pos', 'children'), Output('chart', 'figure'), Output('foot', 'children')],
@@ -163,21 +223,44 @@ def update(n, period):
     ], className="pc")
     
     pos = d.get("positions", [])
-    if not pos: table = html.Div("No positions", className="np")
+    if not pos: 
+        table = html.Div("No positions", className="np")
     else:
-        td = [{'Symbol': p['symbol'], 'Side': p['side'], 'Size': f"{p['size']:.4f}", 'Entry': f"${p['avg_price']:.4f}", 'Mark': f"${p['mark_price']:.4f}",
-               'PnL': f"${p['pnl']:.2f}", 'Fees': f"${p['fees']:.2f}", 'Net PnL': f"${p['net_pnl']:.2f}", 'PnL %': f"{p['pnl_pct']:.2f}%",
-               'Break-even': f"${p['breakeven']:.4f}", 'Value': f"${p['value']:.2f}"} for p in pos]
-        td.append({'Symbol': 'TOTAL', 'Side': '', 'Size': '', 'Entry': '', 'Mark': '', 'PnL': '', 'Fees': '', 
-                   'Net PnL': f"${d.get('positions_pnl', 0):.2f}", 'PnL %': '', 'Break-even': '', 'Value': ''})
-        table = dash_table.DataTable(
-            data=td, columns=[{"name": i, "id": i} for i in td[0].keys()],
-            style_table={'background': '#1a1f3a', 'border-radius': '10px'},
-            style_header={'background': '#0f1529', 'color': '#8892b0', 'font-weight': 'bold'},
-            style_cell={'background': '#1a1f3a', 'color': '#fff', 'padding': '12px', 'border': '1px solid #2a3050'},
-            style_data_conditional=[{'if': {'row_index': len(pos)}, 'background': '#0f1529', 'font-weight': 'bold'},
-                                   {'if': {'filter_query': '{Side} = Buy'}, 'color': '#00d4aa'},
-                                   {'if': {'filter_query': '{Side} = Sell'}, 'color': '#f6465d'}]
+        td = []
+        for p in pos:
+            row = {
+                'Symbol': p['symbol'], 
+                'Side': p['side'], 
+                'Size': f"{p['size']:.4f}", 
+                'Leverage': f"{p.get('leverage', 1):.1f}x",
+                'Entry': f"${p['avg_price']:.4f}", 
+                'Mark': f"${p['mark_price']:.4f}",
+                'PnL': f"${p['pnl']:.2f}", 
+                'Fees': f"${p['fees']:.2f}", 
+                'Net PnL': f"${p['net_pnl']:.2f}", 
+                'PnL %': f"{p['pnl_pct']:.2f}%",
+                'Break-even': f"${p['breakeven']:.4f}", 
+                'Value': f"${p['value']:.2f}",
+                'Action': 'Liquidate'
+            }
+            td.append(row)
+        
+        columnDefs = [
+            {"field": "Symbol"}, {"field": "Side"}, {"field": "Size"}, {"field": "Leverage"},
+            {"field": "Entry"}, {"field": "Mark"},
+            {"field": "PnL"}, {"field": "Fees"}, {"field": "Net PnL"}, {"field": "PnL %"},
+            {"field": "Break-even"}, {"field": "Value"},
+            {"field": "Action", "cellStyle": {"backgroundColor": "#f6465d", "color": "#fff", "cursor": "pointer", "textAlign": "center"}}
+        ]
+        
+        table = dag.AgGrid(
+            id="positions-grid",
+            rowData=td,
+            columnDefs=columnDefs,
+            defaultColDef={"resizable": True, "sortable": True},
+            dashGridOptions={"domLayout": "autoHeight"},
+            style={"height": None},
+            className="ag-theme-alpine-dark"
         )
     
     if pos:
@@ -192,6 +275,40 @@ def update(n, period):
     foot = f"Updated: {d.get('last_update', 'Never')} | Market: {m.get('update', 'Never')}" + (f" | Baseline: ${d.get('starting_equity'):.2f}" if d.get('starting_equity') else "")
     return "TESTNET" if d.get("demo_mode") else "LIVE", stats, perf_div, table, fig, foot
 
+@app.callback(Output('liq-msg', 'children'),
+              [Input('positions-grid', 'cellClicked'), Input('close-all-btn', 'n_clicks')],
+              State('positions-grid', 'rowData'),
+              prevent_initial_call=True)
+def handle_actions(cell, n_clicks, row_data):
+    ctx = callback_context
+    if not ctx.triggered: return no_update
+    
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    if trigger_id == 'close-all-btn':
+        success, msg = prov.close_all_limit()
+        if success:
+            prov.fetch()
+            return html.Div(f"📝 Limit orders placed: {msg}", style={'color': '#ff9800'})
+        else:
+            return html.Div(f"❌ {msg}", style={'color': '#f6465d'})
+    
+    elif trigger_id == 'positions-grid' and cell and cell.get('colId') == 'Action':
+        row_index = cell.get('rowIndex')
+        if row_data and row_index < len(row_data):
+            symbol = row_data[row_index].get('Symbol')
+            for p in prov.data.get("positions", []):
+                if p['symbol'] == symbol:
+                    success, msg = prov.liquidate_position(p['symbol'], p['side'], p['size'])
+                    if success:
+                        prov.fetch()
+                        return html.Div(f"✅ {symbol} {msg}", style={'color': '#00d4aa'})
+                    else:
+                        return html.Div(f"❌ {symbol} {msg}", style={'color': '#f6465d'})
+            return html.Div(f"❌ Position not found: {symbol}", style={'color': '#f6465d'})
+    
+    return no_update
+
 app.index_string = '''<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}<style>
 .sr{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-bottom:15px}
 .sc{background:#1a1f3a;padding:20px;border-radius:10px;border:1px solid #2a3050}
@@ -199,6 +316,9 @@ app.index_string = '''<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</titl
 .sv{font-size:24px;font-weight:bold}
 .pc{background:#1a1f3a;padding:20px;border-radius:10px;border:1px solid #2a3050}
 .np{text-align:center;padding:40px;background:#1a1f3a;border-radius:10px;border:1px solid #2a3050}
+.ag-cell[col-id="Action"]{padding:5px!important;border-radius:4px}
+.ag-cell[col-id="Action"]:hover{background:#d63547!important;transform:scale(0.98)}
+#close-all-btn:hover{background:#e68a00!important}
 </style></head><body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
 
 if __name__ == '__main__':
