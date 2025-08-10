@@ -115,7 +115,7 @@ class BybitDataProvider:
                         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
                         adx = dx
             
-            # Determine trend based on 200-EMA
+            # Determine trend based on 200-EMA (for BTC trading)
             if current_price > ema200 and ema_slope > 0.1:  # Price above EMA and slope is positive
                 trend = "LONG ONLY"
                 trend_color = "#00d4aa"
@@ -129,7 +129,7 @@ class BybitDataProvider:
                 trend = "NEUTRAL"
                 trend_color = "#8892b0"
             
-            # Determine volatility status based on ATR%
+            # Determine volatility status based on ATR% (for BTC trading)
             if atr_pct < 0.6:
                 volatility = "TOO LOW"
                 vol_color = "#f6465d"
@@ -391,13 +391,13 @@ def update(n):
     btc = html.Span(f"${m.get('BTC', {}).get('price', 0):,.0f} ({m.get('BTC', {}).get('change_pct', 0):+.1f}%)",
                     style={'color': col(m.get('BTC', {}).get('change_pct', 0))})
     
-    # Trend indicator with ADX
+    # Trend indicator with ADX for BTC
     trend = html.Div([
         html.Span(ind.get("trend", "ANALYZING"), style={'color': ind.get("trend_color", "#8892b0"), 'font-weight': 'bold'}),
         html.Span(f" (ADX: {ind.get('adx', 0):.0f})", style={'color': '#8892b0', 'font-size': '11px'})
     ])
     
-    # Volatility indicator with ATR%
+    # Volatility indicator with ATR% for BTC
     volatility = html.Div([
         html.Span(ind.get("volatility", "CHECKING"), style={'color': ind.get("vol_color", "#8892b0"), 'font-weight': 'bold'}),
         html.Span(f" (ATR: {ind.get('atr_pct', 0):.2f}%)", style={'color': '#8892b0', 'font-size': '11px'})

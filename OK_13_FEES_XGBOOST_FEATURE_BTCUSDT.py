@@ -451,15 +451,14 @@ class LSTMXGBoostBot:
         
         try:
             order = self.exchange.place_order(
-            category="linear",
-            symbol=self.symbol,
-            side="Buy" if signal['action'] == 'BUY' else "Sell",
-            orderType="Limit",
-            qty=formatted_qty,
-            price=str(limit_price),        # ← close str() here
-            timeInForce="PostOnly"         # ← belongs to place_order
-        )
-
+                category="linear",
+                symbol=self.symbol,
+                side="Buy" if signal['action'] == 'BUY' else "Sell",
+                orderType="Limit",
+                qty=formatted_qty,
+                price=str(limit_price),
+                timeInForce="PostOnly"
+            )
             
             if order.get('retCode') == 0:
                 self.last_trade_time = time.time()
@@ -499,18 +498,15 @@ class LSTMXGBoostBot:
         
         try:
             order = self.exchange.place_order(
-            category="linear",
-            symbol=self.symbol,
-            side=side,
-            orderType="Limit",
-            qty=self.format_qty(qty),        # ← just format the qty
-            price=str(round(
-                current_price * (1.001 if side == "Sell" else 0.999), 6
-            )),
-            timeInForce="PostOnly",
-            reduceOnly=True
-        )
-
+                category="linear",
+                symbol=self.symbol,
+                side=side,
+                orderType="Limit",
+                qty=self.format_qty(qty),
+                price=str(round(current_price * (1.001 if side == "Sell" else 0.999), 6)),
+                timeInForce="PostOnly",
+                reduceOnly=True
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
@@ -557,8 +553,6 @@ class LSTMXGBoostBot:
         print("-" * 50)
     
     async def run_cycle(self):
-        
-            
         if not await self.get_market_data():
             return
         
