@@ -164,20 +164,16 @@ class MLGridBot:
             return False
     
     async def get_account_balance(self):
-        """Get account balance - FIXED from Reference_OK_6"""
+        """Get account balance for position sizing"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
-                lst = wallet['result']['list']
-                if lst:
-                    for c in lst[0]['coin']:
-                        if c['coin'] == 'USDT':
-                            self.account_balance = float(c['availableToWithdraw'])
-                            return True
+                balance_info = wallet['result']['list'][0]['coin'][0]
+                self.account_balance = float(balance_info['walletBalance'])
+                return True
         except Exception as e:
             print(f"❌ Balance error: {e}")
-        self.account_balance = 1000.0
-        return True
+        return False
     
     async def get_instrument_info(self):
         """Get instrument precision for proper formatting"""

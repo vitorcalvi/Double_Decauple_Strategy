@@ -33,7 +33,7 @@ class TradeLogger:
         self.exchange = None
         
         os.makedirs("logs", exist_ok=True)
-        self.log_file = f"logs/{bot_name}_{symbol}.log"
+        self.log_file = f"logs/11_{bot_name}_{symbol}.log"
     
     def format_qty(self, qty):
         """Format quantity to appropriate precision"""

@@ -154,18 +154,20 @@ class EmaRsiTrader:
 
     
     async def get_account_balance(self):
-        """Get account balance - FIXED from Reference_OK_6"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
-                lst = wallet['result']['list']
-                if lst:
-                    for c in lst[0]['coin']:
-                        if c['coin'] == 'USDT':
-                            self.account_balance = float(c['availableToWithdraw'])
-                            return True
+                balance_list = wallet['result']['list']
+                if balance_list:
+                    for coin in balance_list[0]['coin']:
+                        if coin['coin'] == 'USDT':
+                            balance_str = coin.get('availableToWithdraw') or coin.get('walletBalance')
+                            if balance_str and str(balance_str).strip():
+                                self.account_balance = float(balance_str)
+                                return True
         except Exception as e:
-            print(f"❌ Balance error: {e}")
+            print(f"⚠️ balance fallback: {e}")
+        
         self.account_balance = 1000.0
         return True
     
