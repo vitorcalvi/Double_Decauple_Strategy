@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bybit Plotly Dashboard - Fixed Callback Issue
+Streamlined Bybit Plotly Dashboard
 """
 
 import os
@@ -21,164 +21,155 @@ class BybitDataProvider:
     def __init__(self, demo_mode=True):
         self.demo_mode = demo_mode
         prefix = "TESTNET_" if demo_mode else "LIVE_"
-        self.exchange = HTTP(
-            demo=demo_mode,
-            api_key=os.getenv(f"{prefix}BYBIT_API_KEY", ""),
-            api_secret=os.getenv(f"{prefix}BYBIT_API_SECRET", "")
-        )
+        
+        api_key = os.getenv(f"{prefix}BYBIT_API_KEY", "")
+        api_secret = os.getenv(f"{prefix}BYBIT_API_SECRET", "")
+        
+        if not api_key or not api_secret:
+            raise ValueError(f"Missing API credentials. Set {prefix}BYBIT_API_KEY and {prefix}BYBIT_API_SECRET")
+        
+        self.exchange = HTTP(demo=demo_mode, api_key=api_key, api_secret=api_secret)
+        
+        # Test connection
+        try:
+            server_time = self.exchange.get_server_time()
+            if server_time.get('retCode') != 0:
+                raise ConnectionError("Failed to connect to Bybit")
+            print(f"✅ Connected to {'Testnet' if demo_mode else 'Live'} Bybit")
+        except Exception as e:
+            raise ConnectionError(f"Connection failed: {e}")
+        
         self.data = {"positions": [], "account": {}, "last_update": None}
         self.market_data = {"SPY": {}, "BTC": {}, "last_market_update": None}
         self.starting_equity = None
-        self.last_reset_date = None
+        self.last_reset_date = datetime.now().strftime('%Y-%m-%d')
+        self.last_api_call = 0
     
     def safe_float(self, val, default=0):
-        if val in [None, '', 'null']:
-            return default
         try:
-            return float(val)
-        except (ValueError, TypeError):
+            return float(val) if val not in [None, '', 'null'] else default
+        except:
             return default
     
-    def safe_divide(self, numerator, denominator, default=0):
-        return (numerator / denominator) if denominator > 0 else default
+    def _rate_limit(self):
+        """Simple rate limiting - 200ms between API calls"""
+        now = time.time()
+        if now - self.last_api_call < 0.2:
+            time.sleep(0.2)
+        self.last_api_call = time.time()
     
     def get_position_fees(self, symbol, size, avg_price):
+        """Simplified fee calculation - uses actual fees from recent orders"""
         try:
+            self._rate_limit()
             orders = self.exchange.get_order_history(
-                category="linear", symbol=symbol, orderStatus="Filled", limit=200
+                category="linear", symbol=symbol, orderStatus="Filled", limit=50
             )
             
-            if orders.get("retCode") != 0:
-                return size * avg_price * 0.0002
-            
-            total_fees = 0
-            total_qty = 0
-            
-            for order in orders.get("result", {}).get("list", []):
-                order_qty = self.safe_float(order.get("cumExecQty"))
-                order_fee = self.safe_float(order.get("cumExecFee"))
+            if orders.get("retCode") == 0:
+                total_fees = 0
+                qty_covered = 0
                 
-                if total_qty < size:
-                    qty_to_count = min(order_qty, size - total_qty)
-                    fee_proportion = self.safe_divide(qty_to_count, order_qty)
-                    total_fees += abs(order_fee * fee_proportion)
-                    total_qty += qty_to_count
-                    
-                    if total_qty >= size:
+                for order in orders.get("result", {}).get("list", []):
+                    if qty_covered >= size:
                         break
-            
-            if total_qty < size:
-                remaining_qty = size - total_qty
-                total_fees += remaining_qty * avg_price * 0.0002
-            
-            return total_fees
-            
+                        
+                    order_qty = self.safe_float(order.get("cumExecQty"))
+                    order_fee = self.safe_float(order.get("cumExecFee"))
+                    
+                    qty_to_count = min(order_qty, size - qty_covered)
+                    fee_proportion = qty_to_count / order_qty if order_qty > 0 else 0
+                    total_fees += abs(order_fee * fee_proportion)
+                    qty_covered += qty_to_count
+                
+                # Use maker fee for uncovered quantity
+                if qty_covered < size:
+                    remaining_qty = size - qty_covered
+                    total_fees += remaining_qty * avg_price * 0.0002
+                
+                return total_fees
         except Exception as e:
-            print(f"Error getting fees for {symbol}: {e}")
-            return size * avg_price * 0.0002
-    
-    def calculate_breakeven(self, entry_price, size, fees, side):
-        if size <= 0:
-            return entry_price
+            print(f"Fee calculation error for {symbol}: {e}")
         
-        exit_fee_estimate = size * entry_price * 0.0002
-        total_fees = fees + exit_fee_estimate
-        fee_per_unit = self.safe_divide(total_fees, size)
-        
-        return entry_price + fee_per_unit if side == "Buy" else entry_price - fee_per_unit
+        # Fallback to maker fee estimate
+        return size * avg_price * 0.0002
     
     def fetch_market_data(self, time_period='24h'):
+        """Simplified market data fetching with fallbacks"""
         try:
-            period_map = {'1h': '1d', '4h': '1d', '12h': '1d', '24h': '2d'}
-            interval_map = {'1h': '1h', '4h': '1h', '12h': '1h', '24h': '1d'}
-            
-            period = period_map.get(time_period, '2d')
-            interval = interval_map.get(time_period, '1d')
-            
-            # SPY data
-            spy = yf.Ticker("SPY")
-            spy_info = spy.history(period=period, interval=interval)
-            
-            if len(spy_info) >= 2:
-                spy_current = spy_info['Close'].iloc[-1]
-                
-                lookback_map = {'1h': -2, '4h': -5, '12h': -13, '24h': -2}
-                lookback = lookback_map.get(time_period, -2)
-                
-                if len(spy_info) >= abs(lookback):
-                    spy_previous = spy_info['Close'].iloc[lookback]
+            # SPY from yfinance
+            try:
+                spy = yf.Ticker("SPY").history(period='2d', interval='1d')
+                if len(spy) >= 2:
+                    spy_current = spy['Close'].iloc[-1]
+                    spy_previous = spy['Close'].iloc[-2]
+                    spy_change_pct = ((spy_current - spy_previous) / spy_previous) * 100
+                    
+                    self.market_data["SPY"] = {
+                        "price": spy_current,
+                        "change_pct": spy_change_pct,
+                        "time_period": time_period
+                    }
                 else:
-                    spy_previous = spy_info['Close'].iloc[-2] if len(spy_info) >= 2 else spy_current
-                
-                spy_change = spy_current - spy_previous
-                spy_change_pct = self.safe_divide(spy_change, spy_previous) * 100
-                
+                    raise Exception("Insufficient SPY data")
+            except Exception as e:
+                print(f"SPY data error: {e}")
+                # Fallback values
                 self.market_data["SPY"] = {
-                    "price": spy_current,
-                    "change": spy_change,
-                    "change_pct": spy_change_pct
+                    "price": 0,
+                    "change_pct": 0,
+                    "time_period": time_period
                 }
             
-            # BTC data
+            # BTC from Bybit
             try:
+                self._rate_limit()
                 btc_ticker = self.exchange.get_tickers(category="linear", symbol="BTCUSDT")
                 if btc_ticker.get("retCode") == 0:
                     btc_data = btc_ticker.get("result", {}).get("list", [])
                     if btc_data:
                         btc_info = btc_data[0]
                         btc_current = self.safe_float(btc_info.get("lastPrice"))
-                        
-                        if time_period == '24h':
-                            btc_change_pct = self.safe_float(btc_info.get("price24hPcnt")) * 100
-                            btc_change = self.safe_float(btc_info.get("price24h"))
-                        else:
-                            interval_map_bybit = {'1h': '60', '4h': '240', '12h': '720'}
-                            bybit_interval = interval_map_bybit.get(time_period, '60')
-                            
-                            kline_resp = self.exchange.get_kline(
-                                category="linear", symbol="BTCUSDT", 
-                                interval=bybit_interval, limit=2
-                            )
-                            
-                            if kline_resp.get("retCode") == 0:
-                                klines = kline_resp.get("result", {}).get("list", [])
-                                if len(klines) >= 2:
-                                    current_close = float(klines[0][4])
-                                    previous_close = float(klines[1][4])
-                                    btc_change = current_close - previous_close
-                                    btc_change_pct = self.safe_divide(btc_change, previous_close) * 100
-                                    btc_current = current_close
-                                else:
-                                    btc_change = btc_change_pct = 0
-                            else:
-                                btc_change = btc_change_pct = 0
+                        btc_change_pct = self.safe_float(btc_info.get("price24hPcnt")) * 100
                         
                         self.market_data["BTC"] = {
                             "price": btc_current,
-                            "change": btc_change,
-                            "change_pct": btc_change_pct
+                            "change_pct": btc_change_pct,
+                            "time_period": time_period
                         }
                     else:
                         raise Exception("No BTC data")
                 else:
-                    raise Exception(f"Bybit API error: {btc_ticker.get('retMsg', 'Unknown')}")
+                    raise Exception(f"API error: {btc_ticker.get('retMsg', 'Unknown')}")
             except Exception as e:
-                print(f"BTC fetch failed: {e}")
-                self.market_data["BTC"] = {"price": 0, "change": 0, "change_pct": 0}
+                print(f"BTC data error: {e}")
+                # Fallback values
+                self.market_data["BTC"] = {
+                    "price": 0,
+                    "change_pct": 0,
+                    "time_period": time_period
+                }
             
             self.market_data["last_market_update"] = datetime.now().strftime('%H:%M:%S')
             
         except Exception as e:
-            print(f"Market data error: {e}")
+            print(f"Market data fetch error: {e}")
+            # Ensure we have default market data structure
+            if "SPY" not in self.market_data:
+                self.market_data["SPY"] = {"price": 0, "change_pct": 0, "time_period": time_period}
+            if "BTC" not in self.market_data:
+                self.market_data["BTC"] = {"price": 0, "change_pct": 0, "time_period": time_period}
     
     def fetch_data(self):
         try:
+            # Reset daily tracking if new day
             current_date = datetime.now().strftime('%Y-%m-%d')
             if self.last_reset_date != current_date:
                 self.starting_equity = None
                 self.last_reset_date = current_date
             
-            # Fetch positions
+            # Get positions
+            self._rate_limit()
             pos_resp = self.exchange.get_positions(category="linear", settleCoin="USDT")
             positions = []
             
@@ -193,29 +184,48 @@ class BybitDataProvider:
                             mark_price = self.safe_float(p.get("markPrice"))
                             unrealized_pnl = self.safe_float(p.get("unrealisedPnl"))
                             
+                            # Calculate PnL if not provided
                             if unrealized_pnl == 0:
-                                is_buy = side == "Buy"
-                                unrealized_pnl = (mark_price - avg_price) * size if is_buy else (avg_price - mark_price) * size
+                                if side == "Buy":
+                                    unrealized_pnl = (mark_price - avg_price) * size
+                                else:
+                                    unrealized_pnl = (avg_price - mark_price) * size
                             
                             fees = self.get_position_fees(symbol, size, avg_price)
-                            breakeven = self.calculate_breakeven(avg_price, size, fees, side)
                             net_pnl = unrealized_pnl - fees
                             position_value = avg_price * size
-                            pnl_pct = self.safe_divide(unrealized_pnl, position_value) * 100
+                            pnl_pct = (unrealized_pnl / position_value) * 100 if position_value > 0 else 0
+                            
+                            # Calculate breakeven
+                            exit_fee = size * mark_price * 0.0002  # Estimated exit fee
+                            total_fees = fees + exit_fee
+                            fee_per_unit = total_fees / size if size > 0 else 0
+                            
+                            if side == "Buy":
+                                breakeven = avg_price + fee_per_unit
+                            else:
+                                breakeven = avg_price - fee_per_unit
                             
                             positions.append({
-                                "symbol": symbol, "side": side, "size": size,
-                                "avg_price": avg_price, "mark_price": mark_price,
-                                "pnl": unrealized_pnl, "fees": fees, "net_pnl": net_pnl,
-                                "breakeven": breakeven, "pnl_pct": pnl_pct,
+                                "symbol": symbol,
+                                "side": side,
+                                "size": size,
+                                "avg_price": avg_price,
+                                "mark_price": mark_price,
+                                "pnl": unrealized_pnl,
+                                "fees": fees,
+                                "net_pnl": net_pnl,
+                                "breakeven": breakeven,
+                                "pnl_pct": pnl_pct,
                                 "value": size * mark_price,
                                 "liq_price": self.safe_float(p.get("liqPrice"))
                             })
                     except Exception as e:
-                        print(f"Error processing position: {e}")
+                        print(f"Error processing position {p.get('symbol', 'unknown')}: {e}")
                         continue
             
-            # Fetch account
+            # Get account data
+            self._rate_limit()
             acc_resp = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             account = {}
             current_equity = 0
@@ -231,25 +241,28 @@ class BybitDataProvider:
                                 "unrealized_pnl": self.safe_float(coin.get("unrealisedPnl"))
                             }
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error processing account data: {e}")
             
+            # Set starting equity on first run of day
             if self.starting_equity is None and current_equity > 0:
                 self.starting_equity = current_equity
-                print(f"Starting equity set for {current_date}: ${self.starting_equity:.2f}")
             
-            daily_equity_change = current_equity - (self.starting_equity or current_equity)
-            daily_equity_change_pct = self.safe_divide(daily_equity_change, self.starting_equity or current_equity) * 100
+            # Calculate daily performance
+            daily_change = current_equity - (self.starting_equity or current_equity)
+            daily_change_pct = (daily_change / (self.starting_equity or current_equity)) * 100 if (self.starting_equity or current_equity) > 0 else 0
             
-            current_positions_pnl = sum(p["net_pnl"] for p in positions)
-            current_positions_pct = self.safe_divide(current_positions_pnl, current_equity) * 100
+            # Current positions PnL
+            positions_pnl = sum(p["net_pnl"] for p in positions)
+            positions_pct = (positions_pnl / current_equity) * 100 if current_equity > 0 else 0
             
             self.data = {
-                "positions": positions, "account": account,
-                "current_positions_pnl": current_positions_pnl,
-                "current_positions_pct": current_positions_pct,
-                "daily_equity_change": daily_equity_change,
-                "daily_equity_change_pct": daily_equity_change_pct,
+                "positions": positions,
+                "account": account,
+                "positions_pnl": positions_pnl,
+                "positions_pct": positions_pct,
+                "daily_change": daily_change,
+                "daily_change_pct": daily_change_pct,
                 "starting_equity": self.starting_equity,
                 "position_count": len(positions),
                 "last_update": datetime.now().strftime('%H:%M:%S'),
@@ -257,275 +270,287 @@ class BybitDataProvider:
             }
             
         except Exception as e:
-            print(f"Fetch error: {e}")
+            print(f"Data fetch error: {e}")
+            # Keep existing data on error, just update timestamp
+            if hasattr(self, 'data') and self.data:
+                self.data["last_update"] = f"ERROR: {datetime.now().strftime('%H:%M:%S')}"
 
 # Initialize
 provider = BybitDataProvider(demo_mode=True)
 
-def update_loop():
+def data_loop():
+    """Background thread for data fetching with error handling"""
+    error_count = 0
+    max_errors = 5
+    
     while True:
-        provider.fetch_data()
-        if not provider.market_data.get("last_market_update"):
-            provider.fetch_market_data('24h')
-        time.sleep(2)
+        try:
+            provider.fetch_data()
+            if not provider.market_data.get("last_market_update"):
+                provider.fetch_market_data('24h')
+            
+            # Reset error count on success
+            error_count = 0
+            time.sleep(3)
+            
+        except Exception as e:
+            error_count += 1
+            print(f"Data loop error ({error_count}/{max_errors}): {e}")
+            
+            if error_count >= max_errors:
+                print("❌ Too many errors in data loop, using exponential backoff")
+                time.sleep(min(60 * error_count, 300))  # Cap at 5 minutes
+                error_count = 0  # Reset after long sleep
+            else:
+                time.sleep(10)  # Short sleep for minor errors
 
-threading.Thread(target=update_loop, daemon=True).start()
+threading.Thread(target=data_loop, daemon=True).start()
 
-# Initialize Dash app - CRITICAL: Disable hot reload to prevent callback conflicts
+# Dash App
 app = dash.Dash(__name__)
 app.title = "Bybit Dashboard"
 
-# CRITICAL: Suppress callback exceptions to prevent timing issues
-app.config.suppress_callback_exceptions = True
-
-# Styles
-CARD_STYLE = {
-    'background': '#1a1f3a', 'padding': '20px', 'border-radius': '10px', 
-    'border': '1px solid #2a3050'
-}
-
-# Layout - ENSURE all IDs are unique and match callback exactly
 app.layout = html.Div([
-    dcc.Interval(id='interval-component', interval=2000, n_intervals=0),
+    dcc.Interval(id='interval', interval=3000, n_intervals=0),
     
     # Header
     html.Div([
-        html.H1("📈 Bybit Position Dashboard", style={'color': '#fff', 'margin': 0}),
+        html.H1("📈 Bybit Dashboard", style={'color': '#fff', 'margin': 0}),
         html.Div([
-            html.Div(id="mode-badge", children="Loading...", style={
-                'background': 'rgba(255,255,255,0.2)', 'padding': '5px 15px', 
-                'border-radius': '20px', 'font-weight': 'bold', 'margin-right': '15px'
-            }),
-            html.Div([
-                html.Label("Time Period:", style={'color': '#8892b0', 'margin-right': '10px', 'font-size': '14px'}),
-                dcc.Dropdown(
-                    id='time-period-dropdown',
-                    options=[
-                        {'label': '1 Hour', 'value': '1h'},
-                        {'label': '4 Hours', 'value': '4h'},
-                        {'label': '12 Hours', 'value': '12h'},
-                        {'label': '24 Hours', 'value': '24h'}
-                    ],
-                    value='24h',
-                    style={'width': '120px', 'color': '#000'},
-                    clearable=False
-                )
-            ], style={'display': 'flex', 'align-items': 'center'})
-        ], style={'display': 'flex', 'align-items': 'center'})
-    ], style={'background': 'linear-gradient(135deg, #667eea, #764ba2)', 'padding': '20px', 'border-radius': '10px', 'margin-bottom': '20px', 'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center'}),
-    
-    # Info note
-    html.Div("ℹ️ Fees shown are actual fees paid for current positions (limit orders: 0.02%, market orders: 0.055%)", 
-             style={**CARD_STYLE, 'margin-bottom': '20px', 'font-size': '12px', 'color': '#8892b0'}),
-    
-    # Components with default content to prevent initial errors
-    html.Div(id="stats-cards", children=[], style={
-        'display': 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(200px, 1fr))', 
-        'gap': '15px', 'margin-bottom': '20px'
+            html.Div(id="mode-badge"),
+            dcc.Dropdown(
+                id='time-dropdown',
+                options=[
+                    {'label': '1H', 'value': '1h'},
+                    {'label': '4H', 'value': '4h'},
+                    {'label': '12H', 'value': '12h'},
+                    {'label': '24H', 'value': '24h'}
+                ],
+                value='24h',
+                style={'width': '80px', 'color': '#000'},
+                clearable=False
+            )
+        ], style={'display': 'flex', 'gap': '20px', 'align-items': 'center'})
+    ], style={
+        'background': 'linear-gradient(135deg, #667eea, #764ba2)',
+        'padding': '20px',
+        'border-radius': '10px',
+        'margin-bottom': '20px',
+        'display': 'flex',
+        'justify-content': 'space-between',
+        'align-items': 'center'
     }),
     
+    # Stats
+    html.Div(id="stats"),
+    
+    # Performance
     html.Div([
-        html.H3(id="performance-title", children="📊 Daily Performance", style={'color': '#fff', 'margin-bottom': '15px'}),
-        html.Div(id="market-comparison", children="Loading market data...")
-    ], style={'margin-bottom': '30px'}),
+        html.H3("📊 Performance", style={'color': '#fff'}),
+        html.Div(id="performance")
+    ], style={'margin': '20px 0'}),
     
-    html.Div(id="positions-table", children="Loading positions..."),
+    # Positions
+    html.Div(id="positions"),
     
+    # Chart
     html.Div([
-        html.H3("PnL Distribution", style={'color': '#fff', 'margin-bottom': '10px'}),
-        dcc.Graph(id="pnl-chart", figure=go.Figure())
-    ], style={'margin-top': '30px'}),
+        html.H3("PnL Chart", style={'color': '#fff'}),
+        dcc.Graph(id="chart")
+    ]),
     
-    html.Div(id="update-time", children="Initializing...", style={
-        'text-align': 'center', 'color': '#8892b0', 'margin-top': '20px', 'font-size': '12px'
-    })
+    # Footer
+    html.Div(id="footer")
     
 ], style={
-    'font-family': 'system-ui, -apple-system, sans-serif', 'background': '#0a0e27', 
-    'color': '#fff', 'padding': '20px', 'min-height': '100vh'
+    'font-family': 'system-ui',
+    'background': '#0a0e27',
+    'color': '#fff',
+    'padding': '20px',
+    'min-height': '100vh'
 })
 
-# CRITICAL: Single callback with exact ID matching and proper @ decorator
 @app.callback(
     [Output('mode-badge', 'children'),
-     Output('stats-cards', 'children'),
-     Output('performance-title', 'children'),
-     Output('market-comparison', 'children'),
-     Output('positions-table', 'children'),
-     Output('pnl-chart', 'figure'),
-     Output('update-time', 'children')],
-    [Input('interval-component', 'n_intervals'),
-     Input('time-period-dropdown', 'value')],
-    prevent_initial_call=False
+     Output('stats', 'children'),
+     Output('performance', 'children'),
+     Output('positions', 'children'),
+     Output('chart', 'figure'),
+     Output('footer', 'children')],
+    [Input('interval', 'n_intervals'),
+     Input('time-dropdown', 'value')]
 )
-def update_dashboard(n, time_period):
-    # Input validation with proper defaults
-    if time_period is None or time_period not in ['1h', '4h', '12h', '24h']:
-        time_period = '24h'
+def update_all(n, time_period):
+    data = provider.data
     
-    time_labels = {'1h': '1 Hour', '4h': '4 Hours', '12h': '12 Hours', '24h': 'Daily'}
+    # Update market data for selected period
+    provider.fetch_market_data(time_period)
+    market = provider.market_data
     
-    try:
-        data = provider.data
-        provider.fetch_market_data(time_period)
-        market_data = provider.market_data
-        
-        # Mode badge
-        mode = "TESTNET" if data.get("demo_mode", True) else "LIVE"
-        
-        # Performance title
-        performance_title = f"📊 {time_labels.get(time_period, 'Daily')} Performance"
-        
-        # Stats cards
-        account = data.get("account", {})
-        total_fees = sum(p.get("fees", 0) for p in data.get("positions", []))
-        
-        def create_stat_card(title, value, color='#fff'):
-            return html.Div([
-                html.Div(title, style={
-                    'color': '#8892b0', 'font-size': '12px', 
-                    'text-transform': 'uppercase', 'margin-bottom': '5px'
-                }),
-                html.Div(value, style={'font-size': '24px', 'font-weight': 'bold', 'color': color})
-            ], style=CARD_STYLE)
-        
-        unrealized_pnl = account.get('unrealized_pnl', 0)
-        stats_cards = [
-            create_stat_card("Equity", f"${account.get('equity', 0):.2f}"),
-            create_stat_card("Available", f"${account.get('available', 0):.2f}"),
-            create_stat_card("Unrealized PnL", f"${unrealized_pnl:.2f}", 
-                           '#00d4aa' if unrealized_pnl >= 0 else '#f6465d'),
-            create_stat_card("Total Fees Paid", f"${total_fees:.2f}", '#ffa500'),
-            create_stat_card("Positions", str(data.get("position_count", 0)))
-        ]
-        
-        # Market comparison
-        spy_data = market_data.get("SPY", {})
-        btc_data = market_data.get("BTC", {})
-        
-        def format_performance(price, change_pct, name):
-            if price == 0:
-                return html.Div(f"{name}: Data unavailable", style={'color': '#8892b0'})
-            color = '#00d4aa' if change_pct >= 0 else '#f6465d'
-            time_label = time_labels.get(time_period, 'Daily')
-            return html.Div([
-                html.Span(f"{name}: ", style={'color': '#8892b0'}),
-                html.Span(f"${price:,.2f} ", style={'color': '#fff'}),
-                html.Span(f"({change_pct:+.2f}%)", style={'color': color}),
-                html.Span(f" {time_label.lower()}", style={'color': '#8892b0', 'font-size': '11px'})
-            ])
-        
-        current_positions_pnl = data.get("current_positions_pnl", 0)
-        current_positions_pct = data.get("current_positions_pct", 0)
-        daily_equity_change = data.get("daily_equity_change", 0)
-        daily_equity_change_pct = data.get("daily_equity_change_pct", 0)
-        
-        market_comparison = html.Div([
+    # Mode badge
+    mode = "TESTNET" if data.get("demo_mode", True) else "LIVE"
+    
+    # Stats cards
+    account = data.get("account", {})
+    total_fees = sum(p.get("fees", 0) for p in data.get("positions", []))
+    
+    stats = html.Div([
+        # Row 1
+        html.Div([
             html.Div([
-                format_performance(spy_data.get('price', 0), spy_data.get('change_pct', 0), "SPY"),
-                format_performance(btc_data.get('price', 0), btc_data.get('change_pct', 0), "BTC"),
-            ], style={'display': 'flex', 'justify-content': 'space-around', 'margin-bottom': '10px'}),
-            
+                html.Div("Equity", className="stat-label"),
+                html.Div(f"${account.get('equity', 0):.2f}", className="stat-value")
+            ], className="stat-card"),
             html.Div([
-                html.Div([
-                    html.Span("Open Positions: ", style={'color': '#8892b0'}),
-                    html.Span(f"${current_positions_pnl:+.2f} ", 
-                             style={'color': '#00d4aa' if current_positions_pnl >= 0 else '#f6465d'}),
-                    html.Span(f"({current_positions_pct:+.2f}%)", 
-                             style={'color': '#00d4aa' if current_positions_pct >= 0 else '#f6465d'})
-                ]),
-                html.Div([
-                    html.Span("Daily Total: ", style={'color': '#8892b0'}),
-                    html.Span(f"${daily_equity_change:+.2f} ", 
-                             style={'color': '#00d4aa' if daily_equity_change >= 0 else '#f6465d'}),
-                    html.Span(f"({daily_equity_change_pct:+.2f}%)", 
-                             style={'color': '#00d4aa' if daily_equity_change_pct >= 0 else '#f6465d'})
-                ])
-            ], style={'display': 'flex', 'justify-content': 'space-around'})
-        ], style=CARD_STYLE)
+                html.Div("Available", className="stat-label"),
+                html.Div(f"${account.get('available', 0):.2f}", className="stat-value")
+            ], className="stat-card"),
+            html.Div([
+                html.Div("Unrealized PnL", className="stat-label"),
+                html.Div(f"${account.get('unrealized_pnl', 0):.2f}", 
+                        className="stat-value",
+                        style={'color': '#00d4aa' if account.get('unrealized_pnl', 0) >= 0 else '#f6465d'})
+            ], className="stat-card")
+        ], className="stat-row"),
         
-        # Positions table
-        positions = data.get("positions", [])
-        if not positions:
-            table = html.Div("No open positions", style={
-                **CARD_STYLE, 'text-align': 'center', 'padding': '40px'
-            })
-        else:
-            table_data = []
-            for p in positions:
-                table_data.append({
-                    'Symbol': p['symbol'], 'Side': p['side'], 'Size': f"{p['size']:.4f}",
-                    'Entry': f"${p['avg_price']:.4f}", 'Mark': f"${p['mark_price']:.4f}",
-                    'Unrealized PnL': f"${p['pnl']:.2f}", 'Fees Paid': f"${p['fees']:.2f}",
-                    'Net PnL': f"${p['net_pnl']:.2f}", 'PnL %': f"{p['pnl_pct']:.2f}%",
-                    'Break-even': f"${p['breakeven']:.4f}", 'Value': f"${p['value']:.2f}",
-                    'Liq Price': f"${p['liq_price']:.4f}" if p['liq_price'] > 0 else "—"
-                })
-            
+        # Row 2
+        html.Div([
+            html.Div([
+                html.Div("Fees Paid", className="stat-label"),
+                html.Div(f"${total_fees:.2f}", className="stat-value", style={'color': '#ffa500'})
+            ], className="stat-card"),
+            html.Div([
+                html.Div("Positions", className="stat-label"),
+                html.Div(str(data.get("position_count", 0)), className="stat-value")
+            ], className="stat-card"),
+            html.Div([
+                html.Div("Daily Change", className="stat-label"),
+                html.Div(f"${data.get('daily_change', 0):+.2f}", 
+                        className="stat-value",
+                        style={'color': '#00d4aa' if data.get('daily_change', 0) >= 0 else '#f6465d'})
+            ], className="stat-card")
+        ], className="stat-row")
+    ])
+    
+    # Performance comparison
+    spy_data = market.get("SPY", {})
+    btc_data = market.get("BTC", {})
+    
+    performance = html.Div([
+        html.Div([
+            html.Div(f"SPY: ${spy_data.get('price', 0):,.2f} ({spy_data.get('change_pct', 0):+.2f}%)",
+                    style={'color': '#00d4aa' if spy_data.get('change_pct', 0) >= 0 else '#f6465d'}),
+            html.Div(f"BTC: ${btc_data.get('price', 0):,.0f} ({btc_data.get('change_pct', 0):+.2f}%)",
+                    style={'color': '#00d4aa' if btc_data.get('change_pct', 0) >= 0 else '#f6465d'})
+        ], style={'display': 'flex', 'justify-content': 'space-around', 'margin-bottom': '10px'}),
+        
+        html.Div([
+            html.Div(f"Open Positions: ${data.get('positions_pnl', 0):+.2f} ({data.get('positions_pct', 0):+.2f}%)",
+                    style={'color': '#00d4aa' if data.get('positions_pnl', 0) >= 0 else '#f6465d'}),
+            html.Div(f"Daily Total: ${data.get('daily_change', 0):+.2f} ({data.get('daily_change_pct', 0):+.2f}%)",
+                    style={'color': '#00d4aa' if data.get('daily_change', 0) >= 0 else '#f6465d'})
+        ], style={'display': 'flex', 'justify-content': 'space-around'})
+    ], className="performance-card")
+    
+    # Positions table
+    positions = data.get("positions", [])
+    if not positions:
+        table = html.Div("No positions", className="no-positions")
+    else:
+        table_data = []
+        for p in positions:
             table_data.append({
-                'Symbol': 'TOTAL', 'Side': '', 'Size': '', 'Entry': '', 'Mark': '',
-                'Unrealized PnL': '', 'Fees Paid': '', 'Net PnL': f"${current_positions_pnl:.2f}",
-                'PnL %': '', 'Break-even': '', 'Value': '', 'Liq Price': ''
+                'Symbol': p['symbol'],
+                'Side': p['side'],
+                'Size': f"{p['size']:.4f}",
+                'Entry': f"${p['avg_price']:.4f}",
+                'Mark': f"${p['mark_price']:.4f}",
+                'PnL': f"${p['pnl']:.2f}",
+                'Fees': f"${p['fees']:.2f}",
+                'Net PnL': f"${p['net_pnl']:.2f}",
+                'PnL %': f"{p['pnl_pct']:.2f}%",
+                'Break-even': f"${p['breakeven']:.4f}",
+                'Value': f"${p['value']:.2f}"
             })
-            
-            table = dash_table.DataTable(
-                data=table_data,
-                columns=[{"name": i, "id": i} for i in table_data[0].keys()],
-                style_table={'background': '#1a1f3a', 'border': '1px solid #2a3050', 'border-radius': '10px', 'overflow': 'hidden'},
-                style_header={
-                    'background': '#0f1529', 'color': '#8892b0', 'font-size': '11px',
-                    'text-transform': 'uppercase', 'padding': '12px', 'font-weight': 'bold'
-                },
-                style_cell={
-                    'background': '#1a1f3a', 'color': '#fff', 'padding': '12px',
-                    'font-size': '14px', 'border': '1px solid #2a3050'
-                },
-                style_data_conditional=[
-                    {'if': {'row_index': len(positions)}, 'background': '#0f1529', 'font-weight': 'bold'},
-                    {'if': {'filter_query': '{Side} = Buy'}, 'color': '#00d4aa'},
-                    {'if': {'filter_query': '{Side} = Sell'}, 'color': '#f6465d'}
-                ]
-            )
         
-        # PnL Chart
-        if positions:
-            df = pd.DataFrame(positions)
-            colors = ['#00d4aa' if pnl >= 0 else '#f6465d' for pnl in df['net_pnl']]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df['symbol'], y=df['net_pnl'], marker_color=colors,
-                text=[f"${pnl:.2f}" for pnl in df['net_pnl']], textposition='auto'
-            ))
-            
-            fig.update_layout(
-                title="Net PnL by Position", xaxis_title="Symbol", yaxis_title="Net PnL ($)",
-                plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a', font=dict(color='#fff'),
-                showlegend=False
-            )
-            fig.update_xaxes(gridcolor='#2a3050')
-            fig.update_yaxes(gridcolor='#2a3050', zeroline=True, zerolinecolor='#8892b0')
-        else:
-            fig = go.Figure()
-            fig.update_layout(
-                title="No positions to display", plot_bgcolor='#1a1f3a',
-                paper_bgcolor='#1a1f3a', font=dict(color='#fff')
-            )
+        # Add total
+        table_data.append({
+            'Symbol': 'TOTAL', 'Side': '', 'Size': '', 'Entry': '', 'Mark': '', 'PnL': '',
+            'Fees': '', 'Net PnL': f"${data.get('positions_pnl', 0):.2f}",
+            'PnL %': '', 'Break-even': '', 'Value': ''
+        })
         
-        # Update time
-        starting_equity = data.get("starting_equity", 0)
-        update_time = f"Last update: {data.get('last_update', 'Never')} | Market: {market_data.get('last_market_update', 'Never')}"
-        if starting_equity:
-            update_time += f" | Daily baseline: ${starting_equity:.2f}"
+        table = dash_table.DataTable(
+            data=table_data,
+            columns=[{"name": i, "id": i} for i in table_data[0].keys()],
+            style_table={'background': '#1a1f3a', 'border-radius': '10px'},
+            style_header={'background': '#0f1529', 'color': '#8892b0', 'font-weight': 'bold'},
+            style_cell={'background': '#1a1f3a', 'color': '#fff', 'padding': '12px', 'border': '1px solid #2a3050'},
+            style_data_conditional=[
+                {'if': {'row_index': len(positions)}, 'background': '#0f1529', 'font-weight': 'bold'},
+                {'if': {'filter_query': '{Side} = Buy'}, 'color': '#00d4aa'},
+                {'if': {'filter_query': '{Side} = Sell'}, 'color': '#f6465d'}
+            ]
+        )
+    
+    # PnL Chart
+    if positions:
+        df = pd.DataFrame(positions)
+        colors = ['#00d4aa' if pnl >= 0 else '#f6465d' for pnl in df['net_pnl']]
         
-        return mode, stats_cards, performance_title, market_comparison, table, fig, update_time
+        fig = go.Figure(data=[
+            go.Bar(x=df['symbol'], y=df['net_pnl'], marker_color=colors,
+                  text=[f"${pnl:.2f}" for pnl in df['net_pnl']], textposition='auto')
+        ])
         
-    except Exception as e:
-        print(f"Callback error: {e}")
-        # Return safe defaults that match expected structure
-        return "ERROR", [], "Error", html.Div("Error loading data"), html.Div("Error"), go.Figure(), "Error"
+        fig.update_layout(
+            title="Net PnL by Position",
+            plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a',
+            font=dict(color='#fff'), showlegend=False,
+            xaxis_title="Symbol", yaxis_title="Net PnL ($)"
+        )
+        fig.update_xaxes(gridcolor='#2a3050')
+        fig.update_yaxes(gridcolor='#2a3050', zeroline=True, zerolinecolor='#8892b0')
+    else:
+        fig = go.Figure()
+        fig.update_layout(title="No positions", plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a', font=dict(color='#fff'))
+    
+    # Footer
+    footer = f"Updated: {data.get('last_update', 'Never')} | Market: {market.get('last_market_update', 'Never')}"
+    if data.get('starting_equity'):
+        footer += f" | Baseline: ${data.get('starting_equity'):.2f}"
+    
+    return mode, stats, performance, table, fig, footer
+
+# CSS
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 15px; }
+            .stat-card { background: #1a1f3a; padding: 20px; border-radius: 10px; border: 1px solid #2a3050; }
+            .stat-label { color: #8892b0; font-size: 12px; text-transform: uppercase; margin-bottom: 5px; }
+            .stat-value { font-size: 24px; font-weight: bold; }
+            .performance-card { background: #1a1f3a; padding: 20px; border-radius: 10px; border: 1px solid #2a3050; }
+            .no-positions { text-align: center; padding: 40px; background: #1a1f3a; border-radius: 10px; border: 1px solid #2a3050; }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
 
 if __name__ == '__main__':
-    print("🚀 Starting Plotly Dashboard → http://localhost:8050")
-    print("📦 Required packages: pip install dash plotly pandas yfinance python-dotenv pybit")
+    print("🚀 Bybit Dashboard → http://localhost:8050")
     app.run(host='0.0.0.0', port=8050, debug=False)

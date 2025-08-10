@@ -571,7 +571,16 @@ class EMABBTrendBot:
         limit_price = self.format_price(limit_price)
         
         try:
-            resp = self.exchange.place_order(category="linear", symbol=self.symbol, side=side, orderType="Limit", qty=qty, price=limit_price, timeInForce="PostOnly", reduceOnly=True, )
+            resp = self.exchange.place_order(
+                category="linear", 
+                symbol=self.symbol, 
+                side=side, 
+                orderType="Limit", 
+                qty=qty, 
+                price=limit_price, 
+                timeInForce="PostOnly", 
+                reduceOnly=True,
+            )
             
             if resp.get("retCode") == 0:
                 if self.current_trade_id:
@@ -583,8 +592,8 @@ class EMABBTrendBot:
                     )
                     self.current_trade_id = None
                 print(f"💰 Closed: {reason}")
-                self.position = None
-                self.last_signal = None
+                # REMOVED: self.position = None  # Let check_position() handle this
+                # REMOVED: self.last_signal = None
             else:
                 print(f"❌ close_order retCode={resp.get('retCode')} msg={resp.get('retMsg')}")
         except Exception as e:
