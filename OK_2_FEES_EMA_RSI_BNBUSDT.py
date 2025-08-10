@@ -121,7 +121,6 @@ class TradeLogger:
 
 class EMARSIBot:
     def __init__(self):
-        
         self.symbol = 'BNBUSDT'
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
@@ -133,7 +132,7 @@ class EMARSIBot:
         self.position = None
         self.pending_order = None
         self.price_data = pd.DataFrame()
-        self.account_balance = 1000.0
+        self.account_balance = 0  # NO FALLBACK - start at 0
         
         # Configuration with ZERO SLIPPAGE settings
         self.config = {
@@ -250,18 +249,55 @@ class EMARSIBot:
 
     
     async def get_account_balance(self):
+        """Get account balance - NO FALLBACK"""
         try:
             result = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-            if result.get('retCode') == 0:
-                balance_list = result['result']['list']
-                if balance_list:
-                    for coin in balance_list[0]['coin']:
-                        if coin['coin'] == 'USDT':
-                            self.account_balance = float(coin['availableToWithdraw'])
-                            return True
-        except:
-            self.account_balance = 1000
-        return False
+            if result.get('retCode') != 0:
+                print(f"❌ Failed to get wallet balance: {result.get('retMsg')}")
+                return False
+                
+            balance_list = result.get('result', {}).get('list', [])
+            if not balance_list:
+                print("❌ No wallet data returned")
+                return False
+                
+            # Try multiple possible balance fields (testnet may use different ones)
+            for coin_data in balance_list[0].get('coin', []):
+                if coin_data.get('coin') == 'USDT':
+                    # Check multiple balance fields in order of preference
+                    balance_fields = [
+                        'availableToWithdraw',
+                        'walletBalance',
+                        'equity',
+                        'availableBalance',
+                        'balance'
+                    ]
+                    
+                    for field in balance_fields:
+                        balance_value = coin_data.get(field)
+                        if balance_value is not None:
+                            try:
+                                # Convert to float and validate
+                                balance = float(balance_value)
+                                if balance >= 0:  # Valid balance
+                                    self.account_balance = balance
+                                    print(f"✅ Balance from {field}: ${balance:.2f}")
+                                    return True
+                            except (ValueError, TypeError):
+                                continue
+                    
+                    # If we get here, no valid balance field was found
+                    print(f"❌ No valid balance field in USDT data")
+                    print(f"   Available fields: {list(coin_data.keys())}")
+                    print(f"   Values: {coin_data}")
+                    return False
+                    
+            print("❌ USDT not found in wallet")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Balance error: {e}")
+            return False
     
     async def get_instrument_info(self):
         try:
@@ -274,9 +310,11 @@ class EMARSIBot:
         except:
             pass
         return False
-    
+
     def calculate_position_size(self, price, stop_loss_price):
+        """Updated position sizing that checks for valid balance"""
         if self.account_balance <= 0:
+            print("❌ No valid account balance for position sizing")
             return 0
         
         risk_amount = self.account_balance * self.config['risk_per_trade'] / 100
@@ -289,6 +327,7 @@ class EMARSIBot:
         notional = position_size * price
         
         return position_size if notional >= self.config['min_notional'] else 0
+
     
     def format_price(self, price):
         return round(price / self.tick_size) * self.tick_size
@@ -298,25 +337,50 @@ class EMARSIBot:
         return f"{formatted:.2f}"
     
     async def check_pending_orders(self):
-        # Clear pending orders after timeout
-        if self.pending_order and time.time() - self.last_trade_time > 30:
-            self.pending_order = False
-            print("✓ Cleared stale pending order")
-            
+        """Fixed pending orders check without repeated messages"""
         try:
             orders = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
             if orders.get('retCode') != 0:
-                return False
-            
-            order_list = orders['result']['list']
-            if not order_list:
                 self.pending_order = None
                 return False
             
-            self.pending_order = order_list[0]
-            return True
-        except:
+            order_list = orders.get('result', {}).get('list', [])
+            
+            if not order_list:
+                # Only clear and notify if we previously had a pending order
+                if self.pending_order:
+                    print("✓ Pending order cleared")
+                    self.pending_order = None
+                return False
+            
+            # Check if order is stale
+            if order_list:
+                order = order_list[0]
+                created_time = int(order.get('createdTime', 0)) / 1000
+                current_time = time.time()
+                
+                if created_time > 0 and (current_time - created_time) > 30:
+                    # Cancel stale order
+                    try:
+                        self.exchange.cancel_order(
+                            category="linear",
+                            symbol=self.symbol,
+                            orderId=order['orderId']
+                        )
+                        print(f"✓ Cancelled stale order (age: {current_time - created_time:.0f}s)")
+                    except:
+                        pass
+                    self.pending_order = None
+                    return False
+                
+                self.pending_order = order
+                return True
+                
+        except Exception as e:
+            print(f"❌ Error checking pending orders: {e}")
+            self.pending_order = None
             return False
+
     
     def calculate_indicators(self, df):
         if len(df) < max(self.config['ema_slow'], self.config['rsi_period']) + 1:
@@ -458,8 +522,11 @@ class EMARSIBot:
                 return True, "ema_crossover"
         
         return False, ""
-    
+
+
     async def execute_trade(self, signal):
+        """Updated execute_trade that requires valid balance"""
+        # Check position
         await self.check_position()
         if self.position:
             print("⚠️ Position already exists, skipping trade")
@@ -469,17 +536,26 @@ class EMARSIBot:
             print("⚠️ Pending order exists, skipping trade")
             return
         
+        # Check cooldown
         time_since_last = datetime.now().timestamp() - self.last_trade_time
         if time_since_last < self.trade_cooldown:
             print(f"⚠️ Trade cooldown active, wait {self.trade_cooldown - time_since_last:.0f}s")
             return
         
-        await self.get_account_balance()
+        # Update balance - MUST succeed to continue
+        if not await self.get_account_balance():
+            print("❌ Cannot execute trade - failed to get account balance")
+            return
+        
+        # Verify we have a valid balance
+        if self.account_balance <= 0:
+            print("❌ Cannot execute trade - account balance is 0 or invalid")
+            return
         
         market_price = signal['price']
         is_buy = signal['action'] == 'BUY'
         stop_loss_price = (market_price * (1 - self.config['net_stop_loss']/100) if is_buy 
-                          else market_price * (1 + self.config['net_stop_loss']/100))
+                        else market_price * (1 + self.config['net_stop_loss']/100))
         
         qty = self.calculate_position_size(market_price, stop_loss_price)
         
@@ -498,7 +574,7 @@ class EMARSIBot:
             self.last_trade_time = datetime.now().timestamp()
             
             take_profit = (actual_price * (1 + self.config['net_take_profit']/100) if is_buy 
-                         else actual_price * (1 - self.config['net_take_profit']/100))
+                        else actual_price * (1 - self.config['net_take_profit']/100))
             
             self.current_trade_id, _ = self.logger.log_trade_open(
                 side=signal['action'],
@@ -507,11 +583,11 @@ class EMARSIBot:
                 qty=qty,
                 stop_loss=stop_loss_price,
                 take_profit=take_profit,
-                info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}"
+                info=f"RSI:{signal['rsi']:.1f}_Trend:{signal['action']}_Balance:{self.account_balance:.2f}"
             )
             
             print(f"✅ {signal['action']}: {self.format_qty(qty)} @ ${actual_price:.2f}")
-            print(f"   📊 RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.0f}")
+            print(f"   📊 RSI: {signal['rsi']:.1f} | Balance: ${self.account_balance:.2f}")
             print(f"   ✅ ZERO SLIPPAGE with PostOnly")
 
     async def close_position(self, reason):
@@ -616,14 +692,28 @@ class EMARSIBot:
         
         self.show_status()
 
-    
     async def run(self):
+        """Updated run method that requires successful balance retrieval"""
         if not self.connect():
-            print("❌ Failed to connect")
+            print("❌ Failed to connect to exchange")
             return
         
-        await self.get_account_balance()
-        await self.get_instrument_info()
+        # Get balance - exit if it fails
+        if not await self.get_account_balance():
+            print("❌ Failed to get account balance - cannot continue")
+            print("   Please check:")
+            print("   1. API keys are correct and have proper permissions")
+            print("   2. Unified trading account is enabled")
+            print("   3. You have USDT in your account")
+            return
+        
+        if not await self.get_instrument_info():
+            print("⚠️ Using default instrument info")
+        
+        # Only proceed if we have a valid balance
+        if self.account_balance <= 0:
+            print("❌ Account balance is 0 - cannot trade")
+            return
         
         print(f"🔧 EMA + RSI Bot for {self.symbol} - ZERO SLIPPAGE VERSION")
         print(f"✅ FEATURES:")
@@ -650,7 +740,6 @@ class EMARSIBot:
             except Exception as e:
                 print(f"❌ Error: {e}")
                 await asyncio.sleep(5)
-
 if __name__ == "__main__":
     bot = EMARSIBot()
     asyncio.run(bot.run())
