@@ -7,6 +7,7 @@ import json
 import time
 import math
 from datetime import datetime, timezone
+from decimal import Decimal
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
@@ -16,10 +17,23 @@ load_dotenv()
 def _round_step(x: float, step: float) -> float:
     if step <= 0:
         return float(x)
+    # floor to step (kept for qty), but we quantize precisely elsewhere
     return math.floor(float(x) / step + 1e-12) * step
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+def _decimals_from_step(step: float) -> int:
+    """Get exact number of decimals from an exchange step like 0.01 -> 2."""
+    s = format(step, "f")
+    if "." not in s:
+        return 0
+    frac = s.split(".")[1].rstrip("0")
+    return len(frac)
+
+def _quantize(value: float, step: float) -> float:
+    """Quantize value to exchange step exactly (no float drift)."""
+    return float(Decimal(str(value)).quantize(Decimal(str(step))))
 
 
 class TradeLogger:
@@ -45,7 +59,8 @@ class TradeLogger:
 
     def log_trade_open(self, side, expected_price, actual_price, qty, stop_loss, take_profit, info=""):
         trade_id = self.generate_trade_id()
-        slippage = 0.0  # PostOnly = targeting zero
+        # Keep the same "maker = zero" assumption for display; real slippage computed on close anyway
+        slippage = 0.0
 
         log_entry = {
             "id": trade_id,
@@ -80,7 +95,11 @@ class TradeLogger:
 
     def log_trade_close(self, trade_id, expected_exit, actual_exit, reason,
                         fees_entry_bps=0.01, fees_exit_bps=0.01):
-        """fees_*_bps positive = cost, negative = rebate (VIP maker)."""
+        """
+        Log close with net PnL.
+        NOTE: despite the argument name 'bps', these values are treated as PERCENT (e.g., 0.01 == 0.01%).
+        This preserves current external behavior.
+        """
         if trade_id not in self.open_trades:
             return None
 
@@ -93,7 +112,7 @@ class TradeLogger:
         else:
             gross_pnl = (t["entry_price"] - float(actual_exit)) * t["qty"]
 
-        # Maker-only: use maker bps for both legs (we only submit PostOnly)
+        # Maker-only: treat fees as PERCENT (kept for compatibility)
         entry_fee = t["entry_price"] * t["qty"] * (fees_entry_bps / 100.0)
         exit_fee  = float(actual_exit) * t["qty"] * (fees_exit_bps / 100.0)
         total_fees = entry_fee + exit_fee
@@ -159,8 +178,8 @@ class EMARSIBot:
             'rsi_oversold': 35,
             'rsi_overbought': 65,
             'risk_per_trade': 1.0,      # % of balance
-            'maker_offset_pct': 0.02,   # entry limit offset
-            'maker_bps': 0.01,          # +cost (0.01%) or rebate if negative
+            'maker_offset_pct': 0.02,   # entry limit offset (percent)
+            'maker_bps': 0.01,          # percent, e.g., 0.01 == 0.01%
             'net_take_profit': 0.86,    # %
             'net_stop_loss': 0.43,      # %
             'order_timeout': 30,
@@ -168,6 +187,8 @@ class EMARSIBot:
             'limit_order_retries': 3,
             # maker-only mode: ALL orders are Limit + PostOnly (no market)
             'maker_only_mode': True,
+            # optional: add a protective stop market (reduce-only). Default off to preserve behavior.
+            'protective_stop_market': False,
         }
 
         self.tick_size = 0.01
@@ -182,7 +203,7 @@ class EMARSIBot:
         self.current_trade_id = None
 
         # Track our resting exit orders and soft stop levels when maker-only
-        self.exit_orders = {'tp': None, 'sl': None}  # {'tp': {'id':..., 'px':...}, 'sl': {'id':..., 'px':...}}
+        self.exit_orders = {'tp': None, 'sl': None}
         self.soft_stop = None  # price
 
     def connect(self):
@@ -199,21 +220,19 @@ class EMARSIBot:
                 info = result['result']['list'][0]
                 self.tick_size = float(info['priceFilter']['tickSize'])
                 self.qty_step = float(info['lotSizeFilter']['qtyStep'])
-                # infer decimals for formatting
-                self.price_decimals = max(0, str(self.tick_size)[::-1].find('.'))
-                self.qty_decimals = max(0, str(self.qty_step)[::-1].find('.'))
+                # exact decimals for formatting
+                self.price_decimals = _decimals_from_step(self.tick_size)
+                self.qty_decimals = _decimals_from_step(self.qty_step)
                 return True
         except Exception:
             pass
         return False
 
     def format_price(self, price):
-        px = _round_step(price, self.tick_size)
-        return float(f"{px:.{self.price_decimals}f}")
+        return float(f"{_quantize(price, self.tick_size):.{self.price_decimals}f}")
 
     def format_qty(self, qty):
-        q = _round_step(qty, self.qty_step)
-        return float(f"{q:.{self.qty_decimals}f}")
+        return float(f"{_quantize(qty, self.qty_step):.{self.qty_decimals}f}")
 
     async def get_account_balance(self):
         try:
@@ -267,10 +286,7 @@ class EMARSIBot:
         loss = (-delta.clip(upper=0)).rolling(self.config['rsi_period']).mean()
         rs = gain / (loss.replace(0, pd.NA))
         rsi = 100 - (100 / (1 + rs))
-        if pd.isna(rsi.iloc[-1]):
-            rsi_val = 50.0
-        else:
-            rsi_val = float(rsi.iloc[-1])
+        rsi_val = 50.0 if pd.isna(rsi.iloc[-1]) else float(rsi.iloc[-1])
 
         return {
             'trend': 'UP' if ema_fast > ema_slow else 'DOWN',
@@ -291,13 +307,13 @@ class EMARSIBot:
 
         price = float(df['close'].iloc[-1])
 
-        # Primary RSI extremes
+        # Primary RSI extremes (kept as-is)
         if ind['rsi'] < 30:
             return {'action': 'BUY', 'price': price, 'rsi': ind['rsi']}
         if ind['rsi'] > 70:
             return {'action': 'SELL', 'price': price, 'rsi': ind['rsi']}
 
-        # Secondary: pullback-with-trend
+        # Secondary: pullback-with-trend (kept as-is)
         if ind['trend'] == 'UP' and ind['rsi'] < 45:
             return {'action': 'BUY', 'price': price, 'rsi': ind['rsi']}
         if ind['trend'] == 'DOWN' and ind['rsi'] > 55:
@@ -309,14 +325,24 @@ class EMARSIBot:
         if self.account_balance <= 0:
             print("❌ No valid account balance for position sizing")
             return 0.0
+        
         risk_amount = self.account_balance * self.config['risk_per_trade'] / 100.0
         stop_distance = abs(float(price) - float(stop_loss_price))
         if stop_distance <= 0:
             return 0.0
+        
         qty = risk_amount / stop_distance
         notional = qty * float(price)
+        
+        # Add maximum position limit (e.g., 50% of balance)
+        max_notional = self.account_balance * 0.5  # or whatever leverage you want
+        if notional > max_notional:
+            qty = max_notional / float(price)
+            notional = qty * float(price)
+        
         if notional < self.config['min_notional']:
             return 0.0
+        
         return qty
 
     async def check_position(self):
@@ -326,10 +352,13 @@ class EMARSIBot:
                 self.position = None
                 return False
             cur = None
-            for p in r['result']['list']:
-                if float(p.get('size', 0)) > 0:
-                    cur = p
-                    break
+            for p in r.get('result', {}).get('list', []):
+                try:
+                    if float(p.get('size', 0)) > 0:
+                        cur = p
+                        break
+                except Exception:
+                    continue
             if cur is None:
                 self.position = None
                 return False
@@ -354,19 +383,36 @@ class EMARSIBot:
         """Ignore reduce-only (TP/SL) when deciding if an entry is pending."""
         orders = await self.get_open_orders()
         for od in orders:
-            # Some fields may be strings
             ro = od.get('reduceOnly')
             if isinstance(ro, str):
                 ro = (ro.lower() == 'true')
+            # treat missing reduceOnly as False (entry)
             if not ro:
                 return True
         return False
+
+    def _order_filled_avg_price(self, order_id):
+        """Fetch order history to resolve actual avgPrice & cumExecQty."""
+        try:
+            hist = self.exchange.get_order_history(category="linear", symbol=self.symbol, orderId=order_id)
+            if hist.get("retCode") == 0 and hist.get("result", {}).get("list"):
+                h = hist["result"]["list"][0]
+                cum = float(h.get("cumExecQty", 0) or 0)
+                avg = float(h.get("avgPrice", 0) or 0)
+                status = h.get("orderStatus", "")
+                return cum, avg, status
+        except Exception:
+            pass
+        return 0.0, 0.0, ""
 
     async def execute_limit_order(self, side, qty, price, is_reduce=False, rest=False):
         """
         Maker PostOnly limit.
         - If rest=False: wait for fill (poll); cancel if not filled within timeout.
         - If rest=True: just place and return orderId (do NOT cancel).
+        Returns:
+            if rest=True: orderId (str) or None
+            else: filled_avg_price (float) or None
         """
         q = self.format_qty(qty)
         limit_price = self.format_price(price)
@@ -395,9 +441,19 @@ class EMARSIBot:
             t0 = time.time()
             while time.time() - t0 < self.config['order_timeout']:
                 await asyncio.sleep(1)
+                # Check if still open
                 oo = self.exchange.get_open_orders(category="linear", symbol=self.symbol, orderId=oid)
-                if oo['retCode'] == 0 and not oo['result']['list']:
-                    return float(limit_price)  # assumed filled at our limit
+                if oo.get('retCode') == 0:
+                    open_list = oo.get('result', {}).get('list', [])
+                    if open_list:
+                        continue  # still open
+                # Not open anymore: check history to resolve fill
+                cum, avg, status = self._order_filled_avg_price(oid)
+                if cum > 0 and status in ("Filled", "PartiallyFilledCanceled", "Cancelled"):
+                    return float(avg) if avg > 0 else float(limit_price)
+                # If no cum execs, treat as not filled (likely cancelled by exchange due to PostOnly)
+                break
+
             # cancel if not filled
             try:
                 self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=oid)
@@ -434,6 +490,29 @@ class EMARSIBot:
             self.exit_orders['sl'] = {'id': oid, 'px': limit_px}
         return limit_px, oid
 
+    async def place_hard_sl_order(self, is_long, qty, stop_px):
+        """
+        Optional protective stop-market reduce-only (default OFF to preserve behavior).
+        Depending on account/mode you might need specific Bybit params. We keep it minimal.
+        """
+        if not self.config.get('protective_stop_market', False):
+            return None, None
+        try:
+            params = {
+                "category": "linear",
+                "symbol": self.symbol,
+                "side": "Sell" if is_long else "Buy",
+                "orderType": "Market",
+                "reduceOnly": True,
+                "triggerPrice": f"{self.format_price(stop_px)}",
+                "triggerBy": "LastPrice",
+                "timeInForce": "GTC"
+            }
+            res = self.exchange.place_order(**params)
+            return stop_px, (res.get("result") or {}).get("orderId")
+        except Exception:
+            return None, None
+
     async def cancel_order_safe(self, order_id):
         try:
             self.exchange.cancel_order(category="linear", symbol=self.symbol, orderId=order_id)
@@ -448,7 +527,7 @@ class EMARSIBot:
         self.exit_orders = {'tp': None, 'sl': None}
 
     def should_close(self):
-        """No market exits in maker-only mode; keep baseline emergency rule for non-maker mode only."""
+        """Maker-only mode keeps entries/exits via limit; emergency rule disabled here."""
         return False, ""
 
     async def execute_trade(self, signal):
@@ -499,6 +578,10 @@ class EMARSIBot:
         await self.clear_exit_orders()
         tp_px, tp_oid = await self.place_tp_order(is_buy, self.format_qty(qty), actual_price)
         self.soft_stop = self.format_price(stop_price)
+
+        # Optional protective stop-market (reduce-only)
+        await self.place_hard_sl_order(is_buy, self.format_qty(qty), self.soft_stop)
+
         print(f"✅ Entry {signal['action']} @ {actual_price:.{self.price_decimals}f} | TP {tp_px} (PostOnly reduce-only) | Soft SL {self.soft_stop}")
 
     async def check_and_manage_soft_stop(self):
@@ -518,7 +601,7 @@ class EMARSIBot:
             await self.cancel_order_safe(self.exit_orders['tp']['id'])
             self.exit_orders['tp'] = None
 
-        qty = float(self.position.get('size', 0))
+        qty = float(self.position.get('size', 0) or 0)
         if qty <= 0:
             return
 
@@ -526,22 +609,47 @@ class EMARSIBot:
         sl_px, sl_oid = await self.place_soft_sl_order(is_long, self.format_qty(qty), last_px)
         print(f"⚠️ Soft stop breached. Placed maker exit at {sl_px} (reduce-only PostOnly)")
 
+    def _latest_reduce_only_close_avg(self):
+        """Get avgPrice of the most recent reduce-only close (if any)."""
+        try:
+            hist = self.exchange.get_order_history(category="linear", symbol=self.symbol)
+            if hist.get("retCode") != 0:
+                return None
+            for h in hist.get("result", {}).get("list", []):
+                ro = h.get("reduceOnly")
+                if isinstance(ro, str):
+                    ro = (ro.lower() == "true")
+                cum = float(h.get("cumExecQty", 0) or 0)
+                if ro and cum > 0:
+                    avg = float(h.get("avgPrice", 0) or 0)
+                    if avg > 0:
+                        return avg
+        except Exception:
+            pass
+        return None
+
     async def detect_exit_and_log(self):
         """
         Poll for position close (size -> 0). If closed and we have a current_trade_id,
-        log the exit with last known price and reason inferred by which order remains.
+        log the exit with actual avg close price from history when possible.
         """
         had_pos = await self.check_position()
-        if had_pos and float(self.position.get('size', 0)) > 0:
+        if had_pos and float(self.position.get('size', 0) or 0) > 0:
             return  # still open
+
         # Position closed
         if self.current_trade_id:
-            px = float(self.price_data['close'].iloc[-1]) if len(self.price_data) else 0.0
+            # Try to resolve real filled exit price; fall back to last close
+            fill_px = self._latest_reduce_only_close_avg()
+            if fill_px is None:
+                fill_px = float(self.price_data['close'].iloc[-1]) if len(self.price_data) else 0.0
+
+            px = float(self.price_data['close'].iloc[-1]) if len(self.price_data) else fill_px
             reason = "tp_or_soft_sl_hit"
             self.logger.log_trade_close(
                 trade_id=self.current_trade_id,
                 expected_exit=px,
-                actual_exit=px,
+                actual_exit=fill_px,
                 reason=reason,
                 fees_entry_bps=self.config['maker_bps'],
                 fees_exit_bps=self.config['maker_bps']
@@ -556,10 +664,13 @@ class EMARSIBot:
         px = float(self.price_data['close'].iloc[-1])
         parts = [f"📊 BNB: ${px:.{self.price_decimals}f}", f"💰 Balance: ${self.account_balance:.0f}"]
         if self.position:
-            entry = float(self.position.get('avgPrice', 0))
-            side = self.position.get('side', '')
-            size = float(self.position.get('size', 0))
-            parts.append(f"📍 {side}: {size:.{self.qty_decimals}f} @ ${entry:.{self.price_decimals}f}")
+            try:
+                entry = float(self.position.get('avgPrice', 0) or 0)
+                side = self.position.get('side', '')
+                size = float(self.position.get('size', 0) or 0)
+                parts.append(f"📍 {side}: {size:.{self.qty_decimals}f} @ ${entry:.{self.price_decimals}f}")
+            except Exception:
+                pass
         else:
             ind = self.calculate_indicators(self.price_data)
             if ind:
@@ -610,7 +721,7 @@ class EMARSIBot:
         print(f"🔧 EMA + RSI Bot for {self.symbol} (Maker-only mode: all orders are Limit + PostOnly)")
         print(f"💰 Balance: ${self.account_balance:.2f}")
         print(f"🎯 TP {self.config['net_take_profit']:.2f}% | Soft SL {self.config['net_stop_loss']:.2f}%")
-        print(f"💸 Maker fee bps: {self.config['maker_bps']}")
+        print(f"💸 Maker fee (percent): {self.config['maker_bps']}")
 
         while True:
             try:
