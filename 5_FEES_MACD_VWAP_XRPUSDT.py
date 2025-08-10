@@ -79,11 +79,11 @@ class EmaRsiTrader:
         
         # Your existing config...
         self.config = {
-            'ema_fast': 10,
-            'ema_slow': 21,
+            'ema_fast': 8,
+            'ema_slow': 13,
             'rsi_period': 14,
-            'rsi_long_threshold': 45,   # matches logic below
-            'rsi_short_threshold': 55,  # matches logic below
+            'rsi_long_threshold': 50,   # RELAXED: was 45
+            'rsi_short_threshold': 50,  # RELAXED: was 55
             'stop_loss_pct': 0.5,
             'take_profit_pct': 1.5,
             'trailing_stop_pct': 0.7,
@@ -96,7 +96,7 @@ class EmaRsiTrader:
         
         self.pending_order = False
         self.last_trade_time = 0
-        self.trade_cooldown = 30
+        self.trade_cooldown = 10
         
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/5_FEES_MACD_VWAP_{self.symbol}.log"
@@ -152,24 +152,47 @@ class EmaRsiTrader:
             print(f"❌ Connection error: {e}")
             return False
 
-    
     async def get_account_balance(self):
-        """Get account balance - FIXED from Reference_OK_6"""
+        """Get account balance - FIXED for testnet"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
                 lst = wallet['result']['list']
-                if lst:
-                    for c in lst[0]['coin']:
-                        if c['coin'] == 'USDT':
-                            self.account_balance = float(c['availableToWithdraw'])
-                            return True
+                if lst and len(lst) > 0:
+                    for c in lst[0].get('coin', []):
+                        if c.get('coin') == 'USDT':
+                            # Try multiple balance fields (testnet may use different fields)
+                            balance_fields = [
+                                'availableToWithdraw',
+                                'walletBalance', 
+                                'equity',
+                                'availableBalance',
+                                'balance'
+                            ]
+                            
+                            for field in balance_fields:
+                                balance_str = c.get(field, '')
+                                if balance_str and str(balance_str).strip() != '':
+                                    try:
+                                        self.account_balance = float(balance_str)
+                                        print(f"✅ Balance loaded from {field}: ${self.account_balance:.2f}")
+                                        return True
+                                    except (ValueError, TypeError):
+                                        continue
+                            
+                            # If no valid balance found, show what fields exist
+                            print(f"⚠️ No valid balance in USDT coin data. Available fields: {list(c.keys())}")
         except Exception as e:
             print(f"❌ Balance error: {e}")
+        
+        # Fallback to default balance for testnet
+        print("ℹ️ Using default testnet balance: $1000.00")
         self.account_balance = 1000.0
         return True
+
     
     def calculate_position_size(self, price, stop_loss_price):
+        """Calculate position size with proper limits"""
         if self.account_balance <= 0:
             return 0
         
@@ -183,11 +206,20 @@ class EmaRsiTrader:
         adjusted_risk = risk_amount / slippage_factor
         
         raw_qty = adjusted_risk / price_diff
-        max_position_value = self.account_balance * 0.1
+        
+        # CRITICAL: Cap position to max 10% of account balance
+        max_position_value = min(self.account_balance * 0.1, 1000)  # Max $1000 position value
         max_qty = max_position_value / float(price)
         
         final_qty = min(raw_qty, max_qty)
-        return max(final_qty, 0.1)
+        
+        # For XRP: minimum 1 unit
+        return max(final_qty, 1)
+
+    def format_qty(self, qty):
+        """Format quantity for XRP - MUST be integer"""
+        # XRP on Bybit requires integer quantities only
+        return str(int(round(qty)))
     
     def format_qty(self, qty):
         """FIXED: Return a properly formatted quantity rounded up to meet exchange minimums."""

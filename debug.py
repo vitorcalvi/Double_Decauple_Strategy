@@ -1,423 +1,192 @@
 #!/usr/bin/env python3
 """
-Trading Bot Debugger
-Identifies why trades aren't firing in your bots
+Quick fixes to make trades fire more frequently
 """
 
 import os
-import time
-import pandas as pd
-import numpy as np
-from datetime import datetime, timezone
-from pybit.unified_trading import HTTP
-from dotenv import load_dotenv
+import shutil
+from datetime import datetime
 
-load_dotenv()
+def apply_signal_fixes():
+    """Apply fixes to both bots to make signals fire more easily"""
+    
+    fixes_applied = []
+    
+    # Fix Bot 5 - XRP
+    print("\n📄 Fixing Bot 5 (XRP) signal thresholds...")
+    
+    xrp_file = "5_FEES_MACD_VWAP_XRPUSDT.py"
+    if os.path.exists(xrp_file):
+        # Backup
+        backup = f"{xrp_file}.backup_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        shutil.copy(xrp_file, backup)
+        print(f"   ✅ Backup: {backup}")
+        
+        with open(xrp_file, 'r') as f:
+            content = f.read()
+        
+        # Original conservative thresholds
+        old_config = """        self.config = {
+            'ema_fast': 10,
+            'ema_slow': 21,
+            'rsi_period': 14,
+            'rsi_long_threshold': 45,   # matches logic below
+            'rsi_short_threshold': 55,  # matches logic below"""
+        
+        # More aggressive thresholds for more signals
+        new_config = """        self.config = {
+            'ema_fast': 10,
+            'ema_slow': 21,
+            'rsi_period': 14,
+            'rsi_long_threshold': 50,   # RELAXED: was 45
+            'rsi_short_threshold': 50,  # RELAXED: was 55"""
+        
+        if old_config in content:
+            content = content.replace(old_config, new_config)
+            fixes_applied.append("XRP: Relaxed RSI thresholds (45/55 → 50/50)")
+        
+        # Also reduce EMA periods for faster crossovers
+        content = content.replace("'ema_fast': 10,", "'ema_fast': 8,")
+        content = content.replace("'ema_slow': 21,", "'ema_slow': 13,")
+        fixes_applied.append("XRP: Faster EMAs (10/21 → 8/13)")
+        
+        # Reduce cooldown
+        content = content.replace("self.trade_cooldown = 30", "self.trade_cooldown = 10")
+        fixes_applied.append("XRP: Reduced cooldown (30s → 10s)")
+        
+        with open(xrp_file, 'w') as f:
+            f.write(content)
+        print("   ✅ XRP bot fixed")
+    
+    # Fix Bot 12 - SUI
+    print("\n📄 Fixing Bot 12 (SUI) ML thresholds...")
+    
+    sui_file = "12_FEES_ML_GRID_SUIUSDT.py"
+    if os.path.exists(sui_file):
+        # Backup
+        backup = f"{sui_file}.backup_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        shutil.copy(sui_file, backup)
+        print(f"   ✅ Backup: {backup}")
+        
+        with open(sui_file, 'r') as f:
+            content = f.read()
+        
+        # Reduce ML threshold
+        content = content.replace("'ml_threshold': 0.60,", "'ml_threshold': 0.45,")
+        fixes_applied.append("SUI: Lowered ML threshold (0.60 → 0.45)")
+        
+        # Increase grid proximity threshold
+        content = content.replace("if distance_pct < 0.25", "if distance_pct < 0.50")
+        fixes_applied.append("SUI: Increased grid proximity (0.25% → 0.50%)")
+        
+        # Reduce cooldown
+        content = content.replace("self.trade_cooldown = 30", "self.trade_cooldown = 10")
+        fixes_applied.append("SUI: Reduced cooldown (30s → 10s)")
+        
+        # Use shorter timeframe
+        content = content.replace("'timeframe': '5',", "'timeframe': '1',")
+        fixes_applied.append("SUI: Shorter timeframe (5m → 1m)")
+        
+        with open(sui_file, 'w') as f:
+            f.write(content)
+        print("   ✅ SUI bot fixed")
+    
+    return fixes_applied
 
-class TradingBotDebugger:
-    def __init__(self, symbol, demo_mode=True):
-        self.symbol = symbol
-        self.demo_mode = demo_mode
-        self.errors = []
-        self.warnings = []
-        self.info = []
-        
-        # Get credentials
-        prefix = 'TESTNET_' if demo_mode else 'LIVE_'
-        self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
-        self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
-        self.exchange = None
-        
-    def run_all_checks(self):
-        """Run all debugging checks"""
-        print(f"\n{'='*60}")
-        print(f"TRADING BOT DEBUGGER - {self.symbol}")
-        print(f"Mode: {'TESTNET' if self.demo_mode else 'LIVE'}")
-        print(f"Time: {datetime.now(timezone.utc).isoformat()}")
-        print(f"{'='*60}\n")
-        
-        # 1. Check credentials
-        print("1. CHECKING API CREDENTIALS...")
-        if self.check_credentials():
-            print("   ✅ Credentials found\n")
-        else:
-            print("   ❌ CRITICAL: No credentials\n")
-            return False
-            
-        # 2. Test connection
-        print("2. TESTING CONNECTION...")
-        if self.test_connection():
-            print("   ✅ Connected to exchange\n")
-        else:
-            print("   ❌ CRITICAL: Cannot connect\n")
-            return False
-            
-        # 3. Test authentication
-        print("3. TESTING AUTHENTICATION...")
-        if self.test_authentication():
-            print("   ✅ Authentication successful\n")
-        else:
-            print("   ❌ CRITICAL: Authentication failed\n")
-            return False
-            
-        # 4. Check account balance
-        print("4. CHECKING ACCOUNT BALANCE...")
-        balance = self.check_balance()
-        if balance:
-            print(f"   ✅ Balance: ${balance:.2f}\n")
-        else:
-            print("   ⚠️  WARNING: No balance or cannot fetch\n")
-            
-        # 5. Check market data
-        print("5. CHECKING MARKET DATA...")
-        market_data = self.check_market_data()
-        if market_data:
-            print(f"   ✅ Current price: ${market_data['price']:.5f}\n")
-        else:
-            print("   ❌ CRITICAL: Cannot fetch market data\n")
-            return False
-            
-        # 6. Check existing positions
-        print("6. CHECKING EXISTING POSITIONS...")
-        position = self.check_positions()
-        if position:
-            print(f"   ⚠️  Position exists: {position['side']} {position['size']} @ ${position['price']:.5f}")
-            print("   📌 Bot won't open new trades with existing position\n")
-        else:
-            print("   ✅ No positions (ready to trade)\n")
-            
-        # 7. Check open orders
-        print("7. CHECKING OPEN ORDERS...")
-        orders = self.check_open_orders()
-        if orders:
-            print(f"   ⚠️  {len(orders)} open orders found")
-            print("   📌 May prevent new trades\n")
-        else:
-            print("   ✅ No open orders\n")
-            
-        # 8. Test signal generation
-        print("8. TESTING SIGNAL GENERATION...")
-        signal = self.test_signal_generation()
-        if signal:
-            print(f"   ✅ Signal generated: {signal}\n")
-        else:
-            print("   ⚠️  No signal (normal - waiting for conditions)\n")
-            
-        # 9. Test order placement
-        print("9. TESTING ORDER PLACEMENT (dry run)...")
-        if self.test_order_placement():
-            print("   ✅ Order validation passed\n")
-        else:
-            print("   ❌ Order would fail\n")
-            
-        # 10. Check instrument info
-        print("10. CHECKING INSTRUMENT SPECIFICATIONS...")
-        inst_info = self.check_instrument_info()
-        if inst_info:
-            print(f"   ✅ Min qty: {inst_info['min_qty']}")
-            print(f"   ✅ Qty step: {inst_info['qty_step']}")
-            print(f"   ✅ Min notional: ${inst_info['min_notional']}\n")
-        else:
-            print("   ⚠️  Cannot fetch instrument info\n")
-            
-        # Summary
-        self.print_summary()
-        return True
-        
-    def check_credentials(self):
-        """Check if API credentials exist"""
-        if not self.api_key or not self.api_secret:
-            self.errors.append("Missing API credentials in .env file")
-            prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
-            print(f"   Required: {prefix}BYBIT_API_KEY")
-            print(f"   Required: {prefix}BYBIT_API_SECRET")
-            return False
-        return True
-        
-    def test_connection(self):
-        """Test basic connection to exchange"""
-        try:
-            self.exchange = HTTP(
-                demo=self.demo_mode,
-                api_key=self.api_key,
-                api_secret=self.api_secret
-            )
-            
-            result = self.exchange.get_server_time()
-            if result.get('retCode') != 0:
-                self.errors.append(f"Server error: {result.get('retMsg')}")
-                return False
-            return True
-        except Exception as e:
-            self.errors.append(f"Connection error: {str(e)}")
-            return False
-            
-    def test_authentication(self):
-        """Test API authentication"""
-        try:
-            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED")
-            
-            if wallet.get('retCode') == 0:
-                return True
-            elif wallet.get('retCode') == 401:
-                self.errors.append("API authentication failed - check keys")
-                print("   1. Verify API keys match environment (testnet/live)")
-                print("   2. Check API permissions: Contract Trade enabled")
-                print("   3. Ensure IP whitelist if configured")
-                return False
-            else:
-                self.errors.append(f"Auth error: {wallet.get('retMsg')}")
-                return False
-        except Exception as e:
-            self.errors.append(f"Auth exception: {str(e)}")
-            return False
-            
-    def check_balance(self):
-        """Check account balance - FIXED"""
-        try:
-            wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-            if wallet.get('retCode') == 0:
-                lst = wallet.get('result', {}).get('list', [])
-                if lst:
-                    for coin in lst[0].get('coin', []):
-                        if coin.get('coin') == 'USDT':
-                            # Critical fix: Check for empty string
-                            balance_str = coin.get('availableToWithdraw', '')
-                            if balance_str and str(balance_str).strip() not in ['', 'None']:
-                                try:
-                                    return float(balance_str)
-                                except (ValueError, TypeError):
-                                    pass
-                            # Try alternative fields
-                            for field in ['walletBalance', 'equity']:
-                                alt_balance = coin.get(field, '')
-                                if alt_balance and str(alt_balance).strip() not in ['', 'None']:
-                                    try:
-                                        return float(alt_balance)
-                                    except (ValueError, TypeError):
-                                        pass
-                # Fallback for testnet
-                self.warnings.append("Using fallback balance (testnet)")
-                return 1000.0
-            return 0
-        except Exception as e:
-            self.warnings.append(f"Cannot fetch balance: {str(e)}")
-            return 1000.0  # Fallback for testnet
-            
-    def check_market_data(self):
-        """Check if market data is accessible"""
-        try:
-            kline = self.exchange.get_kline(
-                category="linear",
-                symbol=self.symbol,
-                interval="5",
-                limit=1
-            )
-            
-            if kline.get('retCode') == 0 and kline['result']['list']:
-                candle = kline['result']['list'][0]
-                return {
-                    'price': float(candle[4]),  # close price
-                    'volume': float(candle[5])
-                }
-            return None
-        except Exception as e:
-            self.errors.append(f"Market data error: {str(e)}")
-            return None
-            
-    def check_positions(self):
-        """Check for existing positions"""
-        try:
-            pos = self.exchange.get_positions(
-                category="linear",
-                symbol=self.symbol
-            )
-            
-            if pos.get('retCode') == 0 and pos['result']['list']:
-                position = pos['result']['list'][0]
-                if float(position.get('size', 0)) > 0:
-                    return {
-                        'side': position.get('side'),
-                        'size': position.get('size'),
-                        'price': float(position.get('avgPrice', 0))
-                    }
-            return None
-        except Exception as e:
-            self.warnings.append(f"Position check error: {str(e)}")
-            return None
-            
-    def check_open_orders(self):
-        """Check for open orders"""
-        try:
-            orders = self.exchange.get_open_orders(
-                category="linear",
-                symbol=self.symbol
-            )
-            
-            if orders.get('retCode') == 0:
-                return orders['result']['list']
-            return []
-        except Exception as e:
-            self.warnings.append(f"Order check error: {str(e)}")
-            return []
-            
-    def test_signal_generation(self):
-        """Test if signals can be generated"""
-        try:
-            # Get recent klines for indicator calculation
-            kline = self.exchange.get_kline(
-                category="linear",
-                symbol=self.symbol,
-                interval="5",
-                limit=100
-            )
-            
-            if kline.get('retCode') != 0:
-                return None
-                
-            df = pd.DataFrame(kline['result']['list'], 
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-            df = df.astype(float)
-            
-            # Calculate simple indicators
-            df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
-            df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-            
-            # RSI
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            
-            current_price = df['close'].iloc[-1]
-            ema_20 = df['ema_20'].iloc[-1]
-            ema_50 = df['ema_50'].iloc[-1]
-            rsi = df['rsi'].iloc[-1]
-            
-            self.info.append(f"Price: {current_price:.5f}, EMA20: {ema_20:.5f}, EMA50: {ema_50:.5f}, RSI: {rsi:.1f}")
-            
-            # Check for basic signals
-            if ema_20 > ema_50 and rsi < 30:
-                return "BUY (EMA bullish + RSI oversold)"
-            elif ema_20 < ema_50 and rsi > 70:
-                return "SELL (EMA bearish + RSI overbought)"
-                
-            return None
-        except Exception as e:
-            self.warnings.append(f"Signal generation error: {str(e)}")
-            return None
-            
-    def test_order_placement(self):
-        """Test if orders can be placed (validation only)"""
-        try:
-            # Get current price
-            ticker = self.exchange.get_tickers(
-                category="linear",
-                symbol=self.symbol
-            )
-            
-            if ticker.get('retCode') != 0:
-                return False
-                
-            current_price = float(ticker['result']['list'][0]['lastPrice'])
-            
-            # Calculate test order parameters
-            test_qty = 10 / current_price  # $10 worth
-            test_qty = round(test_qty, 3)  # Round to 3 decimals
-            
-            # Check minimum requirements
-            if test_qty * current_price < 5:  # Min notional check
-                self.warnings.append(f"Order too small: ${test_qty * current_price:.2f} < $5 minimum")
-                
-            self.info.append(f"Test order: {test_qty} @ ${current_price:.5f} = ${test_qty * current_price:.2f}")
-            return True
-            
-        except Exception as e:
-            self.errors.append(f"Order test error: {str(e)}")
-            return False
-            
-    def check_instrument_info(self):
-        """Check instrument specifications"""
-        try:
-            inst = self.exchange.get_instruments_info(
-                category="linear",
-                symbol=self.symbol
-            )
-            
-            if inst.get('retCode') == 0 and inst['result']['list']:
-                info = inst['result']['list'][0]
-                return {
-                    'min_qty': float(info['lotSizeFilter']['minOrderQty']),
-                    'qty_step': float(info['lotSizeFilter']['qtyStep']),
-                    'min_notional': float(info['lotSizeFilter'].get('minNotionalValue', 5))
-                }
-            return None
-        except Exception as e:
-            self.warnings.append(f"Instrument info error: {str(e)}")
-            return None
-            
-    def print_summary(self):
-        """Print debugging summary"""
-        print(f"\n{'='*60}")
-        print("DEBUGGING SUMMARY")
-        print(f"{'='*60}\n")
-        
-        if self.errors:
-            print("❌ CRITICAL ERRORS (must fix):")
-            for error in self.errors:
-                print(f"   • {error}")
-            print()
-            
-        if self.warnings:
-            print("⚠️  WARNINGS (may affect trading):")
-            for warning in self.warnings:
-                print(f"   • {warning}")
-            print()
-            
-        if self.info:
-            print("ℹ️  INFORMATION:")
-            for info in self.info:
-                print(f"   • {info}")
-            print()
-            
-        if not self.errors:
-            print("✅ NO CRITICAL ERRORS FOUND")
-            print("\nPossible reasons trades aren't firing:")
-            print("1. Market conditions don't meet signal criteria")
-            print("2. Position already exists (check position management)")
-            print("3. Risk management preventing trades")
-            print("4. Cooldown period between trades")
-            print("5. Insufficient balance for minimum order size")
-            print("\nRecommendations:")
-            print("• Monitor bot logs for signal generation")
-            print("• Check if indicators are reaching trigger levels")
-            print("• Verify risk parameters allow trading")
-            print("• Test with lower timeframes for more signals")
-        else:
-            print("🔧 FIX CRITICAL ERRORS FIRST!")
+
+def create_test_config():
+    """Create a test configuration for immediate signals"""
+    
+    test_config = """# TEST CONFIGURATION - AGGRESSIVE SIGNALS
+# Add this to your bot files for testing
+
+TEST_MODE = True  # Enable test mode
+
+if TEST_MODE:
+    # XRP Bot Test Config
+    XRP_TEST = {
+        'ema_fast': 5,           # Very fast
+        'ema_slow': 10,          # Fast
+        'rsi_period': 7,         # Shorter period
+        'rsi_long_threshold': 60,   # Easy to trigger
+        'rsi_short_threshold': 40,  # Easy to trigger
+        'trade_cooldown': 5,     # Minimal cooldown
+        'risk_per_trade_pct': 0.5,  # Small risk for testing
+    }
+    
+    # SUI Bot Test Config
+    SUI_TEST = {
+        'timeframe': '1',        # 1-minute for more signals
+        'ml_threshold': 0.30,    # Very low threshold
+        'grid_levels': 10,       # More levels
+        'base_grid_spacing': 0.2,  # Tighter grid
+        'trade_cooldown': 5,     # Minimal cooldown
+        'risk_per_trade': 0.5,   # Small risk for testing
+    }
+"""
+    
+    with open("test_config.py", 'w') as f:
+        f.write(test_config)
+    
+    print("\n✅ Created test_config.py with aggressive settings")
+    return True
 
 
 def main():
-    """Run debugger for both bots"""
-    
-    # Debug bot 1
     print("\n" + "="*60)
-    print("DEBUGGING: 5_FEES_MACD_VWAP_XRPUSDT.py")
+    print("SIGNAL GENERATION FIX")
+    print("Making trades fire more frequently")
     print("="*60)
-    debugger1 = TradingBotDebugger('XRPUSDT', demo_mode=True)
-    debugger1.run_all_checks()
     
-    # Debug bot 2
-    print("\n" + "="*60)
-    print("DEBUGGING: 12_FEES_ML_GRID_SUIUSDT.py")
-    print("="*60)
-    debugger2 = TradingBotDebugger('SUIUSDT', demo_mode=True)
-    debugger2.run_all_checks()
+    print("\n🎯 CURRENT ISSUES:")
+    print("• XRP: RSI thresholds too strict (45/55)")
+    print("• XRP: EMA periods too slow (10/21)")
+    print("• SUI: ML confidence threshold too high (0.60)")
+    print("• SUI: Grid proximity too tight (0.25%)")
+    print("• Both: Trade cooldown too long (30s)")
+    
+    print("\n🔧 APPLYING FIXES...")
+    
+    fixes = apply_signal_fixes()
+    
+    if fixes:
+        print("\n✅ FIXES APPLIED:")
+        for fix in fixes:
+            print(f"   • {fix}")
+    
+    create_test_config()
     
     print("\n" + "="*60)
-    print("DEBUGGING COMPLETE")
+    print("✅ SIGNAL FIXES COMPLETE!")
     print("="*60)
+    
+    print("\n📊 WHAT CHANGED:")
+    print("\nXRP Bot:")
+    print("• RSI thresholds: 45/55 → 50/50 (more signals)")
+    print("• EMA periods: 10/21 → 8/13 (faster crossovers)")
+    print("• Cooldown: 30s → 10s (more frequent trades)")
+    
+    print("\nSUI Bot:")
+    print("• ML threshold: 0.60 → 0.45 (easier signals)")
+    print("• Grid proximity: 0.25% → 0.50% (wider trigger zone)")
+    print("• Timeframe: 5m → 1m (more data points)")
+    print("• Cooldown: 30s → 10s (more frequent trades)")
+    
+    print("\n🚀 NEXT STEPS:")
+    print("\n1. Run the signal debugger to see real-time conditions:")
+    print("   python signal_debugger.py")
+    
+    print("\n2. Run the bots with new settings:")
+    print("   python 5_FEES_MACD_VWAP_XRPUSDT.py")
+    print("   python 12_FEES_ML_GRID_SUIUSDT.py")
+    
+    print("\n3. Monitor for signals (should fire within 5-10 minutes)")
+    
+    print("\n⚠️  IMPORTANT:")
+    print("• These are aggressive settings for testing")
+    print("• Expect more trades but potentially lower quality")
+    print("• Revert to original settings for production")
+    print("• Backups created with '_signals_' timestamp")
 
 
 if __name__ == "__main__":

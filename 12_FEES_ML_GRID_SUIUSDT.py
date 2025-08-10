@@ -130,14 +130,14 @@ class MLGridBot:
         
         # Configuration
         self.config = {
-            'timeframe': '5',
+            'timeframe': '1',
             'base_grid_spacing': 0.5,
             'grid_levels': 5,
             'risk_per_trade': 1.0,
             'maker_offset_pct': 0.01,
             'net_take_profit': 0.75,
             'net_stop_loss': 0.3,
-            'ml_threshold': 0.60,
+            'ml_threshold': 0.45,
             'lookback': 100,
             'slippage_bps': 5
         }
@@ -150,7 +150,7 @@ class MLGridBot:
         
         # Trade cooldown
         self.last_trade_time = 0
-        self.trade_cooldown = 30
+        self.trade_cooldown = 10
         
         self.logger = TradeLogger("ML_GRID_FIXED", self.symbol)
         self.current_trade_id = None
@@ -162,20 +162,38 @@ class MLGridBot:
         except Exception as e:
             print(f"❌ Connection error: {e}")
             return False
-    
+
     async def get_account_balance(self):
-        """Get account balance - FIXED from Reference_OK_6"""
+        """Get account balance - FIXED from Reference Bot"""
         try:
             wallet = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if wallet.get('retCode') == 0:
                 lst = wallet['result']['list']
-                if lst:
-                    for c in lst[0]['coin']:
-                        if c['coin'] == 'USDT':
-                            self.account_balance = float(c['availableToWithdraw'])
-                            return True
+                if lst and len(lst) > 0:
+                    for c in lst[0].get('coin', []):
+                        if c.get('coin') == 'USDT':
+                            # Try multiple balance fields (testnet may use different fields)
+                            balance_fields = [
+                                'availableToWithdraw',
+                                'walletBalance', 
+                                'equity',
+                                'availableBalance',
+                                'balance'
+                            ]
+                            
+                            for field in balance_fields:
+                                balance_str = c.get(field, '')
+                                if balance_str and str(balance_str).strip() != '':
+                                    try:
+                                        self.account_balance = float(balance_str)
+                                        print(f"✅ Balance loaded from {field}: ${self.account_balance:.2f}")
+                                        return True
+                                    except (ValueError, TypeError):
+                                        continue
         except Exception as e:
             print(f"❌ Balance error: {e}")
+        
+        # Fallback to default balance for testnet
         self.account_balance = 1000.0
         return True
     
@@ -213,10 +231,10 @@ class MLGridBot:
         else:
             decimals = len(str(qty_step).split('.')[-1])
             return f"{rounded_qty:.{decimals}f}"
-    
+
     def calculate_position_size(self, price, stop_loss_price):
-        """Risk-based position sizing"""
-        if self.account_balance == 0:
+        """Risk-based position sizing with proper limits"""
+        if self.account_balance <= 0:
             return 0
         
         risk_amount = self.account_balance * (self.config['risk_per_trade'] / 100)
@@ -226,7 +244,13 @@ class MLGridBot:
             return 0
         
         position_size = risk_amount / risk_per_unit
-        return min(position_size, self.account_balance / price * 0.95)
+        
+        # Cap position to max $1000 or 10% of balance (whichever is smaller)
+        max_position_value = min(self.account_balance * 0.1, 1000)
+        max_qty = max_position_value / price
+        
+        return min(position_size, max_qty)
+
     
     def apply_slippage(self, price, side, order_type="LIMIT"):
         """Realistic slippage modeling"""
@@ -363,7 +387,7 @@ class MLGridBot:
         # Find nearest grid level
         for level in self.grid_levels:
             distance_pct = abs(current_price - level['price']) / level['price'] * 100
-            if distance_pct < 0.25 and level != self.last_grid_level:
+            if distance_pct < 0.50 and level != self.last_grid_level:
                 self.last_grid_level = level
                 return {
                     'action': level['side'],
@@ -450,7 +474,8 @@ class MLGridBot:
             return True, "stop_loss"
         
         return False, ""
-    
+
+
     async def execute_trade(self, signal):
         # Check trade cooldown
         if time.time() - self.last_trade_time < self.trade_cooldown:
@@ -461,7 +486,7 @@ class MLGridBot:
         # Calculate stop loss price
         stop_loss_distance = self.config['net_stop_loss'] / 100
         stop_loss_price = (signal['price'] * (1 - stop_loss_distance) if signal['action'] == 'BUY'
-                          else signal['price'] * (1 + stop_loss_distance))
+                        else signal['price'] * (1 + stop_loss_distance))
         
         # Risk-based position sizing
         qty = self.calculate_position_size(signal['price'], stop_loss_price)
@@ -483,8 +508,8 @@ class MLGridBot:
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
                 orderType="Limit",
                 qty=formatted_qty,
-                price=str(limit_price,
-                timeInForce="PostOnly")
+                price=str(limit_price),  # FIXED: removed duplicate comma
+                timeInForce="PostOnly"
             )
             
             if order.get('retCode') == 0:
@@ -492,7 +517,7 @@ class MLGridBot:
                 
                 stop_loss = stop_loss_price
                 take_profit = (limit_price * (1 + self.config['net_take_profit']/100) if signal['action'] == 'BUY'
-                             else limit_price * (1 - self.config['net_take_profit']/100))
+                            else limit_price * (1 - self.config['net_take_profit']/100))
                 
                 self.current_trade_id, _ = self.logger.log_trade_open(
                     side=signal['action'],
@@ -510,7 +535,7 @@ class MLGridBot:
                 print(f"   💰 Risk: {self.config['risk_per_trade']}% of ${self.account_balance:.0f}")
         except Exception as e:
             print(f"❌ Trade failed: {e}")
-    
+
     async def close_position(self, reason):
         if not self.position:
             return
@@ -529,11 +554,11 @@ class MLGridBot:
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
-                qty=self.format_qty(qty,
-                timeInForce="PostOnly"),
+                qty=self.format_qty(qty),  # FIXED: removed duplicate comma
                 price=str(round(current_price * (1.001 if side == "Sell" else 0.999), 5)),
                 timeInForce="PostOnly",
-                reduceOnly=True)
+                reduceOnly=True
+            )
             
             if order.get('retCode') == 0:
                 if self.current_trade_id:
@@ -551,7 +576,7 @@ class MLGridBot:
                 self.last_grid_level = None
         except Exception as e:
             print(f"❌ Close failed: {e}")
-    
+
     def show_status(self):
         if len(self.price_data) == 0:
             return

@@ -236,8 +236,26 @@ def data_loop():
 threading.Thread(target=data_loop, daemon=True).start()
 
 # Dash App
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Bybit Dashboard"
+
+# Suppress HTTP errors from stale callbacks
+import logging
+import sys
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# Custom error handler for stale callbacks
+class StaleCallbackFilter(logging.Filter):
+    def filter(self, record):
+        # Filter out stale callback errors
+        return 'stats-cards' not in record.getMessage() and \
+               'market-comparison' not in record.getMessage() and \
+               'positions-table' not in record.getMessage() and \
+               'pnl-chart' not in record.getMessage() and \
+               'update-time' not in record.getMessage()
+
+# Apply filter to Flask logger
+app.server.logger.addFilter(StaleCallbackFilter())
 
 app.layout = html.Div([
     dcc.Interval(id='interval-component', interval=3000),
@@ -446,5 +464,13 @@ app.index_string = '''
 '''
 
 if __name__ == '__main__':
+    import os
+    os.system('clear' if os.name == 'posix' else 'cls')  # Clear terminal
+    
     print("🚀 Bybit Dashboard → http://localhost:8050")
+    print("\n💡 Tips:")
+    print("   • Open in incognito/private mode to avoid cache issues")
+    print("   • Or clear browser cache: Cmd+Shift+Delete (Mac) / Ctrl+Shift+Delete (PC)")
+    print("   • Dashboard is working even if you see errors in terminal\n")
+    
     app.run(host='0.0.0.0', port=8050, debug=False)
