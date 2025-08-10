@@ -45,33 +45,67 @@ class BybitDataProvider:
     
     def liquidate_position(self, symbol, side, size):
         try:
+            # Get fresh position data
             self.rl()
-            close_side = "Sell" if side == "Buy" else "Buy"
-            order = self.ex.place_order(
-                category="linear",
-                symbol=symbol,
-                side=close_side,
-                orderType="Market",
-                qty=str(size),
-                reduceOnly=True
-            )
-            if order.get("retCode") == 0:
-                return True, "Position liquidated successfully"
+            pos_resp = self.ex.get_positions(category="linear", symbol=symbol)
+            if pos_resp.get("retCode") == 0:
+                positions = pos_resp.get("result", {}).get("list", [])
+                if positions and self.sf(positions[0].get("size")) > 0:
+                    actual_size = self.sf(positions[0].get("size"))
+                    actual_side = positions[0].get("side")
+                    close_side = "Sell" if actual_side == "Buy" else "Buy"
+                    
+                    self.rl()
+                    order = self.ex.place_order(
+                        category="linear",
+                        symbol=symbol,
+                        side=close_side,
+                        orderType="Market",
+                        qty=str(actual_size),
+                        reduceOnly=True
+                    )
+                    if order.get("retCode") == 0:
+                        return True, "Position liquidated successfully"
+                    else:
+                        return False, f"Error: {order.get('retMsg', 'Unknown error')}"
+                else:
+                    return False, "Position not found or already closed"
             else:
-                return False, f"Error: {order.get('retMsg', 'Unknown error')}"
+                return False, f"Failed to fetch position: {pos_resp.get('retMsg', 'Unknown')}"
         except Exception as e:
             return False, f"Exception: {str(e)}"
     
     def close_all_limit(self):
         try:
+            # Get fresh positions
+            self.rl()
+            pos_resp = self.ex.get_positions(category="linear", settleCoin="USDT")
+            if pos_resp.get("retCode") != 0:
+                return False, "Failed to fetch positions"
+            
             results = []
-            for p in self.data.get("positions", []):
+            for p in pos_resp.get("result", {}).get("list", []):
+                if not (size := self.sf(p.get("size"))): continue
+                
                 self.rl()
-                symbol, side, size, mark_price = p['symbol'], p['side'], p['size'], p['mark_price']
+                symbol = p.get("symbol")
+                side = p.get("side")
+                mark_price = self.sf(p.get("markPrice"))
                 close_side = "Sell" if side == "Buy" else "Buy"
+                
                 # Post-only: place order slightly away from mark price
                 offset = mark_price * 0.001  # 0.1% offset
                 limit_price = mark_price + offset if side == "Buy" else mark_price - offset
+                
+                # Get tick size for proper price rounding
+                self.rl()
+                instruments = self.ex.get_instruments_info(category="linear", symbol=symbol)
+                tick_size = 0.01
+                if instruments.get("retCode") == 0:
+                    tick_size = float(instruments.get("result", {}).get("list", [{}])[0].get("priceFilter", {}).get("tickSize", 0.01))
+                
+                # Round price to tick size
+                limit_price = round(limit_price / tick_size) * tick_size
                 
                 order = self.ex.place_order(
                     category="linear",
@@ -79,7 +113,7 @@ class BybitDataProvider:
                     side=close_side,
                     orderType="Limit",
                     qty=str(size),
-                    price=str(round(limit_price, 2)),
+                    price=str(limit_price),
                     reduceOnly=True,
                     timeInForce="PostOnly"
                 )

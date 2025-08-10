@@ -287,7 +287,13 @@ class EnhancedMLScalpingBot:
                 if lst:
                     for c in lst[0]["coin"]:
                         if c["coin"] == "USDT":
-                            self.account_balance = float(c["availableToWithdraw"])
+                            # Fix: Handle empty string or invalid values
+                            available = c.get("availableToWithdraw", "")
+                            if available and available != "":
+                                self.account_balance = float(available)
+                            else:
+                                # Use fallback if empty
+                                self.account_balance = 1000.0
                             return True
         except Exception as e:
             print(f"❌ Balance error: {e}")
