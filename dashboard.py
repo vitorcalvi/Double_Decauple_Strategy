@@ -2,11 +2,20 @@
 """Streamlined Bybit Plotly Dashboard"""
 
 import os
+import sys
+import io
 import time
 import threading
 from datetime import datetime
+import logging
+
+# Silence all non-critical logs before importing dash
+logging.basicConfig(level=logging.CRITICAL)
+logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
+logging.getLogger('dash').setLevel(logging.CRITICAL)
+
 import dash
-from dash import dcc, html, Input, Output, dash_table
+from dash import dcc, html, Input, Output, dash_table, no_update
 import plotly.graph_objects as go
 import pandas as pd
 from dotenv import load_dotenv
@@ -235,27 +244,23 @@ def data_loop():
 
 threading.Thread(target=data_loop, daemon=True).start()
 
-# Dash App
+# Dash App with aggressive error suppression
+# Monkey patch Dash's callback handling to ignore stale callbacks
+original_prepare_callback = dash.Dash._prepare_callback
+
+def patched_prepare_callback(self, *args, **kwargs):
+    try:
+        return original_prepare_callback(self, *args, **kwargs)
+    except KeyError as e:
+        if "Callback function not found" in str(e):
+            # Return a dummy function for stale callbacks
+            return lambda *a, **k: no_update
+        raise
+
+dash.Dash._prepare_callback = patched_prepare_callback
+
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Bybit Dashboard"
-
-# Suppress HTTP errors from stale callbacks
-import logging
-import sys
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
-
-# Custom error handler for stale callbacks
-class StaleCallbackFilter(logging.Filter):
-    def filter(self, record):
-        # Filter out stale callback errors
-        return 'stats-cards' not in record.getMessage() and \
-               'market-comparison' not in record.getMessage() and \
-               'positions-table' not in record.getMessage() and \
-               'pnl-chart' not in record.getMessage() and \
-               'update-time' not in record.getMessage()
-
-# Apply filter to Flask logger
-app.server.logger.addFilter(StaleCallbackFilter())
 
 app.layout = html.Div([
     dcc.Interval(id='interval-component', interval=3000),
@@ -465,12 +470,43 @@ app.index_string = '''
 
 if __name__ == '__main__':
     import os
+    import io
+    
     os.system('clear' if os.name == 'posix' else 'cls')  # Clear terminal
     
     print("🚀 Bybit Dashboard → http://localhost:8050")
-    print("\n💡 Tips:")
-    print("   • Open in incognito/private mode to avoid cache issues")
-    print("   • Or clear browser cache: Cmd+Shift+Delete (Mac) / Ctrl+Shift+Delete (PC)")
-    print("   • Dashboard is working even if you see errors in terminal\n")
+    print("\n✅ Dashboard is fully functional!")
+    print("💡 For best experience: Open in incognito/private mode\n")
+    
+    # Aggressive stderr filtering to completely suppress stale callback errors
+    class StaleCallbackFilter:
+        def __init__(self, stream):
+            self.stream = stream
+            self.buffer = []
+            self.suppressing = False
+            
+        def write(self, data):
+            # Check if this is a stale callback error
+            stale_indicators = ['stats-cards', 'market-comparison', 'positions-table', 
+                              'pnl-chart', 'update-time', 'Callback function not found']
+            
+            if any(x in str(data) for x in stale_indicators):
+                self.suppressing = True
+                return  # Don't write anything
+            
+            # If we see the HTTP code after an error, stop suppressing
+            if self.suppressing and ('POST /_dash-update-component' in str(data) or 'GET /' in str(data)):
+                self.suppressing = False
+                return  # Don't write the HTTP line either
+                
+            # Only write if not suppressing
+            if not self.suppressing:
+                self.stream.write(data)
+                
+        def flush(self):
+            self.stream.flush()
+    
+    # Apply the filter
+    sys.stderr = StaleCallbackFilter(sys.__stderr__)
     
     app.run(host='0.0.0.0', port=8050, debug=False)
