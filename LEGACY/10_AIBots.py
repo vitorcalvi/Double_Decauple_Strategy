@@ -114,11 +114,8 @@ class BaseAIBot:
             c.update(timeframe='3', lookback=150)
         return c
 
-# Bot #10 - LEGACY/10_AIBots.py 
-# Replace these methods in the BaseAIBot class
-
     def connect(self):
-        """Fixed connect method based on working reference"""
+        """Fixed connect method"""
         try:
             # Check credentials first
             if not (self.api_key and self.api_secret):
@@ -127,9 +124,9 @@ class BaseAIBot:
                 print(f"   Required: {'TESTNET_' if self.demo_mode else 'LIVE_'}BYBIT_API_SECRET")
                 return False
                     
-            # Create exchange connection
+            # Create exchange connection - use 'demo' not 'testnet'
             self.exchange = HTTP(
-                testnet=self.demo_mode,  # Use testnet parameter for consistency
+                demo=self.demo_mode,  # FIXED: use 'demo' parameter
                 api_key=self.api_key, 
                 api_secret=self.api_secret
             )
@@ -142,30 +139,22 @@ class BaseAIBot:
                 
             print(f"✅ Connected to {'Testnet' if self.demo_mode else 'Live'} Bybit")
             
-            # Test authentication with wallet balance check - CRITICAL FIX
+            # Test authentication
             try:
                 wallet = self.exchange.get_wallet_balance(accountType='UNIFIED')
                 if wallet.get('retCode') == 401:
                     print("❌ API Authentication failed!")
-                    print(f"   1. Verify {'TESTNET_' if self.demo_mode else 'LIVE_'}BYBIT_API_KEY")
-                    print(f"   2. Verify {'TESTNET_' if self.demo_mode else 'LIVE_'}BYBIT_API_SECRET")
-                    print(f"   3. Keys must be from {'testnet.bybit.com' if self.demo_mode else 'bybit.com'}")
-                    print("   4. Enable 'Contract Trade' permissions in API settings")
-                    print("   5. Enable 'Unified Account' if using testnet")
                     return False
                 elif wallet.get('retCode') == 0:
                     print("✅ API authentication successful")
-                    print("✅ Trading ENABLED")
                 else:
-                    print(f"⚠️ Auth warning (retCode={wallet.get('retCode')}): {wallet.get('retMsg')}")
+                    print(f"⚠️ Auth warning: {wallet.get('retMsg')}")
                     
             except Exception as auth_e:
                 print(f"❌ Authentication test failed: {auth_e}")
-                if '401' in str(auth_e):
-                    print("   Check API key permissions and unified account setup")
                 return False
                 
-            # Get instrument info for proper quantity formatting
+            # Get instrument info
             try:
                 info = self.exchange.get_instruments_info(category='linear', symbol=self.symbol)
                 if info.get('retCode') == 0 and info['result'].get('list'):
@@ -180,8 +169,6 @@ class BaseAIBot:
                         self.symbol_info.qty_step = qty_step
                         
                     print(f"🔧 Instrument specs: min_qty={self.symbol_info.min_qty}, qty_step={self.symbol_info.qty_step}")
-                else:
-                    print("⚠️ Could not fetch instrument specs; using defaults")
             except Exception as e:
                 print(f"⚠️ Instrument info fetch failed: {e}")
                 
@@ -190,6 +177,7 @@ class BaseAIBot:
         except Exception as e:
             print(f"❌ Connection error: {e}")
             return False
+
 
     async def check_position(self):
         """Fixed position check for testnet unified account"""
@@ -243,28 +231,35 @@ class BaseAIBot:
             
             if wallet.get('retCode') == 0:
                 balance_list = wallet['result']['list']
-                if balance_list:
-                    for coin in balance_list[0]['coin']:
-                        if coin['coin'] == 'USDT':
-                            # Use availableToWithdraw for trading balance
-                            balance_str = coin.get('availableToWithdraw', '0')
-                            if balance_str and balance_str.strip():
-                                self.account_balance = float(balance_str)
-                                return True
+                if balance_list and len(balance_list) > 0:
+                    for coin in balance_list[0].get('coin', []):
+                        if coin.get('coin') == 'USDT':
+                            # Try multiple balance fields (testnet may use different fields)
+                            balance_fields = [
+                                'availableToWithdraw',
+                                'walletBalance', 
+                                'equity',
+                                'availableBalance',
+                                'balance'
+                            ]
                             
+                            for field in balance_fields:
+                                balance_str = coin.get(field, '')
+                                if balance_str and str(balance_str).strip() != '':
+                                    try:
+                                        raw_balance = float(balance_str)
+                                        # Cap balance for testnet (prevent huge positions)
+                                        self.account_balance = min(raw_balance, 10000.0)
+                                        return True
+                                    except (ValueError, TypeError):
+                                        continue
+                                        
             elif wallet.get('retCode') == 401:
                 print('❌ Balance check failed: Invalid API key/secret')
                 return False
-            elif wallet.get('retCode') == 10002:
-                print('❌ Invalid API key format')
-                return False
-            else:
-                print(f"❌ Wallet API error: {wallet.get('retMsg','Unknown')} (Code: {wallet.get('retCode')})")
                 
         except Exception as e:
             print(f"❌ Balance error: {e}")
-            if '401' in str(e):
-                print("   Verify API credentials and permissions")
         
         # Fallback for demo
         self.account_balance = 1000.0
@@ -353,8 +348,16 @@ class BaseAIBot:
         self.account_balance = 1000.0; return True
 
     def calculate_position_size(self, price, stop):
-        if self.account_balance <= 0: return 0.0
+        """Fixed position sizing with limits"""
+        if self.account_balance <= 0: 
+            return 0.0
+            
         risk = self.account_balance * (self.config['risk_per_trade_pct'] / 100.0)
+        
+        # Cap risk for large testnet balances
+        max_risk = 100.0  # Max $100 risk per trade
+        risk = min(risk, max_risk)
+        
         return sized_qty(price, stop, risk, self.symbol_info)
 
     def format_qty(self, q):
@@ -363,31 +366,41 @@ class BaseAIBot:
         return str(int(q)) if self.symbol_info.qty_step >= 1 else f"{q:.{max(0, len(str(self.symbol_info.qty_step).split('.')[-1]))}f}"
 
     async def check_position(self):
+        """Fixed position check"""
         try:
             # Use settleCoin='USDT' for testnet unified account
-            # This is REQUIRED for getting all positions in linear futures
-            p = self.exchange.get_positions(
+            positions = self.exchange.get_positions(
                 category='linear',
-                settleCoin='USDT'  # This is the key fix for testnet
+                symbol=self.symbol,
+                settleCoin='USDT'  # Required for testnet
             )
             
-            if p.get('retCode') == 0:
-                for pos in p['result']['list']:
-                    # Filter for our specific symbol with open position
+            if positions.get('retCode') == 0:
+                pos_list = positions['result']['list']
+                
+                # Find position with actual size
+                for pos in pos_list:
                     if pos.get('symbol') == self.symbol and float(pos.get('size', 0)) > 0:
                         self.position = pos
                         return True
+                        
+                # No position found
                 self.position = None
+                return False
+                
+            elif positions.get('retCode') == 401:
+                print("❌ Position check failed: Authentication error")
+                self.position = None
+                return False
             else:
-                print(f"❌ Position API error: {p.get('retMsg','Unknown')} (Code: {p.get('retCode')})")
+                print(f"❌ Position API error: {positions.get('retMsg')}")
                 self.position = None
+                return False
+                
         except Exception as e:
-            if '401' in str(e):
-                print(f"❌ Auth Failed: Check {'TESTNET' if self.demo_mode else 'LIVE'} API keys")
-            else:
-                print(f"❌ Position check error: {e}")
+            print(f"❌ Position check error: {e}")
             self.position = None
-        return False
+            return False
 
 
     async def get_market_data(self):
@@ -418,38 +431,113 @@ class BaseAIBot:
         return cp
 
     async def execute_trade(self, signal):
-        if time.time() - self.last_trade_time < self.trade_cooldown: return
+        """Fixed execute_trade method"""
+        # Check cooldown
+        if time.time() - self.last_trade_time < self.trade_cooldown:
+            remaining = self.trade_cooldown - (time.time() - self.last_trade_time)
+            print(f"⏰ Trade cooldown: wait {remaining:.0f}s")
+            return
+            
+        # Update balance
         await self.get_account_balance()
-        sl = signal['price'] * (1 - self.config['net_stop_loss']/100.0) if signal['action']=='BUY' else signal['price'] * (1 + self.config['net_stop_loss']/100.0)
-        qty = self.calculate_position_size(signal['price'], sl); fq = self.format_qty(qty)
-        if fq == '0' or float(fq) == 0: return
-        off = 1 - self.config['maker_offset_pct']/100.0 if signal['action']=='BUY' else 1 + self.config['maker_offset_pct']/100.0
-        lpx = round(signal['price'] * off, 6)
+        
+        # Calculate position
+        sl_price = signal['price'] * (1 - self.config['net_stop_loss']/100.0) if signal['action']=='BUY' else signal['price'] * (1 + self.config['net_stop_loss']/100.0)
+        qty = self.calculate_position_size(signal['price'], sl_price)
+        formatted_qty = self.format_qty(qty)
+        
+        if formatted_qty == '0' or float(formatted_qty) == 0:
+            print(f"❌ Position size too small: {qty:.6f}")
+            return
+            
+        # Calculate limit price
+        offset_mult = 1 - self.config['maker_offset_pct']/100.0 if signal['action']=='BUY' else 1 + self.config['maker_offset_pct']/100.0
+        limit_price = round(signal['price'] * offset_mult, 6)
+        
         try:
-            o = self.exchange.place_order(category='linear', symbol=self.symbol, side=('Buy' if signal['action']=='BUY' else 'Sell'), orderType='Limit', qty=fq, price=str(lpx), timeInForce='PostOnly', positionIdx=0, reduceOnly=False)
-            if o.get('retCode') == 0:
-                self.last_trade_time, self.last_signal_price = time.time(), signal['price']
-                tp = lpx * (1 + self.config['net_take_profit']/100.0) if signal['action']=='BUY' else lpx * (1 - self.config['net_take_profit']/100.0)
-                sl = lpx * (1 - self.config['net_stop_loss']/100.0) if signal['action']=='BUY' else lpx * (1 + self.config['net_stop_loss']/100.0)
-                self.current_trade_id, _ = self.logger.log_trade_open(signal['action'], signal['price'], lpx, float(fq), sl, tp, info=f"signal:{signal.get('confidence',0):.2f}")
-                print(f"✅ {self.strategy_name} {signal['action']}: {fq} {self.crypto_name} @ ${lpx:.6f}")
+            order = self.exchange.place_order(
+                category='linear',
+                symbol=self.symbol,
+                side='Buy' if signal['action']=='BUY' else 'Sell',
+                orderType='Limit',
+                qty=formatted_qty,
+                price=str(limit_price),
+                timeInForce='PostOnly',
+                positionIdx=0,
+                reduceOnly=False
+            )
+            
+            if order.get('retCode') == 0:
+                self.last_trade_time = time.time()
+                self.last_signal_price = signal['price']
+                
+                # Calculate TP/SL for logging
+                tp_price = limit_price * (1 + self.config['net_take_profit']/100.0) if signal['action']=='BUY' else limit_price * (1 - self.config['net_take_profit']/100.0)
+                
+                self.current_trade_id, _ = self.logger.log_trade_open(
+                    signal['action'],
+                    signal['price'],
+                    limit_price,
+                    float(formatted_qty),
+                    sl_price,
+                    tp_price,
+                    info=f"signal:{signal.get('confidence',0):.2f}_bal:{self.account_balance:.2f}"
+                )
+                
+                print(f"✅ {self.strategy_name} {signal['action']}: {formatted_qty} {self.crypto_name} @ ${limit_price:.6f}")
+                
+            elif order.get('retCode') == 401:
+                print("❌ Trade failed: Authentication error")
+            else:
+                print(f"❌ Trade rejected: {order.get('retMsg')}")
+                
         except Exception as e:
-            print(f"❌ Trade failed: {e}")
+            print(f"❌ Trade execution failed: {e}")
 
     async def close_position(self, reason):
-        if not self.position or self.price_data.empty: return
-        cp = float(self.price_data['close'].iloc[-1]); side = 'Sell' if self.position.get('side') == 'Buy' else 'Buy'
-        qty = float(self.position.get('size', 0)); 
-        if qty <= 0: return
-        off = 1 + self.config['maker_offset_pct']/100.0 if side=='Sell' else 1 - self.config['maker_offset_pct']/100.0
-        lpx = round(cp * off, 6)
+        """Fixed close position method"""
+        if not self.position or self.price_data.empty:
+            return
+            
+        current_price = float(self.price_data['close'].iloc[-1])
+        side = 'Sell' if self.position.get('side') == 'Buy' else 'Buy'
+        qty = float(self.position.get('size', 0))
+        
+        if qty <= 0:
+            return
+            
+        # Calculate limit price with offset
+        offset_mult = 1 + self.config['maker_offset_pct']/100.0 if side=='Sell' else 1 - self.config['maker_offset_pct']/100.0
+        limit_price = round(current_price * offset_mult, 6)
+        
         try:
-            o = self.exchange.place_order(category='linear', symbol=self.symbol, side=side, orderType='Limit', qty=self.format_qty(qty), price=str(lpx), timeInForce='PostOnly', positionIdx=0, reduceOnly=True)
-            if o.get('retCode') == 0:
+            order = self.exchange.place_order(
+                category='linear',
+                symbol=self.symbol,
+                side=side,
+                orderType='Limit',
+                qty=self.format_qty(qty),
+                price=str(limit_price),
+                timeInForce='PostOnly',
+                positionIdx=0,
+                reduceOnly=True
+            )
+            
+            if order.get('retCode') == 0:
                 if self.current_trade_id:
-                    self.logger.log_trade_close(self.current_trade_id, cp, lpx, reason, self.config['maker_fee_pct'], self.config['maker_fee_pct'])
+                    self.logger.log_trade_close(
+                        self.current_trade_id,
+                        current_price,
+                        limit_price,
+                        reason,
+                        self.config['maker_fee_pct'],
+                        self.config['maker_fee_pct']
+                    )
                     self.current_trade_id = None
-                print(f"✅ Closed: {reason}"); self.position = None
+                    
+                print(f"✅ Closed: {reason}")
+                self.position = None
+                
         except Exception as e:
             print(f"❌ Close failed: {e}")
 

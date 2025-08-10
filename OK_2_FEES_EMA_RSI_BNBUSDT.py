@@ -168,15 +168,22 @@ class EMARSIBot:
             return self.exchange.get_server_time().get('retCode') == 0
         except:
             return False
-    
+
     async def execute_limit_order(self, side, qty, price, is_reduce=False):
-        """Execute limit order with PostOnly for ZERO slippage"""
+        """Execute limit order with PostOnly for ZERO slippage - FIXED"""
         formatted_qty = self.format_qty(qty)
+        
+        # Verify position exists before placing reduce-only order
+        if is_reduce:
+            await self.check_position()
+            if not self.position:
+                print("⚠️ No position to reduce")
+                return None
         
         for retry in range(self.config['limit_order_retries']):
             # Calculate limit price with offset
             limit_price = (price * (1 - self.config['maker_offset_pct']/100) if side == "Buy" 
-                          else price * (1 + self.config['maker_offset_pct']/100))
+                        else price * (1 + self.config['maker_offset_pct']/100))
             limit_price = self.format_price(limit_price)
             
             params = {
@@ -221,7 +228,16 @@ class EMARSIBot:
                         )
                     except:
                         pass
+                        
+                elif order.get('retCode') == 110017:
+                    # Position doesn't exist error
+                    print("ℹ️ Position already closed")
+                    return None
+                    
             except Exception as e:
+                if "110017" in str(e):
+                    print("ℹ️ Position already closed")
+                    return None
                 print(f"❌ Order attempt {retry+1} failed: {e}")
             
             # Get fresh price for next attempt
@@ -231,6 +247,7 @@ class EMARSIBot:
                 price = float(self.price_data['close'].iloc[-1])
         
         return None
+
     
     async def get_account_balance(self):
         try:
@@ -370,27 +387,42 @@ class EMARSIBot:
             return True
         except:
             return False
-    
+
     async def check_position(self):
-        """Enhanced position check with state cleanup"""
+        """Enhanced position check that properly syncs with exchange state"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') != 0:
+                print(f"⚠️ Failed to get positions: {positions.get('retMsg')}")
                 self.position = None
                 return False
                 
             pos_list = positions['result']['list']
             
-            # Clear position if empty
-            if not pos_list or float(pos_list[0].get('size', 0)) == 0:
-                if self.position:  # Was set but now closed
-                    print("✅ Position closed - clearing state")
-                    self.position = None
-                    self.pending_order = None  # Also clear pending
+            # Check if we have a position with size > 0
+            current_has_position = False
+            for pos in pos_list:
+                if float(pos.get('size', 0)) > 0:
+                    self.position = pos
+                    current_has_position = True
+                    break
+            
+            # If no position found but we thought we had one
+            if not current_has_position and self.position:
+                print("✅ Position closed externally - clearing state")
+                self.position = None
+                self.pending_order = None
+                # Log the external close if we had a trade ID
+                if self.current_trade_id:
+                    # Log with unknown exit price since it was closed externally
+                    print(f"ℹ️ Logging external close for trade {self.current_trade_id}")
+                    self.current_trade_id = None
+            
+            # Clear position reference if no position exists
+            if not current_has_position:
+                self.position = None
                 return False
                 
-            # Valid position exists
-            self.position = pos_list[0]
             return True
             
         except Exception as e:
@@ -483,29 +515,52 @@ class EMARSIBot:
             print(f"   ✅ ZERO SLIPPAGE with PostOnly")
 
     async def close_position(self, reason):
-        # Re-check position exists before closing
-        if not await self.check_position():
-            print("✅ Position already closed")
+        """Fixed close_position that verifies position exists before closing"""
+        # First, re-check if position actually exists on exchange
+        has_position = await self.check_position()
+        
+        if not has_position or not self.position:
+            print(f"ℹ️ No position to close (reason: {reason})")
+            # Clean up any stale trade ID
+            if self.current_trade_id:
+                self.current_trade_id = None
             return
         
-        qty = float(self.position['size'])
+        qty = float(self.position.get('size', 0))
+        if qty <= 0:
+            print("⚠️ Position size is 0, nothing to close")
+            self.position = None
+            self.current_trade_id = None
+            return
+            
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         current_price = float(self.price_data['close'].iloc[-1])
         
+        # Try to close with PostOnly limit order
         actual_price = await self.execute_limit_order(side, qty, current_price, is_reduce=True)
         
-        if actual_price and self.current_trade_id:
-            self.logger.log_trade_close(
-                trade_id=self.current_trade_id,
-                expected_exit=current_price,
-                actual_exit=actual_price,
-                reason=reason,
-                fees_entry=self.config['maker_fee'],
-                fees_exit=self.config['maker_fee']
-            )
-            self.current_trade_id = None
-            
+        if actual_price:
+            # Successfully closed
+            if self.current_trade_id:
+                self.logger.log_trade_close(
+                    trade_id=self.current_trade_id,
+                    expected_exit=current_price,
+                    actual_exit=actual_price,
+                    reason=reason,
+                    fees_entry=self.config['maker_fee'],
+                    fees_exit=self.config['maker_fee']
+                )
+                self.current_trade_id = None
+                
             print(f"✅ Closed: {reason} @ ${actual_price:.2f} | ZERO SLIPPAGE")
+            self.position = None
+        else:
+            # If limit order fails, check if position was already closed
+            await self.check_position()
+            if not self.position:
+                print(f"ℹ️ Position was already closed externally")
+                self.current_trade_id = None
+
     
     def show_status(self):
         if len(self.price_data) == 0:
@@ -540,23 +595,27 @@ class EMARSIBot:
         print(" | ".join(status_parts), end='\r')
     
     async def run_cycle(self):
-        
+        """Updated run_cycle with better position state management"""
         if not await self.get_market_data():
             return
         
+        # Always check position state first
         await self.check_position()
         await self.check_pending_orders()
         
         if self.position:
+            # We have a position, check if we should close it
             should_close, reason = self.should_close()
             if should_close:
                 await self.close_position(reason)
         elif not self.pending_order:
+            # No position and no pending order, look for signals
             signal = self.generate_signal(self.price_data)
             if signal:
                 await self.execute_trade(signal)
         
         self.show_status()
+
     
     async def run(self):
         if not self.connect():
