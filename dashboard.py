@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Streamlined Bybit Plotly Dashboard"""
-
-import os
-import sys
-import io
-import time
-import threading
+import os, sys, time, threading, logging
 from datetime import datetime
-import logging
-
-# Silence all non-critical logs before importing dash
 logging.basicConfig(level=logging.CRITICAL)
-logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
-logging.getLogger('dash').setLevel(logging.CRITICAL)
+for logger in ['werkzeug', 'dash']: logging.getLogger(logger).setLevel(logging.CRITICAL)
 
 import dash
 from dash import dcc, html, Input, Output, dash_table, no_update
@@ -25,488 +15,193 @@ import yfinance as yf
 load_dotenv(override=True)
 
 class BybitDataProvider:
-    def __init__(self, demo_mode=True):
-        self.demo_mode = demo_mode
-        prefix = "TESTNET_" if demo_mode else "LIVE_"
-        
-        api_key = os.getenv(f"{prefix}BYBIT_API_KEY", "")
-        api_secret = os.getenv(f"{prefix}BYBIT_API_SECRET", "")
-        
-        if not api_key or not api_secret:
-            raise ValueError(f"Missing {prefix}BYBIT_API_KEY and {prefix}BYBIT_API_SECRET")
-        
-        self.exchange = HTTP(demo=demo_mode, api_key=api_key, api_secret=api_secret)
-        
-        # Test connection
-        server_time = self.exchange.get_server_time()
-        if server_time.get('retCode') != 0:
-            raise ConnectionError("Failed to connect to Bybit")
-        print(f"✅ Connected to {'Testnet' if demo_mode else 'Live'} Bybit")
-        
+    def __init__(self, demo=True):
+        self.demo, prefix = demo, "TESTNET_" if demo else "LIVE_"
+        key, secret = os.getenv(f"{prefix}BYBIT_API_KEY", ""), os.getenv(f"{prefix}BYBIT_API_SECRET", "")
+        if not (key and secret): raise ValueError(f"Missing {prefix} API credentials")
+        self.ex = HTTP(demo=demo, api_key=key, api_secret=secret)
+        if self.ex.get_server_time().get('retCode'): raise ConnectionError("Connection failed")
+        print(f"✅ {'Testnet' if demo else 'Live'} connected")
         self.data = {"positions": [], "account": {}, "last_update": None}
-        self.market_data = {"SPY": {}, "BTC": {}, "last_market_update": None}
-        self.starting_equity = None
-        self.last_reset_date = datetime.now().strftime('%Y-%m-%d')
-        self.last_api_call = 0
+        self.market = {"SPY": {}, "BTC": {}}
+        self.equity0, self.reset_date, self.last_call = None, datetime.now().strftime('%Y-%m-%d'), 0
     
-    def safe_float(self, val, default=0):
+    def sf(self, v, d=0): return float(v) if v not in [None, '', 'null'] else d
+    def rl(self): time.sleep(max(0, 0.2 - (time.time() - self.last_call))); self.last_call = time.time()
+    
+    def fees(self, sym, sz, ap):
         try:
-            return float(val) if val not in [None, '', 'null'] else default
-        except:
-            return default
+            self.rl(); orders = self.ex.get_order_history(category="linear", symbol=sym, orderStatus="Filled", limit=50)
+            if orders.get("retCode"): return sz * ap * 0.0002
+            fees, covered = 0, 0
+            for o in orders.get("result", {}).get("list", [])[:50]:
+                if covered >= sz: break
+                oq, of = self.sf(o.get("cumExecQty")), self.sf(o.get("cumExecFee"))
+                qty = min(oq, sz - covered)
+                if oq > 0: fees += abs(of * qty / oq); covered += qty
+            return fees + (sz - covered) * ap * 0.0002
+        except: return sz * ap * 0.0002
     
-    def _rate_limit(self):
-        """200ms between API calls"""
-        elapsed = time.time() - self.last_api_call
-        if elapsed < 0.2:
-            time.sleep(0.2 - elapsed)
-        self.last_api_call = time.time()
-    
-    def get_position_fees(self, symbol, size, avg_price):
-        """Calculate fees from recent orders"""
+    def fetch_market(self, period='24h'):
         try:
-            self._rate_limit()
-            orders = self.exchange.get_order_history(
-                category="linear", symbol=symbol, orderStatus="Filled", limit=50
-            )
-            
-            if orders.get("retCode") != 0:
-                return size * avg_price * 0.0002  # Fallback
-            
-            total_fees = 0
-            qty_covered = 0
-            
-            for order in orders.get("result", {}).get("list", []):
-                if qty_covered >= size:
-                    break
-                
-                order_qty = self.safe_float(order.get("cumExecQty"))
-                order_fee = self.safe_float(order.get("cumExecFee"))
-                
-                qty_to_count = min(order_qty, size - qty_covered)
-                if order_qty > 0:
-                    total_fees += abs(order_fee * qty_to_count / order_qty)
-                    qty_covered += qty_to_count
-            
-            # Uncovered quantity uses maker fee
-            if qty_covered < size:
-                total_fees += (size - qty_covered) * avg_price * 0.0002
-            
-            return total_fees
-        except:
-            return size * avg_price * 0.0002  # Fallback
-    
-    def fetch_market_data(self, time_period='24h'):
-        """Fetch SPY and BTC market data"""
-        try:
-            # SPY
             spy = yf.Ticker("SPY").history(period='2d', interval='1d')
             if len(spy) >= 2:
-                spy_current = spy['Close'].iloc[-1]
-                spy_previous = spy['Close'].iloc[-2]
-                spy_change_pct = ((spy_current - spy_previous) / spy_previous) * 100
-                self.market_data["SPY"] = {
-                    "price": spy_current,
-                    "change_pct": spy_change_pct,
-                    "time_period": time_period
-                }
-        except:
-            self.market_data["SPY"] = {"price": 0, "change_pct": 0, "time_period": time_period}
-        
+                curr, prev = spy['Close'].iloc[-1], spy['Close'].iloc[-2]
+                self.market["SPY"] = {"price": curr, "change_pct": ((curr - prev) / prev) * 100}
+        except: self.market["SPY"] = {"price": 0, "change_pct": 0}
         try:
-            # BTC
-            self._rate_limit()
-            btc_ticker = self.exchange.get_tickers(category="linear", symbol="BTCUSDT")
-            if btc_ticker.get("retCode") == 0 and btc_ticker.get("result", {}).get("list"):
-                btc_info = btc_ticker["result"]["list"][0]
-                self.market_data["BTC"] = {
-                    "price": self.safe_float(btc_info.get("lastPrice")),
-                    "change_pct": self.safe_float(btc_info.get("price24hPcnt")) * 100,
-                    "time_period": time_period
-                }
-        except:
-            self.market_data["BTC"] = {"price": 0, "change_pct": 0, "time_period": time_period}
-        
-        self.market_data["last_market_update"] = datetime.now().strftime('%H:%M:%S')
+            self.rl(); btc = self.ex.get_tickers(category="linear", symbol="BTCUSDT")
+            if not btc.get("retCode") and btc.get("result", {}).get("list"):
+                b = btc["result"]["list"][0]
+                self.market["BTC"] = {"price": self.sf(b.get("lastPrice")), "change_pct": self.sf(b.get("price24hPcnt")) * 100}
+        except: self.market["BTC"] = {"price": 0, "change_pct": 0}
+        self.market["update"] = datetime.now().strftime('%H:%M:%S')
     
-    def fetch_data(self):
+    def fetch(self):
         try:
-            # Reset daily tracking
-            current_date = datetime.now().strftime('%Y-%m-%d')
-            if self.last_reset_date != current_date:
-                self.starting_equity = None
-                self.last_reset_date = current_date
+            date = datetime.now().strftime('%Y-%m-%d')
+            if self.reset_date != date: self.equity0, self.reset_date = None, date
             
-            # Get positions
-            self._rate_limit()
-            pos_resp = self.exchange.get_positions(category="linear", settleCoin="USDT")
+            self.rl(); pos_resp = self.ex.get_positions(category="linear", settleCoin="USDT")
             positions = []
-            
-            if pos_resp.get("retCode") == 0:
+            if not pos_resp.get("retCode"):
                 for p in pos_resp.get("result", {}).get("list", []):
-                    size = self.safe_float(p.get("size"))
-                    if size == 0:
-                        continue
-                    
-                    symbol = p.get("symbol", "")
-                    side = p.get("side", "")
-                    avg_price = self.safe_float(p.get("avgPrice"))
-                    mark_price = self.safe_float(p.get("markPrice"))
-                    unrealized_pnl = self.safe_float(p.get("unrealisedPnl"))
-                    
-                    # Calculate PnL if missing
-                    if unrealized_pnl == 0:
-                        unrealized_pnl = ((mark_price - avg_price) if side == "Buy" else (avg_price - mark_price)) * size
-                    
-                    fees = self.get_position_fees(symbol, size, avg_price)
-                    net_pnl = unrealized_pnl - fees
-                    position_value = avg_price * size
-                    pnl_pct = (unrealized_pnl / position_value * 100) if position_value > 0 else 0
-                    
-                    # Breakeven calculation
-                    total_fees = fees + (size * mark_price * 0.0002)  # Entry + exit fees
-                    fee_per_unit = total_fees / size if size > 0 else 0
-                    breakeven = avg_price + (fee_per_unit if side == "Buy" else -fee_per_unit)
-                    
+                    if not (sz := self.sf(p.get("size"))): continue
+                    sym, side, ap, mp = p.get("symbol", ""), p.get("side", ""), self.sf(p.get("avgPrice")), self.sf(p.get("markPrice"))
+                    upnl = self.sf(p.get("unrealisedPnl")) or ((mp - ap) if side == "Buy" else (ap - mp)) * sz
+                    fee = self.fees(sym, sz, ap)
+                    val = ap * sz
+                    be_fee = (fee + sz * mp * 0.0002) / sz if sz else 0
                     positions.append({
-                        "symbol": symbol,
-                        "side": side,
-                        "size": size,
-                        "avg_price": avg_price,
-                        "mark_price": mark_price,
-                        "pnl": unrealized_pnl,
-                        "fees": fees,
-                        "net_pnl": net_pnl,
-                        "breakeven": breakeven,
-                        "pnl_pct": pnl_pct,
-                        "value": size * mark_price,
-                        "liq_price": self.safe_float(p.get("liqPrice"))
+                        "symbol": sym, "side": side, "size": sz, "avg_price": ap, "mark_price": mp,
+                        "pnl": upnl, "fees": fee, "net_pnl": upnl - fee,
+                        "breakeven": ap + (be_fee if side == "Buy" else -be_fee),
+                        "pnl_pct": (upnl / val * 100) if val else 0,
+                        "value": sz * mp, "liq_price": self.sf(p.get("liqPrice"))
                     })
             
-            # Get account data
-            self._rate_limit()
-            acc_resp = self.exchange.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-            account = {}
-            current_equity = 0
-            
-            if acc_resp.get("retCode") == 0:
-                for coin in acc_resp.get("result", {}).get("list", [{}])[0].get("coin", []):
-                    if coin.get("coin") == "USDT":
-                        current_equity = self.safe_float(coin.get("equity"))
-                        account = {
-                            "equity": current_equity,
-                            "available": self.safe_float(coin.get("availableToWithdraw")),
-                            "unrealized_pnl": self.safe_float(coin.get("unrealisedPnl"))
-                        }
+            self.rl(); acc = self.ex.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            account, equity = {}, 0
+            if not acc.get("retCode"):
+                for c in acc.get("result", {}).get("list", [{}])[0].get("coin", []):
+                    if c.get("coin") == "USDT":
+                        equity = self.sf(c.get("equity"))
+                        account = {"equity": equity, "available": self.sf(c.get("availableToWithdraw")), "unrealized_pnl": self.sf(c.get("unrealisedPnl"))}
                         break
             
-            # Set starting equity
-            if self.starting_equity is None and current_equity > 0:
-                self.starting_equity = current_equity
-            
-            # Calculate metrics
-            daily_change = current_equity - (self.starting_equity or current_equity)
-            daily_change_pct = (daily_change / (self.starting_equity or 1)) * 100
-            positions_pnl = sum(p["net_pnl"] for p in positions)
-            positions_pct = (positions_pnl / current_equity * 100) if current_equity > 0 else 0
-            
+            if self.equity0 is None and equity: self.equity0 = equity
+            pos_pnl = sum(p["net_pnl"] for p in positions)
             self.data = {
-                "positions": positions,
-                "account": account,
-                "positions_pnl": positions_pnl,
-                "positions_pct": positions_pct,
-                "daily_change": daily_change,
-                "daily_change_pct": daily_change_pct,
-                "starting_equity": self.starting_equity,
-                "position_count": len(positions),
-                "last_update": datetime.now().strftime('%H:%M:%S'),
-                "demo_mode": self.demo_mode
+                "positions": positions, "account": account, "positions_pnl": pos_pnl,
+                "positions_pct": (pos_pnl / equity * 100) if equity else 0,
+                "daily_change": equity - (self.equity0 or equity),
+                "daily_change_pct": ((equity - (self.equity0 or equity)) / (self.equity0 or 1)) * 100,
+                "starting_equity": self.equity0, "position_count": len(positions),
+                "last_update": datetime.now().strftime('%H:%M:%S'), "demo_mode": self.demo
             }
-        except Exception as e:
-            print(f"Data fetch error: {e}")
-            if self.data:
-                self.data["last_update"] = f"ERROR: {datetime.now().strftime('%H:%M:%S')}"
+        except Exception as e: 
+            if self.data: self.data["last_update"] = f"ERROR: {datetime.now().strftime('%H:%M:%S')}"
 
-# Initialize
-provider = BybitDataProvider(demo_mode=True)
+prov = BybitDataProvider(demo=True)
 
-def data_loop():
-    """Background data fetching"""
+def loop():
     while True:
-        try:
-            provider.fetch_data()
-            if not provider.market_data.get("last_market_update"):
-                provider.fetch_market_data('24h')
-            time.sleep(3)
-        except Exception as e:
-            print(f"Data loop error: {e}")
-            time.sleep(10)
+        try: prov.fetch(); prov.fetch_market() if not prov.market.get("update") else None; time.sleep(3)
+        except: time.sleep(10)
 
-threading.Thread(target=data_loop, daemon=True).start()
+threading.Thread(target=loop, daemon=True).start()
 
-# Dash App with aggressive error suppression
-# Monkey patch Dash's callback handling to ignore stale callbacks
-original_prepare_callback = dash.Dash._prepare_callback
+class FilteredStream:
+    def __init__(self, s): self.s, self.suppress = s, False
+    def write(self, d): 
+        if any(x in str(d) for x in ['stats-cards', 'market-comparison', 'positions-table', 'Callback function']): self.suppress = True; return
+        if self.suppress and ('POST /_dash-update' in str(d) or 'GET /' in str(d)): self.suppress = False; return
+        if not self.suppress: self.s.write(d)
+    def flush(self): self.s.flush()
 
-def patched_prepare_callback(self, *args, **kwargs):
-    try:
-        return original_prepare_callback(self, *args, **kwargs)
-    except KeyError as e:
-        if "Callback function not found" in str(e):
-            # Return a dummy function for stale callbacks
-            return lambda *a, **k: no_update
-        raise
-
-dash.Dash._prepare_callback = patched_prepare_callback
+sys.stderr = FilteredStream(sys.__stderr__)
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Bybit Dashboard"
 
+def col(v): return '#00d4aa' if v >= 0 else '#f6465d'
+def card(l, v, c=None): return html.Div([html.Div(l, className="sl"), html.Div(v, className="sv", style={'color': c} if c else {})], className="sc")
+def perf(l, v, p): return html.Div(f"{l}: {v} ({p:+.2f}%)", style={'color': col(p)})
+
 app.layout = html.Div([
-    dcc.Interval(id='interval-component', interval=3000),
-    
-    # Header
+    dcc.Interval(id='int', interval=3000),
     html.Div([
         html.H1("📈 Bybit Dashboard", style={'color': '#fff', 'margin': 0}),
-        html.Div([
-            html.Div(id="mode-badge"),
-            dcc.Dropdown(
-                id='time-dropdown',
-                options=[{'label': p, 'value': p.lower()} for p in ['1H', '4H', '12H', '24H']],
-                value='24h',
-                style={'width': '80px', 'color': '#000'},
-                clearable=False
-            )
-        ], style={'display': 'flex', 'gap': '20px', 'align-items': 'center'})
-    ], style={
-        'background': 'linear-gradient(135deg, #667eea, #764ba2)',
-        'padding': '20px',
-        'border-radius': '10px',
-        'margin-bottom': '20px',
-        'display': 'flex',
-        'justify-content': 'space-between',
-        'align-items': 'center'
-    }),
-    
-    html.Div(id="stats"),
-    html.Div([
-        html.H3("📊 Performance", style={'color': '#fff'}),
-        html.Div(id="performance")
-    ], style={'margin': '20px 0'}),
-    html.Div(id="positions"),
-    html.Div([
-        html.H3("PnL Chart", style={'color': '#fff'}),
-        dcc.Graph(id="chart")
-    ]),
-    html.Div(id="footer")
-], style={
-    'font-family': 'system-ui',
-    'background': '#0a0e27',
-    'color': '#fff',
-    'padding': '20px',
-    'min-height': '100vh'
-})
+        html.Div([html.Div(id="mode"), dcc.Dropdown(id='time', options=[{'label': p, 'value': p.lower()} for p in ['1H', '4H', '12H', '24H']], value='24h', style={'width': '80px', 'color': '#000'}, clearable=False)], 
+                 style={'display': 'flex', 'gap': '20px', 'align-items': 'center'})
+    ], style={'background': 'linear-gradient(135deg, #667eea, #764ba2)', 'padding': '20px', 'border-radius': '10px', 'margin-bottom': '20px', 'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center'}),
+    html.Div(id="stats"), html.Div([html.H3("📊 Performance", style={'color': '#fff'}), html.Div(id="perf")], style={'margin': '20px 0'}),
+    html.Div(id="pos"), html.Div([html.H3("PnL Chart", style={'color': '#fff'}), dcc.Graph(id="chart")]), html.Div(id="foot")
+], style={'font-family': 'system-ui', 'background': '#0a0e27', 'color': '#fff', 'padding': '20px', 'min-height': '100vh'})
 
-@app.callback(
-    [Output('mode-badge', 'children'),
-     Output('stats', 'children'),
-     Output('performance', 'children'),
-     Output('positions', 'children'),
-     Output('chart', 'figure'),
-     Output('footer', 'children')],
-    [Input('interval-component', 'n_intervals'),
-     Input('time-dropdown', 'value')]
-)
-def update_dashboard(n, time_period):
-    data = provider.data
-    provider.fetch_market_data(time_period)
-    market = provider.market_data
-    
-    # Mode badge
-    mode = "TESTNET" if data.get("demo_mode", True) else "LIVE"
-    
-    # Stats
-    account = data.get("account", {})
-    total_fees = sum(p.get("fees", 0) for p in data.get("positions", []))
-    
-    def stat_card(label, value, color=None):
-        return html.Div([
-            html.Div(label, className="stat-label"),
-            html.Div(value, className="stat-value", style={'color': color} if color else {})
-        ], className="stat-card")
-    
-    def get_color(val):
-        return '#00d4aa' if val >= 0 else '#f6465d'
+@app.callback([Output('mode', 'children'), Output('stats', 'children'), Output('perf', 'children'), Output('pos', 'children'), Output('chart', 'figure'), Output('foot', 'children')],
+              [Input('int', 'n_intervals'), Input('time', 'value')])
+def update(n, period):
+    d, m = prov.data, prov.market
+    prov.fetch_market(period)
+    acc, fees = d.get("account", {}), sum(p.get("fees", 0) for p in d.get("positions", []))
     
     stats = html.Div([
-        html.Div([
-            stat_card("Equity", f"${account.get('equity', 0):.2f}"),
-            stat_card("Available", f"${account.get('available', 0):.2f}"),
-            stat_card("Unrealized PnL", f"${account.get('unrealized_pnl', 0):.2f}", 
-                     get_color(account.get('unrealized_pnl', 0)))
-        ], className="stat-row"),
-        html.Div([
-            stat_card("Fees Paid", f"${total_fees:.2f}", '#ffa500'),
-            stat_card("Positions", str(data.get("position_count", 0))),
-            stat_card("Daily Change", f"${data.get('daily_change', 0):+.2f}",
-                     get_color(data.get('daily_change', 0)))
-        ], className="stat-row")
+        html.Div([card("Equity", f"${acc.get('equity', 0):.2f}"), card("Available", f"${acc.get('available', 0):.2f}"), 
+                  card("Unrealized PnL", f"${acc.get('unrealized_pnl', 0):.2f}", col(acc.get('unrealized_pnl', 0)))], className="sr"),
+        html.Div([card("Fees Paid", f"${fees:.2f}", '#ffa500'), card("Positions", str(d.get("position_count", 0))),
+                  card("Daily Change", f"${d.get('daily_change', 0):+.2f}", col(d.get('daily_change', 0)))], className="sr")
     ])
     
-    # Performance
-    spy = market.get("SPY", {})
-    btc = market.get("BTC", {})
+    spy, btc = m.get("SPY", {}), m.get("BTC", {})
+    perf_div = html.Div([
+        html.Div([perf("SPY", f"${spy.get('price', 0):,.2f}", spy.get('change_pct', 0)), perf("BTC", f"${btc.get('price', 0):,.0f}", btc.get('change_pct', 0))], 
+                 style={'display': 'flex', 'justify-content': 'space-around', 'margin-bottom': '10px'}),
+        html.Div([perf("Open Positions", f"${d.get('positions_pnl', 0):+.2f}", d.get('positions_pct', 0)), 
+                  perf("Daily Total", f"${d.get('daily_change', 0):+.2f}", d.get('daily_change_pct', 0))], 
+                 style={'display': 'flex', 'justify-content': 'space-around'})
+    ], className="pc")
     
-    def perf_line(label, value, pct):
-        color = get_color(pct)
-        return html.Div(f"{label}: {value} ({pct:+.2f}%)", style={'color': color})
-    
-    performance = html.Div([
-        html.Div([
-            perf_line("SPY", f"${spy.get('price', 0):,.2f}", spy.get('change_pct', 0)),
-            perf_line("BTC", f"${btc.get('price', 0):,.0f}", btc.get('change_pct', 0))
-        ], style={'display': 'flex', 'justify-content': 'space-around', 'margin-bottom': '10px'}),
-        html.Div([
-            perf_line("Open Positions", f"${data.get('positions_pnl', 0):+.2f}", data.get('positions_pct', 0)),
-            perf_line("Daily Total", f"${data.get('daily_change', 0):+.2f}", data.get('daily_change_pct', 0))
-        ], style={'display': 'flex', 'justify-content': 'space-around'})
-    ], className="performance-card")
-    
-    # Positions table
-    positions = data.get("positions", [])
-    if not positions:
-        table = html.Div("No positions", className="no-positions")
+    pos = d.get("positions", [])
+    if not pos: table = html.Div("No positions", className="np")
     else:
-        table_data = [{
-            'Symbol': p['symbol'],
-            'Side': p['side'],
-            'Size': f"{p['size']:.4f}",
-            'Entry': f"${p['avg_price']:.4f}",
-            'Mark': f"${p['mark_price']:.4f}",
-            'PnL': f"${p['pnl']:.2f}",
-            'Fees': f"${p['fees']:.2f}",
-            'Net PnL': f"${p['net_pnl']:.2f}",
-            'PnL %': f"{p['pnl_pct']:.2f}%",
-            'Break-even': f"${p['breakeven']:.4f}",
-            'Value': f"${p['value']:.2f}"
-        } for p in positions]
-        
-        table_data.append({
-            'Symbol': 'TOTAL', 'Side': '', 'Size': '', 'Entry': '', 'Mark': '', 
-            'PnL': '', 'Fees': '', 'Net PnL': f"${data.get('positions_pnl', 0):.2f}",
-            'PnL %': '', 'Break-even': '', 'Value': ''
-        })
-        
+        td = [{'Symbol': p['symbol'], 'Side': p['side'], 'Size': f"{p['size']:.4f}", 'Entry': f"${p['avg_price']:.4f}", 'Mark': f"${p['mark_price']:.4f}",
+               'PnL': f"${p['pnl']:.2f}", 'Fees': f"${p['fees']:.2f}", 'Net PnL': f"${p['net_pnl']:.2f}", 'PnL %': f"{p['pnl_pct']:.2f}%",
+               'Break-even': f"${p['breakeven']:.4f}", 'Value': f"${p['value']:.2f}"} for p in pos]
+        td.append({'Symbol': 'TOTAL', 'Side': '', 'Size': '', 'Entry': '', 'Mark': '', 'PnL': '', 'Fees': '', 
+                   'Net PnL': f"${d.get('positions_pnl', 0):.2f}", 'PnL %': '', 'Break-even': '', 'Value': ''})
         table = dash_table.DataTable(
-            data=table_data,
-            columns=[{"name": i, "id": i} for i in table_data[0].keys()],
+            data=td, columns=[{"name": i, "id": i} for i in td[0].keys()],
             style_table={'background': '#1a1f3a', 'border-radius': '10px'},
             style_header={'background': '#0f1529', 'color': '#8892b0', 'font-weight': 'bold'},
             style_cell={'background': '#1a1f3a', 'color': '#fff', 'padding': '12px', 'border': '1px solid #2a3050'},
-            style_data_conditional=[
-                {'if': {'row_index': len(positions)}, 'background': '#0f1529', 'font-weight': 'bold'},
-                {'if': {'filter_query': '{Side} = Buy'}, 'color': '#00d4aa'},
-                {'if': {'filter_query': '{Side} = Sell'}, 'color': '#f6465d'}
-            ]
+            style_data_conditional=[{'if': {'row_index': len(pos)}, 'background': '#0f1529', 'font-weight': 'bold'},
+                                   {'if': {'filter_query': '{Side} = Buy'}, 'color': '#00d4aa'},
+                                   {'if': {'filter_query': '{Side} = Sell'}, 'color': '#f6465d'}]
         )
     
-    # Chart
-    if positions:
-        df = pd.DataFrame(positions)
-        colors = [get_color(pnl) for pnl in df['net_pnl']]
-        
-        fig = go.Figure(data=[
-            go.Bar(x=df['symbol'], y=df['net_pnl'], marker_color=colors,
-                  text=[f"${pnl:.2f}" for pnl in df['net_pnl']], textposition='auto')
-        ])
-        
-        fig.update_layout(
-            title="Net PnL by Position",
-            plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a',
-            font=dict(color='#fff'), showlegend=False,
-            xaxis_title="Symbol", yaxis_title="Net PnL ($)"
-        )
-        fig.update_xaxes(gridcolor='#2a3050')
-        fig.update_yaxes(gridcolor='#2a3050', zeroline=True, zerolinecolor='#8892b0')
-    else:
-        fig = go.Figure()
-        fig.update_layout(title="No positions", plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a', font=dict(color='#fff'))
+    if pos:
+        df = pd.DataFrame(pos)
+        fig = go.Figure([go.Bar(x=df['symbol'], y=df['net_pnl'], marker_color=[col(p) for p in df['net_pnl']], 
+                               text=[f"${p:.2f}" for p in df['net_pnl']], textposition='auto')])
+        fig.update_layout(title="Net PnL by Position", plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a', font=dict(color='#fff'), 
+                         showlegend=False, xaxis_title="Symbol", yaxis_title="Net PnL ($)")
+        fig.update_xaxes(gridcolor='#2a3050'); fig.update_yaxes(gridcolor='#2a3050', zeroline=True, zerolinecolor='#8892b0')
+    else: fig = go.Figure(); fig.update_layout(title="No positions", plot_bgcolor='#1a1f3a', paper_bgcolor='#1a1f3a', font=dict(color='#fff'))
     
-    # Footer
-    footer = f"Updated: {data.get('last_update', 'Never')} | Market: {market.get('last_market_update', 'Never')}"
-    if data.get('starting_equity'):
-        footer += f" | Baseline: ${data.get('starting_equity'):.2f}"
-    
-    return mode, stats, performance, table, fig, footer
+    foot = f"Updated: {d.get('last_update', 'Never')} | Market: {m.get('update', 'Never')}" + (f" | Baseline: ${d.get('starting_equity'):.2f}" if d.get('starting_equity') else "")
+    return "TESTNET" if d.get("demo_mode") else "LIVE", stats, perf_div, table, fig, foot
 
-# CSS
-app.index_string = '''
-<!DOCTYPE html>
-<html>
-<head>
-    {%metas%}
-    <title>{%title%}</title>
-    {%favicon%}
-    {%css%}
-    <style>
-        .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 15px; }
-        .stat-card { background: #1a1f3a; padding: 20px; border-radius: 10px; border: 1px solid #2a3050; }
-        .stat-label { color: #8892b0; font-size: 12px; text-transform: uppercase; margin-bottom: 5px; }
-        .stat-value { font-size: 24px; font-weight: bold; }
-        .performance-card { background: #1a1f3a; padding: 20px; border-radius: 10px; border: 1px solid #2a3050; }
-        .no-positions { text-align: center; padding: 40px; background: #1a1f3a; border-radius: 10px; border: 1px solid #2a3050; }
-    </style>
-</head>
-<body>
-    {%app_entry%}
-    <footer>
-        {%config%}
-        {%scripts%}
-        {%renderer%}
-    </footer>
-</body>
-</html>
-'''
+app.index_string = '''<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}<style>
+.sr{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-bottom:15px}
+.sc{background:#1a1f3a;padding:20px;border-radius:10px;border:1px solid #2a3050}
+.sl{color:#8892b0;font-size:12px;text-transform:uppercase;margin-bottom:5px}
+.sv{font-size:24px;font-weight:bold}
+.pc{background:#1a1f3a;padding:20px;border-radius:10px;border:1px solid #2a3050}
+.np{text-align:center;padding:40px;background:#1a1f3a;border-radius:10px;border:1px solid #2a3050}
+</style></head><body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>'''
 
 if __name__ == '__main__':
-    import os
-    import io
-    
-    os.system('clear' if os.name == 'posix' else 'cls')  # Clear terminal
-    
-    print("🚀 Bybit Dashboard → http://localhost:8050")
-    print("\n✅ Dashboard is fully functional!")
-    print("💡 For best experience: Open in incognito/private mode\n")
-    
-    # Aggressive stderr filtering to completely suppress stale callback errors
-    class StaleCallbackFilter:
-        def __init__(self, stream):
-            self.stream = stream
-            self.buffer = []
-            self.suppressing = False
-            
-        def write(self, data):
-            # Check if this is a stale callback error
-            stale_indicators = ['stats-cards', 'market-comparison', 'positions-table', 
-                              'pnl-chart', 'update-time', 'Callback function not found']
-            
-            if any(x in str(data) for x in stale_indicators):
-                self.suppressing = True
-                return  # Don't write anything
-            
-            # If we see the HTTP code after an error, stop suppressing
-            if self.suppressing and ('POST /_dash-update-component' in str(data) or 'GET /' in str(data)):
-                self.suppressing = False
-                return  # Don't write the HTTP line either
-                
-            # Only write if not suppressing
-            if not self.suppressing:
-                self.stream.write(data)
-                
-        def flush(self):
-            self.stream.flush()
-    
-    # Apply the filter
-    sys.stderr = StaleCallbackFilter(sys.__stderr__)
-    
+    os.system('clear' if os.name == 'posix' else 'cls')
+    print("🚀 Bybit Dashboard → http://localhost:8050\n✅ Dashboard is functional!\n💡 Use incognito/private mode\n")
     app.run(host='0.0.0.0', port=8050, debug=False)
